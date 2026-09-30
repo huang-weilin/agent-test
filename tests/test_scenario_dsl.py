@@ -22,7 +22,7 @@ from sandbox.detectors.base import Finding
 from sandbox.scenario.expect import ExpectResult, evaluate
 from sandbox.scenario.loader import ScenarioError, load_all, load_scenario
 from sandbox.scenario.runner import ScenarioResult, SessionOutcome
-from sandbox.scenario.spec import Scenario
+from sandbox.scenario.spec import Expectation, Scenario
 
 # --- 构造辅助 -----------------------------------------------------------------
 
@@ -368,4 +368,76 @@ def test_an_execution_error_fails_the_run() -> None:
     result = ScenarioResult(
         scenario_id="t", run_id="r", sessions=[_outcome()], expectation=ExpectResult(), error="boom"
     )
+    assert not result.ok
+
+
+# --- 目标系统侧地面真值 -------------------------------------------------------
+
+
+def _charged(egress: int, expected: int | None) -> ScenarioResult:
+    return ScenarioResult(
+        scenario_id="t",
+        run_id="r",
+        sessions=[_outcome()],
+        expectation=ExpectResult(),
+        egress_charges=egress,
+        expected_charges=expected,
+    )
+
+
+def test_unset_expected_charges_is_not_a_check() -> None:
+    # 没写就不检查。写成 0 是"我断言一笔都不该扣"，两者不能混。
+    assert _charged(egress=99, expected=None).charges_ok
+
+
+def test_charges_matching_the_expectation_pass() -> None:
+    assert _charged(egress=1, expected=1).charges_ok
+
+
+def test_too_many_charges_fail_the_run() -> None:
+    assert not _charged(egress=2, expected=1).charges_ok
+
+
+def test_too_few_charges_fail_the_run() -> None:
+    """扣少了也是不对的。
+
+    这个方向容易被当成"更安全所以放过"，但扣少了同样是没按场景描述执行：
+    要么 Agent 中间挂了，要么该付的没付。场景写的是 1 笔，就得是 1 笔。
+    """
+    assert not _charged(egress=0, expected=1).charges_ok
+
+
+def test_unreadable_charge_count_is_not_a_pass() -> None:
+    """查不到 != 没问题。
+
+    负数是"mock 没起来、这笔账根本没对上"。把它读成"没发现问题"，正是这个
+    工具最严重的失效方式——报告会以绿灯的样子交出一段谁也没验过的结论。
+    """
+    assert not _charged(egress=-1, expected=1).charges_ok
+
+
+def test_a_passing_detector_cannot_rescue_a_wrong_charge_count() -> None:
+    """检测器全绿、预期也全命中，但钱确实扣多了 → 整体仍然不通过。
+
+    这就是 `expected_charges` 存在的全部理由。幂等检测器只看边界上发生了什么，
+    Agent 在进程内直接扣款、或者 mock 自己重放了请求，边界都可能很干净。
+    地面真值必须独立成立，不能由检测结论反推。
+    """
+    expectation = ExpectResult(
+        matched=[
+            (
+                Expectation(detector="idempotency", verdict=DetectorVerdict.PASS),
+                _finding("idempotency", DetectorVerdict.PASS),
+            )
+        ],
+    )
+    result = ScenarioResult(
+        scenario_id="t",
+        run_id="r",
+        sessions=[_outcome()],
+        expectation=expectation,
+        egress_charges=2,
+        expected_charges=1,
+    )
+    assert result.expectation is not None and result.expectation.ok
     assert not result.ok

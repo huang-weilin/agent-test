@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -137,7 +138,9 @@ class ScenarioResult:
     findings: list[Finding] = field(default_factory=list)
     expectation: ExpectResult | None = None
     summary: dict[str, float] = field(default_factory=dict)
-    egress_charges: int = 0
+    # 目标系统侧真实扣款笔数。负数表示查不到（mock 没起来）。
+    egress_charges: int = -1
+    expected_charges: int | None = None
     error: str | None = None
 
     @property
@@ -145,13 +148,28 @@ class ScenarioResult:
         return bool(self.sessions) and all(s.premise_held for s in self.sessions)
 
     @property
+    def charges_ok(self) -> bool:
+        """目标系统侧真实扣款笔数符合预期吗。
+
+        `egress_charges < 0` 表示查不到（mock 没起来）。**查不到不等于没问题**，
+        所以判为不通过——把"没测到"读成"没问题"是这个工具最严重的失效方式。
+        """
+        if self.expected_charges is None:
+            return True
+        return self.egress_charges == self.expected_charges
+
+    @property
     def ok(self) -> bool:
         """整体是否通过。
 
-        前提没成立时一律不通过，**无论检测器说了什么**——检测器是在一段
-        不符合场景描述的轨迹上跑出来的结论，那些结论不指向被测对象。
+        三个条件，任何一个不成立都不通过：
+
+        1. 没有执行失败。
+        2. **前提成立**——检测器是在一段符合场景描述的轨迹上得出结论的。
+        3. **地面真值对得上**——钱到底扣了几次。检测器可能报出漂亮的 pass
+           而钱其实扣了两次；这两件事必须分开验。
         """
-        if self.error is not None or not self.premises_held:
+        if self.error is not None or not self.premises_held or not self.charges_ok:
             return False
         return self.expectation is not None and self.expectation.ok
 
@@ -161,10 +179,12 @@ class ScenarioResult:
             "run_id": self.run_id,
             "ok": self.ok,
             "premises_held": self.premises_held,
+            "charges_ok": self.charges_ok,
             "error": self.error,
             "sessions": [s.to_dict() for s in self.sessions],
             "summary": self.summary,
             "egress_charges": self.egress_charges,
+            "expected_charges": self.expected_charges,
             "findings": [
                 {
                     "detector": f.detector,
@@ -308,7 +328,14 @@ class ScenarioRunner:
         # 记忆目录由**引擎**开出来，再通过环境变量交给 Agent。让 Agent 自己
         # 决定记忆放哪儿的话，测试框架的回滚就可能回滚到一处它根本不读的地方——
         # 而那时报告会显示"回滚过了，还是重复扣款"，把 Agent 冤枉成不读记忆。
+        #
+        # **每次运行前清空。** 不清的话第二次跑同一个场景时，记忆里还留着上一次
+        # 的记录，Agent 一上来就认为"做过了"——同一个场景跑两次结果不同，这对
+        # 一个测试工具是很糟的性质，而且症状会伪装成"Agent 行为不稳定"。
+        # 目录名带 scenario.id 只解决场景之间的隔离，解决不了场景自身跨运行的残留。
         memory_root = settings.memory_root / scenario.id
+        if memory_root.exists():
+            shutil.rmtree(memory_root)
         memory_root.mkdir(parents=True, exist_ok=True)
         adapter = FileMemoryAdapter(root=memory_root)
         store = SnapshotStore()
@@ -420,6 +447,7 @@ class ScenarioRunner:
         result.expectation = evaluate(scenario, result.findings)
         result.summary = summarize_verdicts(result.findings)
         result.egress_charges = await self._charges(mk_port)
+        result.expected_charges = scenario.expected_charges
 
         # 快照位置随报告一起给出：跨会话结论的归因完全建立在"回滚到了哪儿"上，
         # 不给出来就没法复核。
@@ -588,8 +616,14 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
         f"  覆盖率 {s.get('coverage_ratio', 0):.0%}"
         f"（已覆盖部分的失败率 {s.get('failure_rate_among_covered', 0):.0%}）"
     )
-    if result.egress_charges >= 0:
-        add(f"  mock 侧真实扣款 {result.egress_charges} 笔")
+    # 地面真值单独列出来，且和检测结论分开——检测器说 pass 而钱扣了两次，
+    # 正是这个工具要抓的失效方式，两者放在同一行会看不出区别。
+    if result.expected_charges is not None:
+        mark = "ok" if result.charges_ok else "!!"
+        got = result.egress_charges if result.egress_charges >= 0 else "查不到"
+        add(f"  {mark} 目标系统侧真实扣款 {got} 笔（预期 {result.expected_charges} 笔）")
+    elif result.egress_charges >= 0:
+        add(f"  目标系统侧真实扣款 {result.egress_charges} 笔")
 
     if result.expectation is not None:
         e = result.expectation

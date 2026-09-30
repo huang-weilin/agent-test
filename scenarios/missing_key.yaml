@@ -45,6 +45,8 @@ sessions:
             arguments: {order_id: A1, amount: 599.0}
       - content: 支付完成。
 
+expected_charges: 2
+
 expect:
   - detector: idempotency
     verdict: fail

@@ -42,6 +42,8 @@ sessions:
             arguments: {order_id: A1, amount: 599.0}
       - content: 支付完成。
 
+expected_charges: 2
+
 expect:
   # 这里**刻意不写 reason_code**：目标系统侧根本没实现幂等，检测器走的是
   # "没有幂等保护的写操作被重复执行"那条分支，它不带 reason_code。

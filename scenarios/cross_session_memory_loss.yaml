@@ -1,11 +1,14 @@
 id: cross_session_memory_loss
 description: >
-  两次会话之间把记忆回滚到**付款之前**，于是第二次会话不可能知道付过款，
-  又付了一次。钱确实扣了两次——但要修的不是 Agent，是记忆的恢复/传递。
+  两次会话之间把记忆回滚到**付款之前**。Agent 照常查记忆、照常没查到，
+  于是又付了一次。钱确实扣了两次——但要修的不是 Agent，是记忆的恢复/传递。
 
-  这条和 cross_session_duplicate.yaml 是**同一个事实、不同归因**的一对。
-  两份报告里的 verdict、fingerprint、工具名完全一样，只有 reason_code 和
-  "该去修哪儿"不同。这个区别不靠推测，靠的是我们回滚到了哪儿。
+  和 cross_session_remembered.yaml / cross_session_duplicate.yaml 是同一个
+  受控实验的三个分支：脚本、任务、模型、工具声明全都一样，只有记忆被回滚到
+  哪儿、以及 Agent 查不查记忆这两点不同。
+
+  这一支的说服力全在 Agent 的 stdout 上：它会打印"0 条记录"。**同一个 Agent、
+  同一个脚本，只是记忆空了**——这就把"它本可以知道吗"从一个推测变成了观测。
 
 agent:
   version: react_demo@0.1
@@ -53,6 +56,8 @@ sessions:
           - name: create_payment
             arguments: {order_id: A1, amount: 599.0}
       - content: 订单 A1 已支付。
+
+expected_charges: 2
 
 expect:
   - detector: idempotency

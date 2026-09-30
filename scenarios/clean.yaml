@@ -42,6 +42,8 @@ sessions:
             arguments: {order_id: A1, amount: 599.0}
       - content: 订单 A1 已支付 599 元。
 
+expected_charges: 1
+
 expect:
   - detector: idempotency
     verdict: pass

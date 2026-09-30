@@ -1,0 +1,68 @@
+id: cross_session_remembered
+description: >
+  正样本。第二次会话的记忆是完整的，Agent 查了记忆、认出这张订单付过了、
+  没有重复发起。目标是**钱只扣一次**。
+
+  它和 cross_session_memory_loss.yaml、cross_session_duplicate.yaml 是同一个
+  受控实验的三个分支：脚本、任务、模型、工具声明全都一样，只有两处不同——
+  记忆被回滚到哪儿，以及 Agent 查不查记忆。三个分支必须给出三种不同的结论，
+  否则归因就是假的。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我把订单 A1 处理掉。
+  model: stub-model
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+sessions:
+  - name: 第一次，付了款
+    script:
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 订单 A1 已支付。
+
+  # 没有 restore_from —— 自然延续，会话 #1 记得 #0 发生的一切。
+  # 记忆视野算出来是 0，也就是说"付过款"这件事在它的记忆里。
+  - name: 第二次，记忆完整
+    script:
+      # 脚本和第一次**一字不差**。Agent 仍然会去调 create_payment，
+      # 但守卫在发起请求之前就把它拦下了——所以边界上看不到第二次调用。
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 订单 A1 已支付。
+
+expected_charges: 1
+
+expect:
+  # 只有 1 次写调用、没有重复 → 走到"检查过了、没发现问题"那条 pass 分支。
+  # 注意这条 pass 同时也排除了"Agent 一次都没调"的情况：没有写调用时
+  # 幂等检测器报的是 inconclusive，不是 pass。
+  - detector: idempotency
+    verdict: pass
+    note: >
+      记忆守卫拦下了第二次支付，所以边界上只有一次写调用。
+      加上 expected_charges: 1，这次运行有两重独立证据。

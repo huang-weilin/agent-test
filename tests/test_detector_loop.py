@@ -192,6 +192,26 @@ def test_single_session_cross_session_check_is_inconclusive(make_call) -> None:
     assert cs[0].verdict == DetectorVerdict.INCONCLUSIVE
 
 
+def test_the_inconclusive_note_does_not_overclaim_how_many_sessions_ran(make_call) -> None:
+    """检测器只看得见**留下了调用的**会话，措辞不能说得比观测更多。
+
+    真实触发点是 cross_session_remembered：会话 #0 付了款，会话 #1 的脚本一字
+    不差地又调了一次 create_payment，但记忆守卫在发起请求之前就把它拦下了——
+    边界上于是只留得下会话 #0 的痕迹。那次运行确实涉及两个会话，检测器却看不见
+    第二个，因为它的契约是"只吃 list[CallView]"。
+
+    说成"本次只涉及 1 个会话"是假的，读报告的人会先怀疑场景配错了。判定本身
+    不受影响（同一个 fingerprint 要出现在两个会话里才可比，只有一个会话有调用
+    时本就无可比），要改的只是别让结论替观测说话。
+    """
+    calls = [make_call(1, "get_order", {"order_id": "A1"}, session_ordinal=0)]
+    cs = _of(_detector().run(calls, ExemptionSet()), ".cross_session")
+
+    assert cs[0].verdict == DetectorVerdict.INCONCLUSIVE
+    assert "本次只涉及" not in cs[0].summary
+    assert cs[0].detail["session_ordinals_with_calls"] == [0]
+
+
 def test_cross_session_repeat_of_reads_is_flagged(make_call) -> None:
     """只读调用跨会话反复出现：报 warning，不报 fail。
 

@@ -119,6 +119,14 @@ class Scenario(BaseModel):
     # 允许改成 warn 的唯一理由是场景本身还在探索期。
     unexpected_failures: Literal["fail", "warn", "allow"] = "fail"
 
+    # 目标系统侧**真实扣款的笔数**。None = 不检查。
+    #
+    # 这是地面真值，和检测结论是两回事，所以单独断言。检测器完全可能报出
+    # 漂亮的 pass，而钱其实被扣了两次——那正是这个工具要抓的失效方式。
+    # 反过来，"记忆守卫拦住了重复支付"这种正样本也只能靠它证明：边界上
+    # 什么都看不到，没有扣款流水就没有证据。
+    expected_charges: int | None = None
+
     @field_validator("sessions")
     @classmethod
     def _at_least_one_session(cls, v: list[SessionSpec]) -> list[SessionSpec]:

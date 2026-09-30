@@ -385,12 +385,19 @@ class LoopDetector:
         if len(ordinals) < 2:
             # 没测到就是没测到。折叠成 pass 会让报告显示"跨会话循环：通过"，
             # 而实际上一次跨会话的判定都没做过。
+            #
+            # 措辞只说得出这件事：**有工具调用的**会话只有这么几个。检测器的契
+            # 约是"只吃 list[CallView]"，所以它看不见那些一次调用都没产生的会话。
+            # 说"本次只涉及 N 个会话"是错的——cross_session_remembered 里会话
+            # #1 的记忆守卫在发起请求前就拦下了，边界上看不见它，但那个会话确实
+            # 存在过。判定不受影响（同一个 fingerprint 要出现在两个会话里才可比，
+            # 只有一个会话有调用时本就无可比），错的只是不要让结论说得比观测多。
             return [
                 inconclusive(
                     f"{self.name}.cross_session",
-                    f"本次只涉及 {len(ordinals)} 个会话，无法判定跨会话循环。"
-                    f"跨会话判定需要至少两个会话的数据。",
-                    detail={"ordinals": sorted(ordinals)},
+                    f"产生工具调用的会话只有 {len(ordinals)} 个，无法比对跨会话循环。"
+                    f"跨会话判定需要至少两个会话各留下调用记录。",
+                    detail={"session_ordinals_with_calls": sorted(ordinals)},
                 )
             ]
 
@@ -443,7 +450,7 @@ class LoopDetector:
                         f"已在 {len(ordinals)} 个会话间比对，未发现跨会话重复的只读调用。"
                     ),
                     confidence=Confidence.HIGH,
-                    detail={"ordinals": sorted(ordinals)},
+                    detail={"session_ordinals_with_calls": sorted(ordinals)},
                 )
             )
         return findings

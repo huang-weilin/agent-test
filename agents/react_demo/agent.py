@@ -24,6 +24,7 @@ import sys
 from typing import Any
 
 import httpx
+import memory
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -34,12 +35,34 @@ TOOL_BASE_URL = os.environ.get("SANDBOX_TOOL_BASE_URL", "http://127.0.0.1:4101")
 MODEL = os.environ.get("SANDBOX_AGENT_MODEL", "stub-model")
 TASK = os.environ.get("SANDBOX_AGENT_TASK", "帮我把订单 A1 处理掉。")
 
+# 是否在动手前查一遍记忆。
+#
+# 这个开关在真实 Agent 里不存在，它在这儿是为了让同一个 Agent 能演两个变体：
+# 带记忆守卫的（正确的那个）和不带的（有"没识别出重复操作"这个缺陷的那个）。
+# **两边的脚本和提示词完全相同，只有记忆状态和这个开关不同**——这是把
+# "Agent 该不该为此负责"变成受控实验的全部诀窍。
+CHECK_MEMORY = os.environ.get("DEMO_AGENT_MEMORY_GUARD", "1") != "0"
+
+# 会话开始时加载一次的长效记忆。
+#
+# **刻意不在本次会话内更新它。** 守卫要回答的是"上一次会话里我做过这件事吗"，
+# 那是长效记忆；"这一次对话里我已经调过了吗"靠的是对话上下文，是另一个机制。
+# 混在一起的话就分不清到底是哪个在起作用——而 duplicate.yaml（同一会话里连付
+# 两次）恰恰是靠"守卫不拦会话内重复"才演得出来的。
+_REMEMBERED: set[str] = set()
+
+
+def load_memory() -> None:
+    """把长效记忆读进内存。模拟"Agent 醒来时回忆一下自己做过什么"。"""
+    _REMEMBERED.clear()
+    _REMEMBERED.update(str(e["key"]) for e in memory.load() if e.get("key"))
+
 
 def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {AGENT_API_KEY}"} if AGENT_API_KEY else {}
 
 
-def _call_tool(name: str, payload: dict[str, Any]) -> str:
+def _call_tool_raw(name: str, payload: dict[str, Any]) -> tuple[int, Any]:
     """所有工具调用的唯一出口，指向 SANDBOX_TOOL_BASE_URL。
 
     注意这里没有目标主机白名单、没有重试策略、没有幂等键管理——这些都是 Agent
@@ -53,24 +76,54 @@ def _call_tool(name: str, payload: dict[str, Any]) -> str:
             headers=_auth_headers(),
         )
     try:
-        return json.dumps(resp.json(), ensure_ascii=False)
+        return resp.status_code, resp.json()
     except ValueError:
-        return resp.text
+        return resp.status_code, resp.text
+
+
+def _as_text(status: int, body: Any) -> str:
+    return body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)
 
 
 @tool
 def get_order(order_id: str) -> str:
     """按订单号查询订单详情。只读，无副作用。"""
-    return _call_tool("get_order", {"order_id": order_id})
+    return _as_text(*_call_tool_raw("get_order", {"order_id": order_id}))
 
 
 @tool
 def create_payment(order_id: str, amount: float, idempotency_key: str | None = None) -> str:
     """对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。"""
+    # 这个 Agent 对"重复"的定义是"同一张订单被付了两次"，所以键按订单取。
+    # **键怎么选是 Agent 自己的判断，也正是被测的东西**——按金额取、按时间取、
+    # 干脆不取，都是质量不同的实现，沙箱不替它选。
+    key = f"create_payment:{order_id}"
+
+    if CHECK_MEMORY and key in _REMEMBERED:
+        # 拦在这里，**不发请求**。沙箱边界上于是什么都看不到——这是如实的：
+        # Agent 确实没产生副作用，报告里这次运行就不该出现第二笔扣款。
+        # 反过来说，"边界上没看到第二次调用"本身不能证明 Agent 做了对的事，
+        # 只能证明它没做错的事——检测结论要说清这个区别。
+        return json.dumps(
+            {
+                "ok": True,
+                "skipped": True,
+                "note": f"记忆显示订单 {order_id} 已经支付过，未重复发起。",
+            },
+            ensure_ascii=False,
+        )
+
     payload: dict[str, Any] = {"order_id": order_id, "amount": amount}
     if idempotency_key:
         payload["idempotency_key"] = idempotency_key
-    return _call_tool("create_payment", payload)
+    status, body = _call_tool_raw("create_payment", payload)
+
+    # 只在目标系统确认成功之后才记。写早了会把一次失败的调用误记成"做过了"，
+    # 那比忘记更糟——它会让 Agent 永久跳过一笔从未发生的操作。
+    if status == 200 and isinstance(body, dict):
+        memory.record(key, body.get("charge"))
+
+    return _as_text(status, body)
 
 
 def build_agent():
@@ -102,6 +155,17 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+
+    # 回忆一次。跨会话场景里这一步就是全部的关键：同一个 Agent、同一段脚本，
+    # 只有这里读到的东西不同。
+    load_memory()
+
+    # 把记忆状态打出来。跨会话场景里，这份输出是"它到底记不记得"最直接的证据——
+    # 报告只截 stdout 尾部，所以这几行要在 Agent 自己输出之前。
+    guard = "开" if CHECK_MEMORY else "关"
+    print(f"[memory] {memory.memory_root()}，{len(_REMEMBERED)} 条记录，守卫{guard}")
+    for remembered_key in sorted(_REMEMBERED):
+        print(f"[memory]   做过 {remembered_key}")
 
     agent = build_agent()
     result = agent.invoke(

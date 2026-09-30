@@ -24,6 +24,11 @@
 把记忆做成**操纵面**：主动回滚到某个快照，看它会不会因此重复扣款。回滚到哪儿是
 我们自己决定的，于是"它本可以知道吗"就有了确定答案，不用猜。
 
+**W4：场景 DSL + 三方受控实验已跑通。** 7 个场景全部通过，其中三个跨会话场景构成
+一个受控实验——脚本、任务、模型、工具声明一字不差，只差记忆回滚到哪儿、Agent 查不查
+记忆，三种不同的结论（见下）。演示 Agent 现在有了真实记忆，"记得所以不重复"的正样本
+第一次被证明，而不再只是"归因逻辑看起来对"。
+
 **场景是数据，不是 Python。** 用例写在 `scenarios/*.yaml` 里，跑用例的是引擎：
 
 ```bash
@@ -39,6 +44,7 @@
 | `duplicate` | `idempotency` / fail —— 无幂等保护的写操作被执行两次 |
 | `missing_key` | `idempotency` / fail · `reason_code=missing_key` —— 工具声明了保护，调用侧不带键 |
 | `loop` | `loop.strict` / fail + 带外熔断终止进程 |
+| `cross_session_remembered` | 全绿 —— **正样本**：记忆完整，Agent 认出来了没再付 |
 | `cross_session_duplicate` | `reason_code=cross_session_duplicate` —— 记忆里有，Agent 该认出来 |
 | `cross_session_memory_loss` | `reason_code=cross_session_memory_loss` —— 我们回滚过，**别动 Agent** |
 
@@ -46,14 +52,34 @@
 时一律不通过**，无论检测器说了什么——那些结论是在一段不符合场景描述的轨迹上跑
 出来的，不指向被测对象。`inconclusive` 计入覆盖率但不让运行失败。
 
-162 个单测覆盖网关、代理、记录器、规范化、两个检测器、记忆快照、跨会话归因，
-以及场景 DSL（加载校验 / 预期比对 / 前提判定）。
+还有一条判定独立于检测结论：**`expected_charges`**——目标系统侧到底扣了几笔。检测器
+只看得见网络边界，而钱是在目标系统里扣的；边界干净、检测全绿、钱却扣了两次的情况
+是存在的。两者分开验，对不上就一律不通过。
+
+### 三方受控实验
+
+三个跨会话场景的脚本、任务、模型、工具声明**一字不差**，只差两处：记忆回滚到哪儿、
+Agent 查不查记忆。三个分支必须给出三种不同的结论，否则归因就是假的。
+
+| 场景 | 记忆回滚到 | 查记忆 | 扣款 | 结论 |
+|---|---|---|---|---|
+| `cross_session_remembered` | 不回滚 | 是 | 1 | `pass` |
+| `cross_session_memory_loss` | 付款**之前** | 是 | 2 | `fail` → 修记忆的恢复/传递 |
+| `cross_session_duplicate` | 付款**之后** | **否** | 2 | `fail` → 修 Agent |
+
+**回滚这个动作本身就决定了归因**，不需要事后猜：`memory_loss` 抹掉了付款那段，记忆
+视野是 `-1`，Agent 查了但**不可能知道**；`duplicate` 保住了那段，视野是 `0`，记忆就
+在那儿**它本可以知道**。演示 Agent 的 stdout 会打印读到了几条记录作为直接证据。
+
+185 个单测覆盖网关、代理、记录器、规范化、两个检测器、记忆快照、跨会话归因、
+被测 Agent 的记忆模块，以及场景 DSL（加载校验 / 预期比对 / 前提判定 / 地面真值）。
 
 **已知缺口（不是疏忽，是排期）：**
 
 | 缺口 | 影响 | 为什么先欠着 |
 |---|---|---|
-| 演示 Agent 是无状态的 | 跨会话演示里它必然重复，因为**它真的没有记忆**；`cross_session_duplicate` 证明的是归因逻辑，不是这个 Agent 会犯这个错 | 要跑通"记得所以不重复"的正样本，得给它接一个真实记忆（LangGraph checkpointer 适配器只差一个实现） |
+| 演示 Agent 的记忆不是真实方案 | 它用的是一个文件型 JSONL（`agents/react_demo/memory.py`），不是 LangGraph checkpointer / 向量库 | 沙箱只需要记忆落在 `SANDBOX_AGENT_MEMORY_DIR` 里，不关心是哪种。换真实方案是"写一个适配器"的量级，但它会同时把这条演示从"可复现"推向"依赖模型行为"——先把手上的链路验完 |
+| 记忆守卫是加出来的开关 | `DEMO_AGENT_MEMORY_GUARD` 在真实 Agent 里不存在，是为造对照加的 | 上游被脚本化之后，记忆驱动的决策没法由 LLM 演出来，只能落到 Agent 代码里。这是受控实验的代价，不是想假装它真实 |
 | 场景文件有重复样板 | 每个场景都要重抄一遍工具声明 | 先有 N 份能跑的场景、看清哪些字段真的总是重复，再决定用 YAML 锚点还是 include。现在抽象是猜 |
 | mock 的幂等开关是全局的 | "工具 A 幂等、工具 B 不幂等"表达不出来 | mock 里目前只有一个写工具。加第二个时必须改成按工具控制 |
 | 网关不支持流式响应 | `stream=true` 返回 501 | 流式要边转发边累计 usage，结算正确性另有一套逻辑，不走通不发布 |
@@ -77,7 +103,7 @@
 | `docs/decisions/002-system-of-record.md` | 自研库是唯一真相源；Langfuse 只做可视化；ClickHouse 从 MVP 移除 |
 | `docs/decisions/003-credential-default.md` | 出口默认拒绝、默认不注入真实凭据。默认值反转，别改回去 |
 | `docs/detectors.md` | 检测器的精度目标、豁免机制、**四态结果语义**（`inconclusive` 不可折叠为 `pass`） |
-| `docs/scenarios.md` | 怎么写一个场景；跨会话归因的判据；为什么 `is_write` 没有默认值 |
+| `docs/scenarios.md` | 怎么写一个场景；跨会话归因的判据；`expected_charges`；三方受控实验；为什么 `is_write` 没有默认值 |
 
 ## 环境约束（本机）
 
@@ -121,8 +147,10 @@ src/sandbox/
 ├─ proxy/          工具出口代理：默认拒绝 + 凭据注入
 │   ├─ app.py         /tools/{name} 走白名单；/fetch 走不可信 URL 的默认拒绝
 │   └─ policy.py      allowlist 规则，构造时就拒绝通配符主机
-├─ mock/           Mock 工具服务器（Python 工具规格，非 YAML）
+├─ mock/           Mock 工具服务器
 │   ├─ toolspec.py    工具声明：是否写、幂等参数、是否真的强制幂等
+│   │                 **跑场景时这不是真相源**——声明在场景 YAML 的 `tools:` 里，
+│   │                 这里只是没声明工具表时的内建默认（walking skeleton 走这条）
 │   └─ server.py      扣款账本（记每一笔尝试，不只记最终状态）
 ├─ trace/          轨迹记录
 │   ├─ recorder.py    网关与代理唯一的写入路径；统一 seq 时间线；会话切换
@@ -142,18 +170,26 @@ src/sandbox/
 │   ├─ loader.py      YAML 加载 + 两条跨字段校验（记忆回到未来 / 调未声明的工具）
 │   ├─ expect.py      预期比对：matched / missing / unexpected / uncovered
 │   └─ runner.py      执行器：起服务 → 逐会话跑 Agent → 检测 → 比对 → 报告
+│                     另含 `charges_ok`：独立于检测结论的地面真值
 ├─ session/        Session 序列追踪器             ← 占位，能力已在 trace/ 与 memory/
 └─ api/            面向用户的 FastAPI              ← 占位，未实现
 
 agents/react_demo/    被测 Agent（独立 venv，装不上 sandbox 包）
+├─ agent.py           两个工具 + 记忆守卫；**不 import 任何 sandbox.***
+└─ memory.py          文件型记忆，只用标准库。目录由 SANDBOX_AGENT_MEMORY_DIR 指定
 scenarios/            场景文件（YAML）。加用例 = 加文件，不改代码
 scripts/              跑真实进程的入口脚本
-tests/                162 个单测；tests/corpus/ 是留给精度验收的标注语料目录
+tests/                185 个单测；tests/corpus/ 是留给精度验收的标注语料目录
 docs/decisions/       ADR 001~003
 ```
 
 `trace/` 里的 OTel 归一化层**还没写**——目前只有自研的规范化。
 `session/`/`api/` 是目录占位，不要按它们已存在去排期。
+
+`tests/test_agent_memory.py` 用 `importlib` **按路径**加载 `agents/react_demo/memory.py`，
+不是当包导入——这个别扭的加载方式是故意的。那个文件属于被测 Agent，跑在另一个 venv 里，
+物理上看不到沙箱；测试不为了自己方便去动它的这一性质。哪天有人把它挪进 `src/sandbox/`，
+这些测试会一起红。
 
 **port 由操作系统分配，不是固定的 4100/4101/4102。** 场景执行器自己 bind 一个
 空闲端口再交给 uvicorn，跑完把 `settings.tool_upstream_base_url` 指回原值。固定

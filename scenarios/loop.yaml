@@ -46,6 +46,8 @@ sessions:
       - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
       - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
 
+expected_charges: 0
+
 expect:
   - detector: loop.strict
     verdict: fail
