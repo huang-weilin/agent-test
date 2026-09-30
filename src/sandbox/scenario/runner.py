@@ -48,6 +48,7 @@ import structlog
 import uvicorn
 
 from sandbox.config import REPO_ROOT, settings
+from sandbox.cost import aggregator as cost
 from sandbox.db.engine import init_db
 from sandbox.detectors.base import ExemptionSet, Finding
 from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
@@ -141,6 +142,12 @@ class ScenarioResult:
     # 目标系统侧真实扣款笔数。负数表示查不到（mock 没起来）。
     egress_charges: int = -1
     expected_charges: int | None = None
+    # 成本（需求场景 4）。**不进 `ok` 的判定**——理由和预算一样：花了多少钱是
+    # 事实陈述，不是"这次运行的行为有没有缺陷"的结论。CostRollup 为 None 表示
+    # 没查（执行失败提前返回），不是"花了 0"。
+    cost: cost.CostRollup | None = None
+    session_costs: dict[int, cost.CostRollup] = field(default_factory=dict)
+    budget: list[cost.BudgetStatus] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -185,6 +192,17 @@ class ScenarioResult:
             "summary": self.summary,
             "egress_charges": self.egress_charges,
             "expected_charges": self.expected_charges,
+            "cost": self.cost.to_dict() if self.cost else None,
+            "session_costs": {str(k): v.to_dict() for k, v in sorted(self.session_costs.items())},
+            "budget": [
+                {
+                    "period": b.period,
+                    "spent_usd": round(b.spent_usd, 6),
+                    "ceiling_usd": b.ceiling_usd,
+                    "exceeded": b.exceeded,
+                }
+                for b in self.budget
+            ],
             "findings": [
                 {
                     "detector": f.detector,
@@ -449,6 +467,12 @@ class ScenarioRunner:
         result.egress_charges = await self._charges(mk_port)
         result.expected_charges = scenario.expected_charges
 
+        # 成本。放在 finish 之后——LlmCall 明细是网关结算时才落的，提前查会
+        # 得到一份少了几次调用的账单，而它看起来同样是个正常的数字。
+        result.cost = await cost.for_run(run_id)
+        result.session_costs = await cost.by_session(run_id)
+        result.budget = await cost.budget_status()
+
         # 快照位置随报告一起给出：跨会话结论的归因完全建立在"回滚到了哪儿"上，
         # 不给出来就没法复核。
         refs = await store.list_for_sequence(active.ctx.session_sequence_id)
@@ -561,6 +585,25 @@ def _run_detectors(scenario: Scenario, calls: list[Any]) -> list[Finding]:
     return findings
 
 
+def _tokens(n: int) -> str:
+    """千分位。成本是给人看的，`1234567` 和 `1,234,567` 读起来不是一回事。"""
+    return f"{n:,}"
+
+
+def _money(usd: float) -> str:
+    """按量级选精度，且不留无意义的零。
+
+    固定两位小数会把一个 $0.0001 的额度印成 `$0.00`——看起来像"没设预算"，
+    于是那条 `!! 超预算 339%` 就成了自相矛盾的胡话。而真实预算（$10、$50）
+    又不需要小数点后四位。让金额自己决定印几位。
+    """
+    for decimals in (2, 4, 6):
+        if abs(usd) >= 10 ** -decimals:
+            break
+    text = f"{usd:.{decimals}f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
     """人类可读报告。"""
     lines: list[str] = []
@@ -624,6 +667,52 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
         add(f"  {mark} 目标系统侧真实扣款 {got} 笔（预期 {result.expected_charges} 笔）")
     elif result.egress_charges >= 0:
         add(f"  目标系统侧真实扣款 {result.egress_charges} 笔")
+
+    if result.cost is not None:
+        add("\n--- 成本（陈述，不参与通过与否）---")
+        c = result.cost
+        add(
+            f"  {c.llm_calls} 次 LLM 调用，"
+            f"{_tokens(c.input_tokens)} in / {_tokens(c.output_tokens)} out，"
+            f"${_money(c.cost_usd)}"
+        )
+        if c.is_lower_bound:
+            # 金额不全的时候必须说出来。只印 `$0.0000` 的话，读报告的人会以为
+            # 这次运行不要钱——而实际上是我们没有这个模型的单价，一个字都没算。
+            add(
+                f"  **注意：其中 {c.unpriced_calls} 次调用的模型不在定价表中，"
+                f"成本按 0 计。上面的金额是下界，不是账单。**"
+            )
+        if c.cache_read_tokens or c.cache_write_tokens:
+            add(
+                f"  缓存读 {_tokens(c.cache_read_tokens)}"
+                f" / 写 {_tokens(c.cache_write_tokens)}"
+            )
+        # 只有多会话或者有"没归到会话"的调用时才逐会话列——单会话时上面那行
+        # 就是它自己的数，再列一遍是重复。
+        if len(result.session_costs) > 1 or -1 in result.session_costs:
+            for ordinal, rollup in sorted(result.session_costs.items()):
+                who = "（未归到会话）" if ordinal < 0 else f"会话 #{ordinal}"
+                add(
+                    f"    {who}  {rollup.llm_calls} 次调用  "
+                    f"${_money(rollup.cost_usd)}"
+                )
+
+    if result.budget:
+        add("\n--- 预算 ---")
+        for b in result.budget:
+            period = {"day": "本日", "week": "本周", "month": "本月"}[b.period]
+            mark = "!!" if b.exceeded else "ok"
+            add(
+                f"  {mark} {period}已花 ${_money(b.spent_usd)}"
+                f" / 预算 ${_money(b.ceiling_usd)}（{b.ratio:.0%}）"
+            )
+        if any(b.exceeded for b in result.budget):
+            add(
+                "     超预算**不会**让本次运行算作不通过——那是累计花费，和被测\n"
+                "     Agent 这一次做没做错事无关。两者压成同一个结论的话，一次\n"
+                "     完全干净的运行会因为上个月跑太多而报 fail。"
+            )
 
     if result.expectation is not None:
         e = result.expectation

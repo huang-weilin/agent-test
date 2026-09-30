@@ -82,6 +82,20 @@ class Settings(BaseSettings):
     # 那种情况下请显式关闭，而不是让它默认就敢往任意路径写。
     memory_restore_guard: bool = True
 
+    # --- 长期预算预警（需求场景 4）------------------------------------------
+    # 单次运行的 token 上限是网关的事（`gateway/budget.py`，超了就熔断）。
+    # 这三个是**跨运行的累计预算**：云端常驻 Agent 的成本失控不会发生在一次
+    # 运行里，而是"这个月已经烧掉多少"。
+    #
+    # 单位美元，0 = 不设限（默认）。默认关掉是刻意的：一个没配过的阈值一旦
+    # 生效，就会在别人第一次跑的时候弹出一堆他不认识的告警。
+    #
+    # 超预算**不会让任何运行失败**，只出现在报告的一节里。理由见
+    # `cost/aggregator.py` 的 `budget_status()`。
+    cost_budget_daily_usd: float = 0.0
+    cost_budget_weekly_usd: float = 0.0
+    cost_budget_monthly_usd: float = 0.0
+
     @property
     def is_lite_profile(self) -> bool:
         """Lite profile：SQLite + 进程内 sidecar，无需 Docker。"""
