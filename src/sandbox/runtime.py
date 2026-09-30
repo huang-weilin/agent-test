@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from sandbox.config import settings
 from sandbox.gateway.budget import BudgetRegistry, TokenBudget
@@ -62,6 +63,16 @@ class ActiveRun:
     # 或"明明声明了却被判未声明"——两者都很难往配置上想。
     tools: dict[str, str] = field(default_factory=dict)
 
+    # 本次运行声明的工具 → 参数的 JSON Schema。出口代理拿它核对每一次调用的参数。
+    #
+    # 与上面那张表分开是**有意的**：它们回答两个不同的问题（"这个工具往哪儿发"
+    # 和"它的参数该长什么样"），而且路径表有一条"没传就回落到内置工具表"的便利
+    # 路径——那条路径下没有 schema 表，正好表达"手工起的运行不做参数校验"，
+    # 不需要再编一个"校验已关闭"的开关出来。
+    #
+    # 空表 = 不校验。这与"这个工具没声明参数"是同一件事，没有第二种解释。
+    tool_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     # 带外熔断状态。一旦置位，该运行的所有后续请求都会被网关拒绝——
     # 这是"杀掉"在带内那一侧的表现；带外那一侧是真正终止 Agent 进程。
     killed: bool = False
@@ -96,12 +107,14 @@ class RunRegistry:
         scenario_id: str = "",
         ceiling: int | None = None,
         tools: dict[str, str] | None = None,
+        tool_schemas: dict[str, dict[str, Any]] | None = None,
     ) -> ActiveRun:
         active = ActiveRun(
             ctx=ctx,
             budget=self._budgets.for_run(ctx.run_id, ceiling),
             scenario_id=scenario_id,
             tools=dict(tools or {}),
+            tool_schemas=dict(tool_schemas or {}),
         )
         self._runs[ctx.run_id] = active
         return active

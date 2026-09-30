@@ -77,6 +77,18 @@ def _upstream_url(base: str) -> str:
     return f"{base}/v1/chat/completions"
 
 
+def _default_tool_schemas() -> dict[str, dict[str, Any]]:
+    """未声明参数 schema 时的回落表：内置 mock 的**内置**工具声明。
+
+    与 `_default_tools` 同一套路、同一个理由——手工起一个运行排查时不该被迫先把
+    工具和它们的参数声明抄一遍。两者的来源是同一份 `TOOL_SPECS`，所以手工路径下
+    的参数校验和它列给 Agent 的那份说明永远一致。
+    """
+    from sandbox.mock.toolspec import TOOL_SPECS
+
+    return {name: spec.parameters for name, spec in TOOL_SPECS.items()}
+
+
 def _default_tools() -> dict[str, str]:
     """未声明工具时的回落表：内置 mock 的工具 → 路径。
 
@@ -146,6 +158,20 @@ async def create_run(payload: dict[str, Any]) -> dict[str, Any]:
     """
     from sandbox.trace.recorder import start_run
 
+    # 工具表与参数 schema 表，**要么两张都来自调用方，要么两张都用内置的**。
+    #
+    # 不传则回落到内置工具声明：手工 curl 起一个运行来排查时不该被迫先声明一遍
+    # 工具和它们的参数。但只补其中一张是最坏的一种——同一个工具会被配上一份
+    # 谁也不认识的声明，而报告上完全看不出来。
+    declared_tools = payload.get("tools")
+    declared_schemas = payload.get("tool_schemas")
+    if declared_tools or declared_schemas:
+        tool_table = declared_tools or {}
+        schema_table = declared_schemas or {}
+    else:
+        tool_table = _default_tools()
+        schema_table = _default_tool_schemas()
+
     ctx = await start_run(
         scenario_id=payload.get("scenario_id", "adhoc"),
         agent_version=payload.get("agent_version", "unknown"),
@@ -160,10 +186,9 @@ async def create_run(payload: dict[str, Any]) -> dict[str, Any]:
         ceiling=payload.get("token_ceiling"),
         # 场景声明的工具 → 路径。代理据此判断调用是否越界，
         # 所以必须在开跑前定下来，不能等第一个请求到了再补。
-        #
-        # 不传则回落到内置工具表：手工 curl 起一个运行来排查时不该被迫先声明
-        # 一遍工具。回落值是显式的默认，不是隐式行为——传了就完全以传的为准。
-        tools=payload.get("tools") or _default_tools(),
+        tools=tool_table,
+        # 参数 schema，出口代理拿它核对每一次调用。与上面那张表同源同命，见上。
+        tool_schemas=schema_table,
     )
     return {
         "run_id": ctx.run_id,

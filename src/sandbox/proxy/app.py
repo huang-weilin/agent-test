@@ -14,6 +14,10 @@
 **被拒绝的调用必须带着 `blocked_by_proxy=True` 入库。** 否则它会和 Agent 自身的
 失败混在一起，检测器会把"沙箱拦了它"读成"Agent 行为异常"——那是在冤枉被测对象，
 而且是在一个本该中立的工具里冤枉它。
+
+同一条规矩反过来也管用：**只有"沙箱自己的策略在生效"才配打这个标记。** 参数
+不符合声明（见 `sandbox/toolschema.py`）虽然也是在这里被拦下的，但那是 Agent
+自己送错了参数，真实 API 一样会回 400——它算 Agent 的行为，标记必须是 False。
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from sandbox.config import settings
 from sandbox.db.models import Confidence, DetectorVerdict
 from sandbox.proxy.policy import EgressPolicy, host_of
 from sandbox.runtime import runs
+from sandbox.toolschema import describe, validate_arguments
 from sandbox.trace.recorder import record_finding, record_tool_call
 
 log = structlog.get_logger(__name__)
@@ -164,6 +169,55 @@ async def call_tool(
             latency_ms=int((time.perf_counter() - started) * 1000),
         )
         return _error(403, decision.reason, "egress_denied")
+
+    # 参数核对放在放行之后：**先判它有没有资格出去，再判它带的参数对不对。**
+    # 一次既越界又参数不全的调用，报"越界"就够了——两条 finding 说的是同一件事，
+    # 而读的人会以为是两个问题。而且被拒的调用的参数没有理由再往下传。
+    problems = validate_arguments(
+        active.tool_schemas.get(tool_name) or {}, payload, tool=tool_name
+    )
+    if problems:
+        # **拒绝，而且这是刻意与"声明不拦截"相反的一处。**
+        #
+        # 判据只有一条：真实目标系统会不会拦。`may_run_unattended: false` 真实
+        # 系统不知道，所以拦它就是沙箱自己造的假象；而参数不合法，真实的 API 会
+        # 回 400——放行才是失真。放行的代价还很具体：一笔用非法参数扣出来的钱会
+        # 进 `expected_charges`，于是**地面真值本身被污染了**，而报告上看不出来。
+        #
+        # 与"未声明的工具"同一个处理套路：留痕、报 finding、返回 400。区别在
+        # `blocked_by_proxy` 必须是 False——这一次是 Agent 自己送错了参数，
+        # 不是沙箱的策略在生效。标成 True 会同时骗过两个读报告的地方：循环检测
+        # 会把它的重试当成沙箱制造的（于是不计），审计页会说"不是被测对象的错"。
+        message = describe(problems)
+        await record_tool_call(
+            ctx,
+            tool_name=tool_name,
+            args=payload,
+            status="invalid_args",
+            error=message,
+            blocked_by_proxy=False,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+        await record_finding(
+            ctx,
+            detector="tool_schema",
+            verdict=DetectorVerdict.FAIL,
+            summary=f"Agent 调用 {tool_name!r} 的参数不符合场景声明的 schema，已在边界上拒绝",
+            confidence=Confidence.HIGH,
+            detail={
+                "tool_name": tool_name,
+                "args": payload,
+                "problems": [
+                    {"code": p.code, "path": p.path, "message": p.message} for p in problems
+                ],
+                "schema": active.tool_schemas.get(tool_name),
+            },
+        )
+        return _error(
+            400,
+            f"调用参数不符合声明的 schema：{message}",
+            "invalid_tool_arguments",
+        )
 
     status_code, body = await _forward(target, payload, _passthrough_headers(request))
     latency_ms = int((time.perf_counter() - started) * 1000)

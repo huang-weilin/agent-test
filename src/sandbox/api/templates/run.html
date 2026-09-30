@@ -20,7 +20,7 @@
   <strong>这次运行没有留下结论快照。</strong>
   它是在「结论落库」这个字段存在之前跑的，所以通过与否查不到。
   <div class="note">
-    这里**不显示红叉**：没记录不是失败。替一条没有结论的运行编一个结论出来，
+    这里<strong>不显示红叉</strong>：没记录不是失败。替一条没有结论的运行编一个结论出来，
     会让人去查一个根本不存在的缺陷。
     下面的工具调用审计和记忆快照来自明细表，它们是有的。
   </div>
@@ -87,7 +87,7 @@
     {% else %}
       <div class="v">实际 {{ report.egress_charges }} 笔 / 预期 {{ report.expected_charges }} 笔</div>
       <div class="sub">
-        地面真值，**独立于检测结论**。检测器只看得见网络边界，钱是在目标系统里扣的。
+        地面真值，<strong>独立于检测结论</strong>。检测器只看得见网络边界，钱是在目标系统里扣的。
       </div>
     {% endif %}
   </div>
@@ -117,7 +117,7 @@
           {% if report.clock.speed %}
           <span class="dim">（约 {{ '%.0f' % report.clock.speed }} 倍）</span>
           {% endif %}
-          <div class="note">这台机器上真正花掉的时间。**它和上面那个数不是一回事**，
+          <div class="note">这台机器上真正花掉的时间。<strong>它和上面那个数不是一回事</strong>，
           所以两个都要印。</div>
         </td>
       </tr>
@@ -163,6 +163,49 @@
 </section>
 {% endif %}
 
+{% if report.autonomy %}
+{# 只在有无人值守的会话时出现。普通运行里挂一个空的自主行为面板，读的人分不出
+   "这次没做自主测试"和"这次做了但没测到东西"——和世界时间那一块同一个道理。 #}
+<h2>自主行为</h2>
+<section class="panel">
+  <p>
+    这次运行里有 <strong>无人值守</strong>的会话：它被叫醒时没有人在场，
+    所以这些会话里的写操作是它<strong>自己决定做的</strong>，不是用户让它做的。
+    有人在场时同样的调用叫"响应"——指标完全相同，结论相反。
+  </p>
+  <table class="grid">
+    <tbody>
+      <tr>
+        <th class="nowrap">无人值守的会话</th>
+        <td>{% for o in report.autonomy.autonomous_ordinals %}#{{ o }}{% if not loop.last %}、{% endif %}{% endfor %}</td>
+      </tr>
+      <tr>
+        <th class="nowrap">被授权无人值守运行的工具</th>
+        <td>
+          {% if report.autonomy.unattended_allowlist %}
+            {% for t in report.autonomy.unattended_allowlist %}<code>{{ t }}</code>{% if not loop.last %}、{% endif %}{% endfor %}
+          {% else %}
+            <span class="dim">没有任何工具被授权。无人值守时它做的任何写操作都算越权。</span>
+          {% endif %}
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="note">
+    <strong>声明不拦截。</strong>
+    <code>may_run_unattended: false</code> 是一句事先写下的授权，不是一道闸门——
+    没被授权的工具被调用时<strong>照样会执行</strong>，扣款照样发生。
+    审计要回答的是"它到底干了什么"；要拦，用的是出口代理的放行名单（ADR 003），
+    那是运行前就该做的决定。
+  </p>
+  <p class="note">
+    上面那份授权是<strong>这次运行时</strong>的那一份，随报告一起存的。
+    场景文件事后被编辑不影响这份记录——否则同一份报告明天打开会显示成另一份授权，
+    而"未经授权"这四个字会悄悄换掉对象。
+  </p>
+</section>
+{% endif %}
+
 <h2>会话</h2>
 <table class="grid">
   <thead>
@@ -188,6 +231,9 @@
           {% endif %}
         </div>
         {% endif %}
+        {# 刻意不给它一个"通过/不通过"的徽章：无人值守是一个**范围**，不是一个
+           判定。染成红色会让读的人以为这一条本身出了问题。 #}
+        {% if s.autonomous %}<div class="note"><strong>无人值守</strong>：这一段没有人在场</div>{% endif %}
         {% if s.restored_from %}<div class="note">恢复到 <code>{{ s.restored_from }}</code></div>{% endif %}
         {% if s.timed_out %}<div class="note bad">超时强杀</div>{% endif %}
         {% if s.killed %}<div class="note">已被熔断<div class="dim">{{ s.kill_reason }}</div></div>{% endif %}
@@ -309,7 +355,7 @@
   <button type="submit" class="primary">存为回归用例</button>
 </form>
 <p class="note">
-  存下来的是**这次运行的结论快照**，不是"指向这次运行"。基线必须自足：
+  存下来的是<strong>这次运行的结论快照</strong>，不是"指向这次运行"。基线必须自足：
   这次运行哪天被清理掉，用例仍然比得了。
 </p>
 {% endif %}
@@ -332,6 +378,7 @@
         <code>{{ c.tool_name }}</code>
         {% if c.is_write %}<span class="badge fail">写</span>{% endif %}
         {% if c.blocked_by_proxy %}<span class="badge unknown">代理拦下</span>{% endif %}
+        {% if c.status == 'invalid_args' %}<span class="badge fail">参数不合规</span>{% endif %}
         {% if c.replay_reason %}<div class="note">{{ c.replay_reason }}</div>{% endif %}
       </td>
       <td><code class="args">{{ c.args_short }}</code></td>
@@ -346,9 +393,16 @@
   </tbody>
 </table>
 <p class="note">
-  被出口代理拒绝的调用（<code>blocked_by_proxy</code>）**不计入 Agent 异常行为**——
+  被出口代理拒绝的调用（<code>blocked_by_proxy</code>）<strong>不计入 Agent 异常行为</strong>——
   那是沙箱自己的策略（ADR 003 出口默认拒绝）在生效，不是被测对象做错了事。
   混进检测结论会污染判定。
+</p>
+<p class="note">
+  状态为 <code>invalid_args</code> 的调用是<strong>另一回事</strong>：它的参数不符合场景里
+  声明的 schema，在到达目标系统之前就被拒绝了。<strong>这算 Agent 的行为</strong>
+  ——真实的 API 一样会回 400，所以它进了检测结论（<code>tool_schema</code>）。
+  拦在这里还守住了地面真值：一笔用非法参数扣出来的钱，在报告上和一笔正常的
+  扣款长得一模一样。
 </p>
 {% else %}
 <p class="dim">这次运行没有工具调用。</p>
@@ -434,7 +488,7 @@
     （{{ '%.0f' % (b.ratio * 100) }}%）
   </div>
 {% endfor %}
-<p class="note">超预算**不会**让这次运行算作不通过。见 <code>docs/cost.md</code>。</p>
+<p class="note">超预算<strong>不会</strong>让这次运行算作不通过。见 <code>docs/cost.md</code>。</p>
 {% endif %}
 {% endif %}
 

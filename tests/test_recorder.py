@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sandbox.db.engine import session_scope
 from sandbox.db.models import DetectorFinding, DetectorVerdict, LlmCall, Session, TestRun, ToolCall
 from sandbox.trace.recorder import (
+    CONFIG_SCHEME,
     RunContext,
     finish_run,
     recompute_totals,
@@ -61,11 +62,17 @@ async def test_start_run_records_scheme_and_original_parts(temp_db: str) -> None
     长得一样时又分不出是同一份还是两份。所以两个都存。
 
     口径也必须存：**两个不同口径算出的哈希不相等，不能读成"配置变了"**。
+
+    比的是常量本身，不是写死的字面量。这里问的是"存进去了没有"，而写死的
+    话，每一次口径升版都会让这条与升版无关的测试变红——那种红是噪音，而噪音
+    会训练人无视红色。**口径的值在哪一处被钉住是刻意的**：只有
+    `test_identity.py::test_the_scheme_version_is_recorded` 一处，理由写在
+    那里（升版必须是有人签字同意的动作）。
     """
     ctx = await _make_run()
     async with session_scope() as db_:
         run = await db_.get(TestRun, ctx.run_id)
-        assert run.config_scheme == "3"
+        assert run.config_scheme == CONFIG_SCHEME
         # 存的是**原值**，不是"给值算个哈希"——差异报告要引用它说出改了什么。
         assert json.loads(run.config_parts_json) == {
             "prompt": "v1",

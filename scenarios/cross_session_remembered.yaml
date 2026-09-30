@@ -1,7 +1,7 @@
 id: cross_session_remembered
 description: >
   正样本。第二次会话的记忆是完整的，Agent 查了记忆、认出这张订单付过了、
-  没有重复发起。目标是**钱只扣一次**。
+  没有重复发起。目标是钱只扣一次。
 
   它和 cross_session_memory_loss.yaml、cross_session_duplicate.yaml 是同一个
   受控实验的三个分支：脚本、任务、模型、工具声明全都一样，只有两处不同——

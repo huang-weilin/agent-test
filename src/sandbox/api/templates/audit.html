@@ -72,6 +72,7 @@
         <code>{{ c.tool_name }}</code>
         {% if c.is_write %}<span class="badge fail">写</span>{% endif %}
         {% if c.blocked_by_proxy %}<span class="badge unknown">代理拦下</span>{% endif %}
+        {% if c.status == 'invalid_args' %}<span class="badge fail">参数不合规</span>{% endif %}
         {% if c.replay_reason %}<div class="note">{{ c.replay_reason }}</div>{% endif %}
       </td>
       <td><code class="args">{{ c.args_short }}</code></td>
@@ -91,6 +92,12 @@
   异常行为</strong>——那是沙箱自己的策略（ADR 003 出口默认拒绝）在生效，不是被测对象
   做错了事。混进检测结论会污染判定。但它们值得单独看：一次被拒的调用意味着 Agent
   试图访问白名单之外的东西，那既是它的行为，也是这条策略真的在起作用的证据。
+</p>
+
+<p class="note">
+  状态为 <code>invalid_args</code> 的调用<strong>反过来算</strong>：它<strong>是</strong> Agent 的行为。参数
+  不符合场景里声明的 schema，真实的目标系统一样会回 400，所以它进了检测结论
+  （<code>tool_schema</code>），只是没到达目标系统——试过，但发出去的请求不合法。
 </p>
 {% else %}
 <p class="dim">

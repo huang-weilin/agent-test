@@ -10,15 +10,22 @@
 设计上有一条是刻意从 `mock/toolspec.py` 继承来的：**`is_write` 不给默认值。**
 写属性决定了幂等与重复扣款检测的触发范围，而"忘了声明"如果有个 false 默认值，
 表现就是某些写操作悄悄不设防——从报告上完全看不出来。宁可让场景加载失败。
+
+同一条理由现在也适用于写操作的 `may_run_unattended`：它是"主动行为审计"
+（功能需求 3.6 / 场景 6）里"未经授权"那半句话的全部依据，而漏声明的后果同样
+是安静地不设防。差别只在于**它在什么时候必填**——条件是"场景里真的有一段
+无人值守的会话"，见 `Scenario` 上那条跨字段校验。没有自主会话时它一次都不会
+被读到，逼人写一个不起作用的声明只会制造噪音。
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from sandbox.db.models import DetectorVerdict
+from sandbox.toolschema import check_schema
 
 
 class ToolDecl(BaseModel):
@@ -28,6 +35,14 @@ class ToolDecl(BaseModel):
 
     name: str
     description: str
+    #: 参数的 JSON Schema。**边界上会拿它逐条核对每一次调用**（见 toolschema.py）。
+    #:
+    #: 不只是一份给 Agent 看的说明书：真实目标系统会因为少一个必填字段回 400，
+    #: 而一个不核对参数的 mock 会照单全收、照单扣款——那笔钱在报告上和一笔正常
+    #: 的扣款长得一模一样，`expected_charges` 这个地面真值本身就被污染了。
+    #:
+    #: 空 `{}` = 这个工具没声明参数 = 边界上不校验它。支持的写法是**白名单**，
+    #: 不认识的写法在加载场景时直接报错（不这么做的话，写了也没人执行）。
     parameters: dict[str, Any] = Field(default_factory=dict)
     # 无默认值，必填。见模块 docstring。
     is_write: bool
@@ -37,12 +52,55 @@ class ToolDecl(BaseModel):
     # 声明了参数却忘了实现，正是要测出来的缺陷。
     enforces_idempotency: bool = False
 
+    #: **无人值守时，允许它自己动手吗。有一个自主会话时必填。**
+    #:
+    #: 这是主动行为审计里"未经授权"四个字的唯一依据。边界上看到的每一次调用
+    #: 都只是"它调了个工具"——没有一份事先写下的授权，"越权"就没有对照物，
+    #: 一次半夜自动发出的消息看起来和一次正常响应一模一样。
+    #:
+    #: **不给默认值**，而且两个方向都有害：默认 `True` 的话，忘声明的后果是
+    #: 这个工具的越权行为永远不会被发现；默认 `False` 的话，只想跑个普通场景
+    #: 的人会被迫面对一条假的越权告警，于是这条告警很快就变成"反正它老报"。
+    #:
+    #: "必填"的条件是**场景里真的有一段无人值守的会话**，见 `Scenario` 上的
+    #: 校验器。没有自主会话时这个字段一次都不会被读到，逼人写一个不起作用的
+    #: 声明只会制造噪音；有自主会话而没写，那才是真的漏——审计会静默地失效。
+    #:
+    #: 只读工具不允许声明它：读不改变世界，不是"主动行为"。见下面的校验器。
+    may_run_unattended: bool | None = None
+
     @field_validator("name")
     @classmethod
     def _name_not_empty(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("工具名不能为空")
         return v
+
+    @model_validator(mode="after")
+    def _parameters_are_checkable(self) -> ToolDecl:
+        """声明的参数 schema 必须落在我们**真的会逐条核对**的那个子集里。
+
+        支持的写法见 `sandbox/toolschema.py`。不认识的写法在这里让场景加载失败，
+        而不是在运行时被默默忽略——"作者写了 `oneOf`、边界不认识、于是这一类参数
+        从来没被检查过"是那种报告上完全看不出来的失效。
+
+        **空 `parameters` 是合法的**，它表示"这个工具没声明参数"，边界上也就
+        没什么可对照的。这不是漏检，是如实的：没有声明就没有标准。
+        """
+        check_schema(self.parameters, tool=self.name)
+        return self
+
+    @model_validator(mode="after")
+    def _unattended_only_on_writes(self) -> ToolDecl:
+        if not self.is_write and self.may_run_unattended is not None:
+            # 允许它只会让人以为自己限制了什么。读操作不改变世界，主动行为审计
+            # 根本不看它——一个不起作用的字段比没有这个字段更坏。
+            raise ValueError(
+                f"只读工具 {self.name!r} 不该声明 may_run_unattended："
+                f"读操作不改变世界，不构成主动行为，审计不判定它。"
+                f"要限制它，请用出口代理的放行名单（ADR 003）。"
+            )
+        return self
 
 
 class AgentSpec(BaseModel):
@@ -67,7 +125,7 @@ class AgentSpec(BaseModel):
 class SessionSpec(BaseModel):
     """会话序列里的一段。
 
-    **跨会话测试的全部表达力都在这里**，四个字段分别对应三件事：
+    **跨会话测试的全部表达力都在这里**，字段分别对应四件事：
 
       `restore_from`     —— 把记忆回滚到哪张快照。这是"制造遗忘"的旋钮，
                             也是跨会话归因的依据：回滚到哪儿决定了 Agent
@@ -75,6 +133,7 @@ class SessionSpec(BaseModel):
       `snapshot_before`  —— 会话开始前拍一张，命名以便后续回滚到这个时刻。
       `snapshot_after`   —— 会话结束后拍一张。
       `after_gap_s`      —— 距上一段会话过去了多久（虚拟秒）。见下面。
+      `autonomous`       —— 这一段没人看着（还是有人看着）。见下面。
 
     不写 `restore_from` 就是自然延续，即记得此前一切。
     """
@@ -104,6 +163,20 @@ class SessionSpec(BaseModel):
     #: 会以为 Agent 是在被反复要求做同一件事——那和"它隔了一晚自己又动了一次"
     #: 是完全不同的两种行为，也是最要命的一种误读。
     task: str | None = None
+
+    #: 这一段会话是**无人值守**的自主运行吗。
+    #:
+    #: 默认 False —— 用户在。这是绝大多数会话的形态，也是安全的一侧。
+    #:
+    #: 它决定的不是"测什么"，而是**同样一次写操作该怎么读**：用户在时，Agent
+    #: 动手是**响应**（他要求做的）；无人值守时，同样的调用是**主动行为**
+    #: （它自己决定做的）。同一个 `create_payment`，前者叫正常，后者要拿授权
+    #: 去对照。指标完全相同、结论相反，所以只能由场景显式说出来，不能猜。
+    #:
+    #: 典型写法是配合 `after_gap_s` 造出"夜里没人，它被定时器叫醒"的那一段。
+    #: 反过来也成立：一个声明了自主却不带间隔的会话是在测"没人说话时它做什么"，
+    #: 那是另一件事，同样合法。
+    autonomous: bool = False
 
     @field_validator("after_gap_s")
     @classmethod
@@ -171,6 +244,30 @@ class Scenario(BaseModel):
             raise ValueError(f"工具名重复：{sorted(dupes)}")
         return v
 
+    @model_validator(mode="after")
+    def _autonomous_needs_authorization(self) -> Scenario:
+        """有无人值守的会话时，每个写操作都必须交代自己许不许无人值守运行。
+
+        **这是一条跨字段的校验，单看任何一个工具都发现不了。** 它是主动行为
+        审计的**防呆**：审计靠 `may_run_unattended` 区分"它自己动手"和"它被允许
+        自己动手"，而漏声明的表现是某个工具的越权行为**永远不会被报出来**——
+        报告上一切正常。宁可让场景加载失败。
+
+        没有自主会话时不做这个要求：那个字段一次都不会被读到，逼人写一个不起作用
+        的声明只会制造噪音，而噪音会让真正的告警被忽略。
+        """
+        if not any(s.autonomous for s in self.sessions):
+            return self
+        missing = [t.name for t in self.tools if t.is_write and t.may_run_unattended is None]
+        if missing:
+            raise ValueError(
+                f"场景里有无人值守的会话，但写操作 {sorted(missing)} 没有声明 "
+                f"may_run_unattended（true / false）。\n"
+                f"它回答的是「Agent 半夜自己调它，算不算越权」。不声明的话，"
+                f"这些工具的越权行为不会被主动行为审计发现，而报告上完全看不出来。"
+            )
+        return self
+
     def tool_index(self) -> dict[str, ToolDecl]:
         return {t.name: t for t in self.tools}
 
@@ -216,3 +313,19 @@ class Scenario(BaseModel):
         都是假的——所以它进前提判定，见 `runner.SessionOutcome.premise_held`。
         """
         return sum(s.after_gap_s for s in self.sessions[: index + 1])
+
+    # --- 主动行为审计（功能需求 3.6 / 场景 6）-------------------------------
+
+    def autonomous_ordinals(self) -> set[int]:
+        """被声明为无人值守的会话序号。
+
+        **声明而不是观测**，所以它来自场景，而检测器只吃 `list[CallView]`。
+        这个区别是必须的：一个自主会话如果**一次调用都没产生**，边界上就没有
+        它的任何痕迹，只吃调用的检测器看不见它存在过。而"夜里它什么都没做"
+        和"夜里它做了但都是被允许的"是两件事，报告必须分得开——前者是没测到。
+        """
+        return {i for i, s in enumerate(self.sessions) if s.autonomous}
+
+    def unattended_allowlist(self) -> set[str]:
+        """被授权在无人值守时运行的工具。审计的另一半对照物。"""
+        return {t.name for t in self.tools if t.may_run_unattended}

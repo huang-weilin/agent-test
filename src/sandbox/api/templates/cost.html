@@ -21,7 +21,7 @@
 {% endfor %}
 </section>
 <p class="note">
-  超预算**不会**让任何运行算作不通过——它是对累计花费的陈述，和被测 Agent
+  超预算<strong>不会</strong>让任何运行算作不通过——它是对累计花费的陈述，和被测 Agent
   这次做没做错事没有关系。见 <code>docs/cost.md</code>。
 </p>
 {% else %}
@@ -30,7 +30,7 @@
   在 <code>.env</code> 里配 <code>SANDBOX_COST_BUDGET_DAILY_USD</code> /
   <code>_WEEKLY_USD</code> / <code>_MONTHLY_USD</code> 开启。
   <div class="note">
-    **默认关掉是刻意的。** 一个没配过的阈值一旦生效，就会在别人第一次跑的
+    <strong>默认关掉是刻意的。</strong> 一个没配过的阈值一旦生效，就会在别人第一次跑的
     时候弹出一堆他不认识的告警——而告警一多就会被整体忽略，包括真正要紧的那个。
   </div>
 </div>

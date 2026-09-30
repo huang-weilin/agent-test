@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient, MockTransport, Response
@@ -52,12 +54,30 @@ async def _register(gw_client: AsyncClient, **overrides) -> dict:
     return resp.json()
 
 
+#: 与 clean.yaml 里 create_payment 的声明同一份形状——夹具照着真实场景写，
+#: 不自己编一个宽松的 schema，否则测出来的是"我们编的那份能过"。
+_PAYMENT_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "order_id": {"type": "string"},
+        "amount": {"type": "number"},
+        "idempotency_key": {"type": "string"},
+    },
+    "required": ["order_id", "amount"],
+}
+
+#: 一份"声明了 create_payment"的运行。**两张表成对出现**：网关不接受只给其中
+#: 一张（见 `create_run` 里的回落规则），配对是刻意的。
+_PAYMENT_RUN: dict = {
+    "tools": {"create_payment": "/tools/create_payment"},
+    "tool_schemas": {"create_payment": _PAYMENT_SCHEMA},
+}
+
+
 def _mock_backend(charges: list[dict]) -> MockTransport:
     """假的后端工具服务，记录扣款流水。"""
 
     def handler(request):
-        import json
-
         body = json.loads(request.content)
         if request.url.path.endswith("create_payment"):
             charge = {
@@ -169,6 +189,142 @@ async def test_undeclared_tool_is_a_finding_not_an_egress_block(
     assert len(findings) == 1
     assert findings[0].detector == "tool_scope"
     assert findings[0].verdict == "fail"
+
+
+async def test_a_call_that_matches_the_declared_schema_is_forwarded(
+    gw_client, px_client
+) -> None:
+    """先钉住"不该拦的别拦"。参数校验最容易的翻车方式是误报。"""
+    created = await _register(gw_client, **_PAYMENT_RUN)
+    charges: list[dict] = []
+    proxy_app.set_transport(_mock_backend(charges))
+
+    resp = await px_client.post(
+        "/tools/create_payment",
+        json={"order_id": "A1", "amount": 599, "idempotency_key": "idem-1"},
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(charges) == 1
+
+
+async def test_arguments_that_do_not_match_the_declaration_never_reach_the_target(
+    gw_client, px_client, db
+) -> None:
+    """**这条测试守的是地面真值。**
+
+    `expected_charges` 数的是"目标系统上扣了几笔"。一笔用非法参数扣出来的钱，
+    在报告上和一笔正常的扣款一模一样——检测器看不见它，钱却真的动了。所以
+    非法参数必须在**到达目标系统之前**被拦下，而且拦下这件事要留痕。
+    """
+    created = await _register(gw_client, **_PAYMENT_RUN)
+    charges: list[dict] = []
+    proxy_app.set_transport(_mock_backend(charges))
+
+    resp = await px_client.post(
+        "/tools/create_payment",
+        json={"order_id": "A1", "amount": "599"},
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_tool_arguments"
+    assert charges == [], "非法参数的调用到达了目标系统，还扣了款"
+
+    call = (await db.execute(select(ToolCall))).scalar_one()
+    assert call.status == "invalid_args"
+    assert "amount" in (call.error or "")
+    # **不是出口拦截。** 这是 Agent 自己送错了参数，真实 API 一样会回 400。
+    # 标成 True 会同时骗过两处：循环检测会把它的重试当成沙箱制造的（于是不计），
+    # 审计页会说"不是被测对象的错"。
+    assert call.blocked_by_proxy is False
+
+    findings = (await db.execute(select(DetectorFinding))).scalars().all()
+    assert [f.detector for f in findings] == ["tool_schema"]
+    assert findings[0].verdict == "fail"
+
+
+async def test_a_missing_required_argument_is_rejected_too(gw_client, px_client) -> None:
+    created = await _register(gw_client, **_PAYMENT_RUN)
+    charges: list[dict] = []
+    proxy_app.set_transport(_mock_backend(charges))
+
+    resp = await px_client.post(
+        "/tools/create_payment",
+        json={"order_id": "A1"},
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+    assert resp.status_code == 400
+    assert charges == []
+
+
+async def test_the_declaration_and_the_call_are_both_in_the_record(
+    gw_client, px_client, db
+) -> None:
+    """"不合规"这三个字没有第二份证据就没法复核。
+
+    读报告的人手里要有当时那份声明，才能判断到底哪里不合规——只印结论的话，
+    他只能选择信或不信，而这份报告的意义正是让他不必信。
+    """
+    created = await _register(gw_client, **_PAYMENT_RUN)
+    proxy_app.set_transport(_mock_backend([]))
+
+    await px_client.post(
+        "/tools/create_payment",
+        json={"order_id": "A1", "amount": 599, "currency": "CNY"},
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+
+    finding = (await db.execute(select(DetectorFinding))).scalar_one()
+    detail = json.loads(finding.detail_json or "{}")
+    assert detail["args"] == {"order_id": "A1", "amount": 599, "currency": "CNY"}
+    assert detail["schema"] == _PAYMENT_SCHEMA
+    assert detail["problems"][0]["code"] == "unexpected_argument"
+
+
+async def test_a_run_without_declared_schemas_does_not_check_arguments(
+    gw_client, px_client
+) -> None:
+    """没声明参数 = 没什么可对照的，**放行**。
+
+    这是手工起一个运行排查时的形态（只声明工具、不声明参数）。把它拦下来等于
+    让便利路径不可用；而"没有声明"和"声明了但不合规"是两件事，混起来会让
+    `tool_schema` 这条 finding 变成噪音。
+    """
+    created = await _register(gw_client, tools={"create_payment": "/tools/create_payment"})
+    charges: list[dict] = []
+    proxy_app.set_transport(_mock_backend(charges))
+
+    resp = await px_client.post(
+        "/tools/create_payment",
+        json={"whatever": "goes"},
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(charges) == 1
+
+
+async def test_the_egress_check_still_comes_first(gw_client, px_client, db) -> None:
+    """一次既越界又参数不全的调用，报"越界"就够了。
+
+    两条 finding 说的是同一件事，而读的人会以为是两个问题。而且被出口策略拒掉的
+    调用，它的参数没有理由再被送去任何地方核对。
+    """
+    created = await _register(gw_client, **_PAYMENT_RUN)
+    proxy_app.set_policy(EgressPolicy(rules=[], default="deny"))
+
+    resp = await px_client.post(
+        "/tools/create_payment",
+        json={"order_id": "A1"},
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["error"]["type"] == "egress_denied"
+    call = (await db.execute(select(ToolCall))).scalar_one()
+    assert call.blocked_by_proxy is True
+    findings = (await db.execute(select(DetectorFinding))).scalars().all()
+    assert findings == [], "被出口策略拒掉的调用不该再报一条参数问题"
 
 
 async def test_two_runs_in_one_process_do_not_share_their_tool_table(

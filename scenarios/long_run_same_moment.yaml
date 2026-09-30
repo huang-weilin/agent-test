@@ -1,6 +1,6 @@
 id: long_run_same_moment
 description: >
-  `long_run_overnight` 的对照组。脚本、任务、工具、期望**一字不差**，唯一的
+  `long_run_overnight` 的对照组。脚本、任务、工具、期望一字不差，唯一的
   差别是第二段会话的 `after_gap_s` 从 30 小时变成 0——两段会话发生在同一刻。
 
   于是结论必须不同：B2 始终没到期，Agent 始终没付，扣款 0 笔。

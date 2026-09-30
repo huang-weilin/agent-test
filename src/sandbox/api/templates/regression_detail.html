@@ -60,7 +60,7 @@
     </div>
     <div class="sub">
       {% if comparison.counts %}
-        两次运行的配置一致，所以下面的差异是**行为差异**。
+        两次运行的配置一致，所以下面的差异是<strong>行为差异</strong>。
       {% elif comparison.comparability == kinds.TEST_CHANGED %}
         改的是测试本身，两次比的是两套测试。
       {% elif comparison.comparability == kinds.CONFIG_CHANGED %}
@@ -100,7 +100,7 @@
       {% if comparison.counts %}
         每一处都是行为差异。
       {% else %}
-        列出来供参考——**但它们不构成结论**。
+        列出来供参考——<strong>但它们不构成结论</strong>。
       {% endif %}
     </div>
   </div>

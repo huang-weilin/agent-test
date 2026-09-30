@@ -51,6 +51,7 @@ from sandbox.clock import clock
 from sandbox.config import REPO_ROOT, settings
 from sandbox.cost import aggregator as cost
 from sandbox.db.engine import init_db
+from sandbox.detectors.autonomy import AutonomyDetector
 from sandbox.detectors.base import ExemptionSet, Finding
 from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
 from sandbox.detectors.loop import LoopDetector
@@ -111,6 +112,14 @@ class SessionOutcome:
     #: 时钟实际观察值。与上一项不等 = 加速器没按场景说的做。
     observed_offset_s: int = 0
 
+    # --- 主动行为审计（功能需求 3.6 / 场景 6）-------------------------------
+    #: 这一段会话是无人值守的吗。
+    #:
+    #: 报告里要显示它。同一个 `create_payment`，旁边写着"无人值守"和没写，读出来
+    #: 的行为完全不同——前者是它自己决定的，后者是用户要求它做的。少了这个标记，
+    #: 一份长时运行的报告会把"夜里它自己动的手"读成"用户让它做的事"。
+    autonomous: bool = False
+
     @property
     def clock_matched(self) -> bool:
         """世界真的按场景声明的那样往前走了吗。
@@ -165,6 +174,7 @@ class SessionOutcome:
             "declared_offset_s": self.declared_offset_s,
             "observed_offset_s": self.observed_offset_s,
             "clock_matched": self.clock_matched,
+            "autonomous": self.autonomous,
         }
 
 
@@ -202,6 +212,32 @@ class ClockReport:
 
 
 @dataclass
+class AutonomyReport:
+    """这次运行里"谁被允许自己动手"是什么样。
+
+    **它是报告的一部分，不是渲染时现查场景。** 场景文件事后会被编辑（这正是
+    `config_parts_json` 存原值的理由），渲染历史报告时去读今天的场景，会让一份
+    上周的报告显示成今天的授权——"未经授权"那半句话于是悄悄换了对象，而报告
+    读起来完全正常。
+
+    `None` 表示这次运行没有无人值守的会话，整块不该出现。和 `ClockReport` 一个
+    道理：普通运行里挂一个空的自主行为面板，读的人分不出"这次没做自主测试"和
+    "这次做了但没测到东西"。
+    """
+
+    #: 场景声明为无人值守的会话序号。
+    autonomous_ordinals: list[int]
+    #: 被授权在无人值守时运行的工具。**没有它，"未经授权"这句话就没法复核**。
+    unattended_allowlist: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "autonomous_ordinals": self.autonomous_ordinals,
+            "unattended_allowlist": self.unattended_allowlist,
+        }
+
+
+@dataclass
 class ScenarioResult:
     scenario_id: str
     run_id: str
@@ -220,6 +256,8 @@ class ScenarioResult:
     budget: list[cost.BudgetStatus] = field(default_factory=list)
     # 长时运行的世界时间。None = 没跑到那一步，或者这不是一次长时运行。
     clock: ClockReport | None = None
+    # 主动行为审计的授权对照。None = 这次运行没有无人值守的会话。
+    autonomy: AutonomyReport | None = None
     error: str | None = None
 
     @property
@@ -265,6 +303,7 @@ class ScenarioResult:
             "egress_charges": self.egress_charges,
             "expected_charges": self.expected_charges,
             "clock": self.clock.to_dict() if self.clock else None,
+            "autonomy": self.autonomy.to_dict() if self.autonomy else None,
             "cost": self.cost.to_dict() if self.cost else None,
             "session_costs": {str(k): v.to_dict() for k, v in sorted(self.session_costs.items())},
             "budget": [
@@ -440,6 +479,13 @@ class ScenarioRunner:
                     real_elapsed_s=(clock.real_now() - real_started).total_seconds(),
                 )
                 clock.reset()
+            # 授权对照随报告一起落库。**不是渲染时现查场景**——场景文件事后会被
+            # 编辑，而"未经授权"必须指的是这次运行当时的那份授权。
+            if scenario.autonomous_ordinals():
+                result.autonomy = AutonomyReport(
+                    autonomous_ordinals=sorted(scenario.autonomous_ordinals()),
+                    unattended_allowlist=sorted(scenario.unattended_allowlist()),
+                )
             if not self.keep_servers:
                 for server, _ in servers:
                     server.should_exit = True
@@ -504,6 +550,10 @@ class ScenarioRunner:
                     "declared_writes": sorted(scenario.declared_writes()),
                     "idempotency_key_params": scenario.idempotency_params(),
                     "tools": {t.name: f"/tools/{t.name}" for t in scenario.tools},
+                    # 参数 schema 交给边界。**这是它唯一的去处**——在此之前
+                    # 场景里那份声明只被列给 Agent 看过，从来没人拿它核对过
+                    # 一次真实调用，于是沙箱里的目标系统比真实的那一个宽松。
+                    "tool_schemas": {t.name: t.parameters for t in scenario.tools},
                 },
             )
             resp.raise_for_status()
@@ -600,6 +650,7 @@ class ScenarioRunner:
                         after_gap_s=spec.after_gap_s,
                         declared_offset_s=declared_offset,
                         observed_offset_s=observed_offset,
+                        autonomous=spec.autonomous,
                     )
                 )
 
@@ -738,6 +789,9 @@ def _run_detectors(scenario: Scenario, calls: list[Any]) -> list[Finding]:
     """跑全套检测器。工具事实来自场景声明，是写/读属性的单一来源。
 
     顺序固定：输出顺序稳定，比对预期时不会因为字典序漂移而时红时绿。
+
+    主动行为审计的两份**声明**（授权名单、自主会话）也在这里进检测器——它和
+    幂等检测器拿 `ToolFacts` 是同一个套路：声明走构造参数，观测走 `list[CallView]`。
     """
     facts = {
         t.name: ToolFacts(t.name, t.is_write, t.enforces_idempotency) for t in scenario.tools
@@ -745,6 +799,12 @@ def _run_detectors(scenario: Scenario, calls: list[Any]) -> list[Finding]:
     findings: list[Finding] = []
     findings.extend(IdempotencyDetector(facts).run(calls, ExemptionSet()))
     findings.extend(LoopDetector().run(calls, ExemptionSet()))
+    findings.extend(
+        AutonomyDetector(
+            allowlist=frozenset(scenario.unattended_allowlist()),
+            autonomous_ordinals=frozenset(scenario.autonomous_ordinals()),
+        ).run(calls, ExemptionSet())
+    )
     return findings
 
 
@@ -768,8 +828,11 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
         restored = f" ← 恢复到 {s.restored_from}" if s.restored_from else ""
         timeout = " [超时强杀]" if s.timed_out else ""
         killed = " [已被熔断]" if s.killed else ""
+        # 无人值守单独标出来。少了它，一份长时运行的报告会把"夜里它自己动的手"
+        # 读成"用户让它做的事"——同一串调用，两种完全不同的行为。
+        unattended = " [无人值守]" if s.autonomous else ""
         add(
-            f"  {mark} #{s.ordinal} {s.name}{restored}{timeout}{killed}"
+            f"  {mark} #{s.ordinal} {s.name}{restored}{timeout}{killed}{unattended}"
             f"  退出码 {s.exit_code}  {s.elapsed_s:.1f}s"
         )
         add(
@@ -804,6 +867,20 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
         add(
             "  **这段时间不是等出来的**：引擎把目标系统的时钟往前拨，世界该变的都\n"
             "     变了，而被测 Agent 在两次会话之间本来就不在跑。"
+        )
+
+    if result.autonomy is not None:
+        # 授权对照表随报告一起给出。"未经授权"这四个字没有它就没法复核：读的人
+        # 得自己知道当时允许了什么，才能判断哪一条算越权。
+        a = result.autonomy
+        allowed = "、".join(a.unattended_allowlist) or "（无）"
+        sessions = "、".join(f"#{o}" for o in a.autonomous_ordinals)
+        add("\n--- 自主行为（需求场景 6）---")
+        add(f"  无人值守的会话：{sessions}")
+        add(f"  被授权无人值守运行的工具：{allowed}")
+        add(
+            "  **声明不拦截**：没被授权的工具被调用时照样会执行，扣款照样发生。\n"
+            "     审计要回答的是「它到底干了什么」；要拦，用的是出口代理的放行名单。"
         )
 
     add("\n--- 检测结论 ---")

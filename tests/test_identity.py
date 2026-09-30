@@ -241,5 +241,10 @@ def test_the_scheme_version_is_recorded() -> None:
 
     少了它，一次旧运行（按旧口径算的哈希）和一次新运行放一起比，会得出
     "配置变了"——那是一句基于不可比数据的结论。见 models.py 里那一列的注释。
+
+    **这是全项目唯一把口径的值写死的地方**，写死是故意的：升版必须是一个有人
+    签字同意的动作，而不是一次顺手的重构。3 → 4 的场合是 `ToolDecl` 多了
+    `may_run_unattended`、`SessionSpec` 多了 `autonomous`——两节的内容都变了，
+    于是没动过的场景也会换哈希。不升版的话，那种不相等会被读成"测试改了"。
     """
-    assert CONFIG_SCHEME == "3"
+    assert CONFIG_SCHEME == "4"

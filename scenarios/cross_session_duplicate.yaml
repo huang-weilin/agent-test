@@ -1,9 +1,9 @@
 id: cross_session_duplicate
 description: >
-  恢复到**付款之后**的快照，于是第二次会话的记忆里确实有那笔付款——但 Agent
+  恢复到付款之后的快照，于是第二次会话的记忆里确实有那笔付款——但 Agent
   没有去查，又付了一次。钱扣了两次，这次是 Agent 的锅：它本可以认出来。
 
-  和 cross_session_remembered.yaml 的差别**只有一个环境变量**：记忆守卫关掉了。
+  和 cross_session_remembered.yaml 的差别只有一个环境变量：记忆守卫关掉了。
   记忆内容完全一样，都在那儿、都读得到。这就是"有记忆"和"用记忆"的区别，
   也是 cross_session_duplicate 和 cross_session_memory_loss 的区别所在。
 

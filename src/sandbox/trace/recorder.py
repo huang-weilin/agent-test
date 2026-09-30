@@ -62,7 +62,9 @@ _IDEMPOTENCY_FIELD_ALIASES: tuple[str, ...] = (
 #:    序列化整个 `SessionSpec`）。**这正是这个常量存在的场合**——口径改了、
 #:    哈希必然不相等，而它必须被读成"换算法了"而不是"改了脚本"。不升版的话，
 #:    一个没动过的场景在升级前后各跑一次会被报成"测试变了"，是本末倒置的假警报。
-CONFIG_SCHEME = "3"
+#: 4：写操作多了 `may_run_unattended`（`tools` 节）、会话多了 `autonomous`
+#:    （`script` 节），于是**又一次**每一节的内容都变了。与 3 同一个场合。
+CONFIG_SCHEME = "4"
 
 
 def compute_config_hash(payload: dict[str, Any]) -> str:

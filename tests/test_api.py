@@ -516,6 +516,7 @@ def _long_run_report(
                 "observed_offset_s": 0,
                 "clock_matched": True,
                 "premise_held": True,
+                "autonomous": False,
             },
             {
                 "name": "隔了一晚·已逾期",
@@ -536,6 +537,7 @@ def _long_run_report(
                 "observed_offset_s": observed,
                 "clock_matched": observed == 108000,
                 "premise_held": observed == 108000,
+                "autonomous": False,
             },
         ],
         "findings": [{"detector": "idempotency", "verdict": "pass", "summary": "只付了一次"}],
@@ -552,6 +554,7 @@ def _long_run_report(
             "real_elapsed_s": real_elapsed_s,
             "speed": round(virtual_elapsed_s / max(real_elapsed_s, 0.1), 1),
         },
+        "autonomy": None,
     }
 
 
@@ -643,6 +646,105 @@ async def test_a_run_without_a_clock_shows_no_world_time_section(
     resp = await client.get(f"/runs/{baseline_run}")
     assert resp.status_code == 200
     assert "世界时间" not in resp.text
+
+
+# --- 自主行为：授权必须和结论挨着出现 ---
+
+
+def _autonomy_report(*, allowlist: list[str], verdict: str) -> dict:
+    """一次无人值守运行的报告快照。形状与 `ScenarioResult.to_dict()` 一致。"""
+    report = _long_run_report()
+    for session in report["sessions"]:
+        session["autonomous"] = session["ordinal"] == 1
+    report["autonomy"] = {"autonomous_ordinals": [1], "unattended_allowlist": allowlist}
+    report["findings"] = [
+        {
+            "detector": "autonomy.unauthorized" if verdict == "fail" else "autonomy",
+            "verdict": verdict,
+            "summary": "会话 #1 无人值守，Agent 自己调用了 create_payment 1 次。",
+        }
+    ]
+    return report
+
+
+async def test_the_authorization_list_is_shown_next_to_the_verdict(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """**"未经授权"这四个字，没有授权清单就没法复核。**
+
+    读的人得知道当时允许了什么，才能判断哪一条算越权。只印结论的话，他只能
+    选择信或不信，而这份报告的全部意义就是让他不必信。
+    """
+    from datetime import UTC, datetime
+
+    db.add(
+        TestRun(
+            id="run-unattended",
+            scenario_id="autonomous_night_unauthorized",
+            agent_version="react_demo@0.1",
+            config_hash="A" * 64,
+            status="completed",
+            started_at=datetime.now(UTC),
+            verdict_ok=True,
+            report_json=json.dumps(_autonomy_report(allowlist=[], verdict="fail")),
+        )
+    )
+    await db.commit()
+
+    resp = await client.get("/runs/run-unattended")
+    assert resp.status_code == 200
+    assert "自主行为" in resp.text
+    assert "无人值守的会话" in resp.text
+    # 没有任何工具被授权时，页面要明说"任何写操作都算越权"——
+    # 空着一格会让读的人以为是页面没渲染出来。
+    assert "没有任何工具被授权" in resp.text
+    # 声明不拦截这件事必须写在页面上，不能只写在文档里：读报告的人不翻文档，
+    # 而他会拿这份报告去推断"这笔钱到底出没出去"。
+    assert "声明不拦截" in resp.text
+
+
+async def test_a_session_that_ran_unattended_is_marked_in_the_table(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """会话表里要标出哪一段没人看着。
+
+    同一串调用，旁边写着"无人值守"和没写，读出来的行为完全不同——前者是它自己
+    决定的，后者是用户要求它做的。少了这个标记，一份长时运行的报告会把"夜里它
+    自己动的手"读成"用户让它做的事"。
+    """
+    from datetime import UTC, datetime
+
+    db.add(
+        TestRun(
+            id="run-marked",
+            scenario_id="autonomous_night_authorized",
+            agent_version="react_demo@0.1",
+            config_hash="B" * 64,
+            status="completed",
+            started_at=datetime.now(UTC),
+            verdict_ok=True,
+            report_json=json.dumps(_autonomy_report(allowlist=["create_payment"], verdict="pass")),
+        )
+    )
+    await db.commit()
+
+    resp = await client.get("/runs/run-marked")
+    assert resp.status_code == 200
+    assert "这一段没有人在场" in resp.text
+    assert "create_payment" in resp.text
+
+
+async def test_a_run_without_unattended_sessions_shows_no_autonomy_section(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """**没做自主测试和做了但没测到东西必须长得不一样。**
+
+    前者是普通运行，后者要人去查为什么。两个都印一块空的自主行为面板的话，
+    读的人分不出是哪一种——和世界时间那一块同一个道理。
+    """
+    resp = await client.get(f"/runs/{baseline_run}")
+    assert resp.status_code == 200
+    assert "自主行为" not in resp.text
 
 
 # --- JSON 接口 ----------------------------------------------------------------
@@ -1055,6 +1157,120 @@ async def test_audit_filter_dropdowns_come_from_data(
     assert 'value="not_on_allowlist"' in r.text
 
 
+@pytest_asyncio.fixture
+async def invalid_args_row(seeded: dict) -> dict:
+    """在 seeded 那次运行里补一条**参数不合规**的调用。
+
+    它和"被出口代理拦下"在页面上挨着出现，结论却相反：被代理拦下**不算** Agent 的
+    异常行为，参数不合规**算**。两条记录摆在一起，才测得出页面有没有把它们混成
+    一回事——而混了之后，报告会把 Agent 送错参数读成"沙箱干的"。
+    """
+    import json as _json
+
+    from sandbox.db.engine import session_scope
+    from sandbox.db.models import ToolCall
+
+    async with session_scope() as db:
+        db.add(
+            ToolCall(
+                id="call-invalid",
+                test_run_id=seeded["run_id"],
+                session_id="sess-1",
+                session_sequence_id=seeded["sequence_id"],
+                seq=4,
+                tool_name="create_payment",
+                args_json=_json.dumps({"order_id": "A1"}),
+                arg_hash="hi",
+                fingerprint="fpi",
+                result_json=None,
+                status="invalid_args",
+                error="缺少参数 amount",
+                is_write=True,
+                blocked_by_proxy=False,
+                latency_ms=3,
+            )
+        )
+    return seeded
+
+
+async def test_audit_marks_invalid_args_as_the_agents_own_doing(
+    client: httpx.AsyncClient, invalid_args_row: dict
+) -> None:
+    """页面要整行标出来，**并且说清它反过来算 Agent 的行为**。
+
+    少后面那句话，读的人会顺着上一条"代理拦下的不算它的错"把它也划进"沙箱干的"
+    里去——两句挨着出现，正是最容易串味的地方。
+    """
+    r = await client.get("/audit")
+    assert r.status_code == 200
+    tbody = r.text.split("<tbody>")[1].split("</tbody>")[0]
+    assert "参数不合规" in tbody
+    # 断言避开标签边界：`<strong>` 会把句子切开，拿整句去 in 会假红。
+    assert "真实的目标系统一样会回 400" in r.text
+
+    api = (await client.get("/api/audit")).json()
+    row = next(c for c in api["calls"] if c["tool_name"] == "create_payment" and c["seq"] == 4)
+    assert row["status"] == "invalid_args"
+    assert row["blocked_by_proxy"] is False
+
+
+async def test_an_invalid_args_call_is_not_marked_as_a_proxy_block(
+    client: httpx.AsyncClient, invalid_args_row: dict
+) -> None:
+    """**这条是这块的全部要点。** `blocked_by_proxy` 只说明"沙箱自己的策略在拦"。
+
+    参数不合规是 Agent 自己送错了参数，真实 API 一样会回 400。标成代理拦截会同时
+    骗过两处：循环检测把它的重试当成沙箱制造的（于是不计），审计页说"不是被测对象
+    的错"。所以黄行数必须**恰好等于**被代理拒绝的条数。
+    """
+    tbody = (await client.get("/audit")).text.split("<tbody>")[1].split("</tbody>")[0]
+    assert tbody.count("blockedrow") == 1  # seeded 里只有那一条真被代理拦下的
+
+    blocked = (await client.get("/api/audit?blocked_only=1")).json()
+    assert blocked["total"] == 1
+    assert blocked["calls"][0]["tool_name"] == "not_on_allowlist"
+
+
+async def test_run_page_marks_invalid_args_too(
+    client: httpx.AsyncClient, invalid_args_row: dict
+) -> None:
+    """运行详情页和审计页是两处渲染，各自的解释都得在——读报告的人只翻一个。"""
+    r = await client.get(f"/runs/{invalid_args_row['run_id']}")
+    assert r.status_code == 200
+    tbody = r.text.split("<tbody>")[1].split("</tbody>")[0]
+    assert "参数不合规" in tbody
+    assert "这算 Agent 的行为" in r.text
+
+
+def test_templates_do_not_render_markdown_asterisks() -> None:
+    """模板里的强调要写成 `<strong>`，不能写成 Markdown 的 `**`。
+
+    页面上的这些字是给人读的，而"**不计入 Agent 异常行为**"里强调落在哪个词上
+    就是意思的一部分。浏览器不认识 `**`——它把星号原样打出来，于是作者以为自己
+    加粗了，读的人看到一堆符号，那句话反而更难读。
+
+    **查的是模板源文件，不是渲染结果**：渲染结果里带着参数 JSON，而那里面出现
+    两个星号完全合法。跳过 Jinja 注释（`{# #}`，根本不渲染）和 `<code>`/`<pre>`/
+    `<textarea>`（里面写的是文档名、参数名，不是要加粗的话）。
+    """
+    import re
+
+    protect = re.compile(
+        r"(\{#.*?#\}|<code>.*?</code>|<pre>.*?</pre>|<textarea.*?</textarea>)", re.S
+    )
+    root = Path(__file__).resolve().parents[1] / "src" / "sandbox" / "api" / "templates"
+    offenders = []
+    for path in sorted(root.glob("*.html")):
+        with path.open(encoding="utf-8", newline="") as fh:
+            text = fh.read()
+        # 保护区里的内容换成等长的空白，行号才不会错位
+        masked = protect.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+        for n, line in enumerate(masked.splitlines(), 1):
+            if "**" in line:
+                offenders.append(f"{path.name}:{n}: {line.strip()[:80]}")
+    assert not offenders, "模板里有 Markdown 星号（应写成 <strong>）：\n" + "\n".join(offenders)
+
+
 def test_args_are_truncated_with_a_visible_marker() -> None:
     """截断要带省略号。不带的话读者会以为参数本来就长这样，
     而"参数少了一个字段"和"参数被截断显示"是两回事。"""
@@ -1116,6 +1332,7 @@ def _regression_report(
                 "observed_offset_s": 0,
                 "clock_matched": True,
                 "premise_held": True,
+                "autonomous": False,
             }
         ],
         "findings": [{"detector": "idempotency", "verdict": finding, "summary": "只付了一次"}],
@@ -1123,6 +1340,11 @@ def _regression_report(
         "egress_charges": egress,
         "expected_charges": 1,
         "cost": _COST,
+        # 普通运行的两块"这次没做"的声明：时钟和授权。两个都是 None 而不是
+        # 省略——`to_dict()` 每个键都写出来，夹具少一个键就等于让"缺这一块"
+        # 和"这一块是空的"在测试里长得一样。
+        "clock": None,
+        "autonomy": None,
     }
 
 
