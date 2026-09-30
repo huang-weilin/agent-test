@@ -156,8 +156,15 @@ async def call_tool(
         return _error(403, f"工具 {tool_name!r} 未在场景中声明。", "undeclared_tool")
 
     target = f"{settings.tool_upstream_base_url.rstrip('/')}{tool_path}"
-    target_host = host_of(target)
-    decision = get_policy().check(target_host, tool_name)
+    # 按**真实目标主机**判，而不是按 mock 的地址。
+    #
+    # 场景为这个工具声明了它在生产环境里出到哪台主机时，沙箱的地址就只是传输
+    # 层了——真实部署里 `payments.example.com` 和 `orders.example.com` 是两条
+    # 不同的出口，而放行名单本来就是按目的地列的。不这么分的话，"允许读订单、
+    # 不允许扣款"表达不出来：两个工具在名单上永远是同一台主机。
+    policy = get_policy()
+    host = policy.declared_host(tool_name, host_of(target))
+    decision = policy.check(host, tool_name)
 
     if not decision.allowed:
         await record_tool_call(

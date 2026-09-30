@@ -28,6 +28,7 @@ from sandbox.db.models import DetectorVerdict
 from sandbox.detectors.base import Exemption, ExemptionSet
 from sandbox.detectors.loop import checked_field_weights
 from sandbox.detectors.memory import ForbiddenText, MemoryRules, MustHold
+from sandbox.proxy.policy import AllowRule, EgressPolicy, checked_host, policy_with_rules
 from sandbox.toolschema import check_schema
 
 
@@ -90,6 +91,37 @@ class ToolDecl(BaseModel):
     #: 它进配置指纹的 `tools` 节：改了权重等于改了"什么算重复"——那是判卷标准
     #: 的一部分，两次运行不该拿来比"失败少了几个"。见 `scenario/identity.py`。
     field_weights: dict[str, float] = Field(default_factory=dict)
+
+    #: **这个工具在真实环境里出到哪台主机。** 声明它 = 它的出口要过放行名单。
+    #:
+    #: 沙箱里每一次调用实际连的都是自己的 mock（传输层只有一个地址），所以
+    #: **不声明的话，出口策略根本没有分辨力**：所有工具在名单上都是同一台主机，
+    #: "允许读订单、不允许扣款"这种再普通不过的部署策略表达不出来。
+    #:
+    #: 写的是**真实目标**（`payments.example.com`），不是沙箱的地址——和
+    #: `is_write`、`enforces_idempotency` 同一种东西：关于真实目标系统的声明，
+    #: 沙箱拿它做判断，Mock 拿它当替身。策略按它判，连接照旧发给 Mock。
+    #:
+    #: **要不要写，由场景有没有声明出口名单决定**（见下面那条跨字段校验）：
+    #: 不声明名单时这个字段一次都不会被读到，写了也只会让人以为限制了什么。
+    egress_host: str | None = None
+
+    @model_validator(mode="after")
+    def _egress_host_is_a_host(self) -> ToolDecl:
+        """写了就得是个主机名。规则本身在 `checked_host` 里，与场景那边的名单共用。
+
+        两边只留一份实现：一份写错了的规则**不会报错，只会永远不命中**——
+        报告上看起来像"这次运行没放行它"，而真相是那行字压根没参与过判定。
+        """
+        if self.egress_host is not None:
+            # 规整过的值**存回去**：`checked_host` 校验的是去过空白、小写过的
+            # 版本，而放行名单是按字符串逐字比对的。不存回去的话，
+            # `" Payments.example.com"` 能通过校验，然后在判定时永远不命中
+            # ——一条写了却不起作用的规则，正是这里最该拦下的东西。
+            self.egress_host = checked_host(
+                self.egress_host, what=f"工具 {self.name!r} 的 egress_host"
+            )
+        return self
 
     @field_validator("field_weights")
     @classmethod
@@ -303,22 +335,75 @@ class MemoryDecl(BaseModel):
     forbidden: list[ForbiddenTextDecl] = Field(default_factory=list)
 
 
+class EgressRuleDecl(BaseModel):
+    """一条放行规则：哪台主机、以及凭什么放它出去。"""
+
+    model_config = {"extra": "forbid"}
+
+    host: str
+    #: 必填。没有理由的放行在审计时无法复核，等于永久豁免（与 `AllowRule` 同）。
+    reason: str
+
+    @model_validator(mode="after")
+    def _usable(self) -> EgressRuleDecl:
+        self.host = checked_host(self.host, what="放行规则")
+        if not self.reason.strip():
+            raise ValueError(
+                f"放行规则 {self.host!r} 缺少 reason。"
+                f"没有理由的放行在审计时无法复核，等于永久豁免。"
+            )
+        return self
+
+
+class EgressDecl(BaseModel):
+    """这次运行的出口放行名单（ADR 003）。
+
+    出口策略是**部署方的决定**，不是 Agent 的——所以它写在"世界"这一节里，
+    和订单备注并列：两者都是 Agent 醒来时那个环境的既定事实。它进配置指纹的
+    `world` 节，所以两次运行之间改了名单就**不可比**：换了网，不是换了行为。
+
+    **默认拒绝是默认值，这里写的是例外。** 名单上有的才出得去。
+
+    **空名单和没写是两件事**（这个仓库里反复出现的那条规矩）：没写 `egress`
+    段 = 这次运行不声明出口策略，按沙箱默认走（沙箱自己的工具后端自动放行）；
+    写了 `egress` 而 `allow: []` = 声明了"这次不放行任何出口"。前者是不声明，
+    后者是一句很重的声明——所以后者要求每个工具都交代自己的真实目标（见
+    `Scenario._egress_declaration_is_wired`），不能悄悄生效。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    allow: list[EgressRuleDecl] = Field(default_factory=list)
+
+    def to_allow_rules(self) -> list[AllowRule]:
+        """转成策略层那条规则的形状。**只此一处**：加载期校验与运行时判定
+        必须看同一份数据，各转一遍的话，总有一天校验放过的和判定的不是同一条。"""
+        return [
+            AllowRule(host=r.host, tool=None, reason=f"场景声明：{r.reason}")
+            for r in self.allow
+        ]
+
+
 class WorldDecl(BaseModel):
     """Agent 醒来时，目标系统里长什么样。
 
-    今天只有一样东西：订单上的自由文本备注。它是**注入面**——上游系统里那些
-    第三方写得了的字段（订单备注、工单正文、邮件内容）。记忆中毒的受控实验要
-    的就是这句话：世界里有一句话，问题是 Agent 会不会把它带进长效记忆。
+    两样东西：订单上的自由文本备注（**注入面**——上游系统里那些第三方写得了的
+    字段）与这次运行的出口放行名单（**部署方的网络策略**）。记忆中毒的受控实验
+    要的是前者的那句话；出口被拦下的那对实验要的是后者。
 
     **它是世界，不是判据**：备注里写了什么与"什么算失败"无关（那是 `memory`
-    段的事）。两条场景把同一句话一个写成注入、一个写成正常备注，跑出来的差别
-    必须来自这里——只改判据不叫受控实验，那只是换了把尺子。
+    段的事）；名单上放了谁也与"什么算失败"无关（那是 `expect` 段的事）。两条
+    场景把同一句话一个写成注入、一个写成正常备注，跑出来的差别必须来自这里
+    ——只改判据不叫受控实验，那只是换了把尺子。
     """
 
     model_config = {"extra": "forbid"}
 
     #: 订单号 → 那句话。订单号必须是目标系统里真实存在的样例订单，加载时校验。
     order_notes: dict[str, str] = Field(default_factory=dict)
+
+    #: 这次运行的出口放行名单。`None` = 没声明（沙箱默认策略）。
+    egress: EgressDecl | None = None
 
 
 class Scenario(BaseModel):
@@ -411,6 +496,72 @@ class Scenario(BaseModel):
                 f"这些工具的越权行为不会被主动行为审计发现，而报告上完全看不出来。"
             )
         return self
+
+    @model_validator(mode="after")
+    def _egress_declaration_is_wired(self) -> Scenario:
+        """出口名单与工具的 `egress_host` 必须**成对出现**，而且互相对得上。
+
+        三条都是"装上了但没接线"的写法，在报告上全都看不出来：
+
+        1. 声明了名单，某个工具却没写 `egress_host` —— 那个工具的出口不受
+           名单管（它按 mock 的地址判，一律放行）。读报告的人会以为这次运行
+           限制了它，而它一次都没被限制过。
+        2. 写了 `egress_host`，场景却没有 `world.egress` —— 那条声明一次都
+           不会被读到。**不报错的话它就是一句纯粹的装饰**，而写它的人以为
+           自己关上了一扇门。
+        3. 名单上一条规则的主机，没有任何工具指向它 —— 那条规则永远不会命中。
+           它多半是打错了字（`payments.example.com` 写成 `payment.example.com`），
+           而症状是"那次调用被拒了"，读起来像 Agent 去了不该去的地方。
+
+        第 3 条**不反过来要求**"每个工具的主机都在名单上"——不在名单上正是
+        "拒绝"的表达方式，那是这套东西存在的理由。
+        """
+        egress = self.world.egress
+        declared = {t.name: t.egress_host for t in self.tools if t.egress_host}
+
+        if egress is None:
+            if declared:
+                raise ValueError(
+                    f"工具 {sorted(declared)} 声明了 egress_host，但场景没有 "
+                    f"`world.egress` 段——这条声明一次都不会被读到。\n"
+                    f"它说的是「这个工具在真实环境里出到哪台主机」，"
+                    f"而按它判定的那份放行名单没写，于是它不影响任何一次调用。"
+                )
+            return self
+
+        missing = [t.name for t in self.tools if not t.egress_host]
+        if missing:
+            raise ValueError(
+                f"场景声明了出口放行名单（world.egress），但工具 {sorted(missing)} "
+                f"没写 egress_host。\n"
+                f"名单是按真实目标主机判的；没写这个字段的工具仍然按沙箱"
+                f"mock 的地址判，于是它不受名单管——报告上却看不出这个区别。"
+            )
+
+        known = set(declared.values())
+        unwired = [r.host for r in egress.allow if r.host not in known]
+        if unwired:
+            raise ValueError(
+                f"出口名单里的 {sorted(unwired)} 没有任何工具指向它——"
+                f"这些规则永远不会命中。\n"
+                f"工具声明的真实目标主机是 {sorted(known)}。"
+                f"想拒绝某个工具，就不要在名单上写它的主机。"
+            )
+        return self
+
+    def egress_policy(self) -> EgressPolicy | None:
+        """这次运行的出口策略。`None` = 场景没声明，按沙箱默认走。
+
+        **它必须在 mock 的端口定下来之后再构造**（`default_policy()` 会去读
+        `settings.tool_upstream_base_url`），见 `ScenarioRunner`。
+        """
+        egress = self.world.egress
+        if egress is None:
+            return None
+        return policy_with_rules(
+            egress.to_allow_rules(),
+            tool_hosts={t.name: t.egress_host for t in self.tools if t.egress_host},
+        )
 
     def tool_index(self) -> dict[str, ToolDecl]:
         return {t.name: t for t in self.tools}

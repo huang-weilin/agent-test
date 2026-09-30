@@ -601,6 +601,16 @@ class ScenarioRunner:
         original_upstream = settings.tool_upstream_base_url
         settings.tool_upstream_base_url = f"http://127.0.0.1:{mk_port}"
 
+        # 这次运行的出口放行名单（ADR 003）。**必须在上面那行之后**：场景声明的
+        # 策略是在沙箱默认策略上追加的，而默认策略里那条"沙箱自己的工具后端自动
+        # 放行"是照配置现读的——早一步构造，它记下的就是上一个场景的 mock 端口，
+        # 于是这一场的**每一次**工具调用都会被自己的出口策略拦下。而报告上写着
+        # "Agent 访问了未授权主机"，指向的是被测对象。
+        #
+        # 没声明的场景拿到的是 None，代理那时按默认策略走（懒构造，同样在端口
+        # 定下来之后）。
+        proxy_app.set_policy(scenario.egress_policy())
+
         try:
             await self._run_sessions(scenario, result, gw_port, px_port, mk_port, runs)
         finally:

@@ -859,8 +859,16 @@ def test_the_poison_pair_differs_in_exactly_one_place() -> None:
     assert poisoned["expect"]["expected_charges"] == clean["expect"]["expected_charges"]
     assert poisoned["expect"]["expected_charges"] == 1, "两支都是付一次款"
 
-    # 唯一该变的地方。
-    assert poisoned["world"] == {"order_notes": {"A1": POISON_SENTENCE}}
+    # 唯一该变的地方。世界那一节里除了备注之外的字段（今天只有出口放行名单）
+    # 两支必须一模一样——谁在其中一支写了名单，这一对就不再是"只差一句话"。
+    without_notes = {
+        name: {k: v for k, v in part["world"].items() if k != "order_notes"}
+        for name, part in (("中毒支", poisoned), ("对照支", clean))
+    }
+    assert without_notes["中毒支"] == without_notes["对照支"] == {"egress": None}, (
+        "世界那一节除了那句备注之外还有别的差别（或者有了一支声明了出口名单）"
+    )
+    assert poisoned["world"]["order_notes"] == {"A1": POISON_SENTENCE}
     assert clean["world"] != poisoned["world"], "对照支的世界必须不一样"
 
     # 判据盯的正是世界里那句话。盯别的话，这一支测的就不是"这句话进没进记忆"。

@@ -36,12 +36,6 @@ NO_LIVE_SAMPLE: dict[str, str] = {
         "也就是两条声明自相矛盾时。这一族要留一支真的不声明判据的场景"
         "（cross_session_memory_loss），声明了就自相矛盾——没有活样本正是对的"
     ),
-    "unauthorized_attempt_blocked": (
-        "要有一次带着 blocked_by_proxy 的调用，而今天 21 个场景一次都没有："
-        "场景路径不配出口策略（runner 把它重置成默认策略），"
-        "而未声明的工具调用走的是 tool_scope 那条路，不算写操作。"
-        "要造得先想清楚这道拦截该由谁下、以及在报告里归给谁"
-    ),
 }
 
 

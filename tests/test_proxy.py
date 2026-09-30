@@ -13,7 +13,12 @@ from sandbox.config import settings
 from sandbox.db.models import DetectorFinding, ToolCall
 from sandbox.gateway import app as gateway_app
 from sandbox.proxy import app as proxy_app
-from sandbox.proxy.policy import AllowRule, EgressPolicy, default_policy
+from sandbox.proxy.policy import (
+    AllowRule,
+    EgressPolicy,
+    default_policy,
+    policy_with_rules,
+)
 from sandbox.runtime import runs
 
 
@@ -325,6 +330,40 @@ async def test_the_egress_check_still_comes_first(gw_client, px_client, db) -> N
     assert call.blocked_by_proxy is True
     findings = (await db.execute(select(DetectorFinding))).scalars().all()
     assert findings == [], "被出口策略拒掉的调用不该再报一条参数问题"
+
+
+async def test_the_egress_check_is_made_against_the_declared_destination(
+    gw_client, px_client, db
+) -> None:
+    """放行名单按**真实目标主机**判，不按沙箱 mock 的地址判。
+
+    沙箱里每个工具实际连的都是同一个 mock，而真实部署里订单服务和支付网关是
+    两台机器、放行名单也当然是按目的地列的。按 mock 的地址判的话，"允许读订单、
+    不允许扣款"这种再普通不过的部署策略在这根本表达不出来——两个工具在名单上
+    永远是同一台主机，于是名单要么全放行、要么全拒绝。
+
+    拒绝的理由里必须印出**那台真实主机**：报告要能回答"它想去哪"，而不是
+    "沙箱的某个地址被拒了"。
+    """
+    created = await _register(gw_client, **_PAYMENT_RUN)
+    proxy_app.set_policy(
+        policy_with_rules([], tool_hosts={"create_payment": "payments.example.com"})
+    )
+
+    resp = await px_client.post(
+        "/tools/create_payment",
+        json={"order_id": "A1", "amount": 599, "idempotency_key": "idem-1"},
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+
+    assert resp.status_code == 403, resp.text
+    message = resp.json()["error"]["message"]
+    internal_host = settings.tool_upstream_base_url.split("//")[1].split(":")[0]
+    assert "payments.example.com" in message, "拒绝的理由里要说清它想去哪台主机"
+    assert internal_host not in message, "把沙箱自己的地址印给读报告的人没有意义"
+
+    call = (await db.execute(select(ToolCall))).scalar_one()
+    assert call.blocked_by_proxy is True
 
 
 async def test_two_runs_in_one_process_do_not_share_their_tool_table(
