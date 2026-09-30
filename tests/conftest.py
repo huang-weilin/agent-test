@@ -70,10 +70,20 @@ def make_call():
         status: str = "ok",
         session_sequence_id: str = "seq-1",
         session_id: str = "sess-1",
+        session_ordinal: int = 0,
+        memory_horizon_ordinal: int | None = None,
     ) -> CallView:
         normalized = normalize_args(args or {})
+        # 记忆视野默认按"自然延续"推导（记得此前一切），而不是写死 -1：
+        # 构造跨会话轨迹时忘了传它，会得到"什么都记不得"的假象，
+        # 于是跨会话用例会测成另一个故事。
+        horizon = (
+            memory_horizon_ordinal
+            if memory_horizon_ordinal is not None
+            else session_ordinal - 1
+        )
         return CallView(
-            id=f"call-{seq:03d}",
+            id=f"call-{session_ordinal}-{seq:03d}",
             seq=seq,
             tool_name=tool_name,
             args=normalized,
@@ -81,6 +91,8 @@ def make_call():
             is_write=is_write,
             session_sequence_id=session_sequence_id,
             session_id=session_id,
+            session_ordinal=session_ordinal,
+            memory_horizon_ordinal=horizon,
             idempotency_key=idempotency_key,
             replay_reason=replay_reason,
             blocked_by_proxy=blocked_by_proxy,

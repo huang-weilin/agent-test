@@ -104,11 +104,62 @@ class Session(Base):
     # 会话在序列中的序号——跨会话循环检测要按此排序
     ordinal: Mapped[int] = mapped_column(Integer, default=0)
 
+    # --- 记忆视野：跨会话归因的**唯一依据** -----------------------------
+    # 这个会话开始时，Agent 的记忆覆盖到哪个序号为止。
+    #
+    # 自然延续时 = ordinal - 1（记得此前发生的一切）。从旧快照恢复时，这个值
+    # 会比 ordinal - 1 小——**缺的那一段就是 Agent 不可能知道的部分**。
+    #
+    # 归因规则因此不需要猜：某次调用发生在序号 a、又在序号 b 重复，
+    # 若 a <= memory_horizon_ordinal(b)，Agent 本可以知道 → Agent 的锅；
+    # 否则它不可能知道 → 是恢复机制的锅。
+    #
+    # 默认 -1 而不是 0：序号 0 的会话不存在"之前的记忆"，写成 0 会让
+    # "本会话内的重复"被误判成"Agent 本可以知道"，把同会话的判定搅乱。
+    memory_horizon_ordinal: Mapped[int] = mapped_column(Integer, default=-1)
+    restored_from_snapshot_id: Mapped[str | None] = mapped_column(String(36))
+
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(16), default="active")
 
     test_run: Mapped[TestRun] = relationship(back_populates="sessions")
+
+
+class MemorySnapshot(Base):
+    """记忆快照。
+
+    **它不是观测记录，是操纵记录。** 记忆在 Agent 进程内，不在 ADR 001 的
+    网络边界上——边界拦不到它。所以这里做的不是"看见 Agent 的记忆"，而是
+    "把 Agent 的记忆回滚到某个时刻，看它会不会因此重复扣款"。
+
+    这一点决定了归因：重复如果是我们自己回滚造成的，报告就必须说清楚，
+    否则用户会去改一个没问题的 Prompt。
+    """
+
+    __tablename__ = "memory_snapshot"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_sequence_id: Mapped[str] = mapped_column(String(36), index=True)
+
+    # 快照取自哪个会话边界。ordinal=k 且 seq=s 表示"序号 k 的会话进行到 s
+    # 之后"。边界快照的 s 为 0 时表示"序号 k 的会话开始之前"。
+    taken_at_ordinal: Mapped[int] = mapped_column(Integer, default=0)
+    taken_at_seq: Mapped[int] = mapped_column(Integer, default=0)
+
+    # 内容寻址：摘要相同即内容相同。用于判断"回滚到的是不是同一个状态"，
+    # 以及识别"恢复了快照但其实什么都没变"这种空操作。
+    digest: Mapped[str] = mapped_column(String(64), index=True)
+    # 适配器标识（hermes_file / langgraph_checkpointer ...）。恢复时必须用
+    # 同一个适配器，否则等于拿 A 格式的字节去覆盖 B 格式的文件。
+    adapter: Mapped[str] = mapped_column(String(64))
+
+    # lite profile 落本地文件；生产期换 PostgreSQL 元数据 + S3 大对象
+    payload_path: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    entry_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ToolCall(Base):

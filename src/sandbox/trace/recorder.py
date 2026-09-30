@@ -38,6 +38,7 @@ from sandbox.db.models import (
     ToolCall,
 )
 from sandbox.gateway.pricing import compute_cost
+from sandbox.memory.snapshot import MemoryAdapter, SnapshotRef, SnapshotStore
 from sandbox.trace.normalize import fingerprint, looks_like_write, normalize_args, structural_hash
 
 # 工具参数里可能承载幂等键的字段名。场景可显式声明，这里是兜底别名表。
@@ -69,9 +70,18 @@ class RunContext:
     declared_writes: set[str] | None = None
     # 工具 → 幂等键参数名。由工具声明提供，缺省时走别名表。
     idempotency_key_params: dict[str, str] = field(default_factory=dict)
+    # 当前会话在序列中的序号，以及**这个会话开始时 Agent 的记忆覆盖到哪**。
+    # 后者由 start_session 依据快照位置写入，检测器的跨会话归因全靠它。
+    session_ordinal: int = 0
+    memory_horizon_ordinal: int = -1
 
     _seq: int = 0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+    @property
+    def current_seq(self) -> int:
+        """当前时间线位置。取快照时要记下它，快照才定位得到。"""
+        return self._seq
 
     async def next_seq(self) -> int:
         """取下一个时间线序号。锁是必需的：网关是并发的。"""
@@ -140,6 +150,98 @@ async def start_run(
         declared_writes=declared_writes,
         idempotency_key_params=idempotency_key_params or {},
     )
+
+
+async def start_session(
+    ctx: RunContext,
+    *,
+    ordinal: int | None = None,
+    restored_from: SnapshotRef | None = None,
+) -> Session:
+    """进入会话序列的下一个会话。**跨会话测试的入口。**
+
+    归因规则在这里落地，它是整个跨会话检测的地基：
+
+    - 自然延续（`restored_from is None`）时，新会话记得此前发生的一切，
+      `memory_horizon_ordinal = ordinal - 1`。此后再出现重复，Agent 本可以
+      知道，所以是 Agent 的问题。
+    - 从旧快照恢复时，记忆只覆盖到快照那一刻。**快照之后发生的调用，
+      这个会话不可能知道**——再出现重复就是恢复机制制造的。
+
+    也就是说"是谁的锅"不需要猜、也不需要启发式，它由我们回滚到了哪里
+    唯一确定。这也正是把记忆快照做成操纵面（而不是观测面）换来的东西。
+
+    当前的 `ctx.session_id` 会被切换成新会话，此后所有调用都记在新会话下。
+    """
+    new_ordinal = ctx.session_ordinal + 1 if ordinal is None else ordinal
+    if new_ordinal <= ctx.session_ordinal:
+        # 序号必须递增。允许回退的话，读者按 (ordinal, seq) 排序时会得到
+        # 一个和真实时间线不符的顺序，而跨会话归因完全建立在顺序上。
+        raise ValueError(
+            f"新会话序号 {new_ordinal} 不大于当前序号 {ctx.session_ordinal}，"
+            f"会话序列必须单调递增。"
+        )
+
+    horizon = new_ordinal - 1 if restored_from is None else horizon_of(restored_from)
+
+    session = Session(
+        id=str(uuid.uuid4()),
+        test_run_id=ctx.run_id,
+        session_sequence_id=ctx.session_sequence_id,
+        ordinal=new_ordinal,
+        memory_horizon_ordinal=horizon,
+        restored_from_snapshot_id=restored_from.id if restored_from else None,
+    )
+    async with session_scope() as db:
+        db.add(session)
+
+    ctx.session_id = session.id
+    ctx.session_ordinal = new_ordinal
+    ctx.memory_horizon_ordinal = horizon
+    return session
+
+
+def horizon_of(ref: SnapshotRef) -> int:
+    """快照反映到哪个会话序号为止。
+
+    位置 (k, 0) 表示"序号 k 的会话开始**之前**"——那时序号 k 还什么都没发生，
+    所以视野停在 k-1。位置 (k, s>0) 表示"序号 k 进行到 s 之后"，视野到 k。
+
+    边界快照的两种取法正好对应这两支：会话开始前取 (k, 0)，会话结束后取 (k, 末序号)。
+    """
+    return ref.taken_at_ordinal if ref.taken_at_seq > 0 else ref.taken_at_ordinal - 1
+
+
+async def capture_snapshot(
+    ctx: RunContext,
+    adapter: MemoryAdapter,
+    store: SnapshotStore,
+) -> SnapshotRef:
+    """在当前位置给 Agent 的记忆拍一张快照。
+
+    `taken_at_seq` 取当前时间线位置，所以这张快照的精确定位是
+    "序号 ctx.session_ordinal 进行到 ctx.current_seq 之后"。恢复它意味着
+    忘记这之后的一切。
+    """
+    payload = adapter.capture()
+    return await store.save(
+        session_sequence_id=ctx.session_sequence_id,
+        taken_at_ordinal=ctx.session_ordinal,
+        taken_at_seq=ctx.current_seq,
+        adapter=adapter.name,
+        payload=payload,
+        entry_count=adapter.entry_count(),
+    )
+
+
+async def restore_snapshot(ref: SnapshotRef, adapter: MemoryAdapter, store: SnapshotStore) -> None:
+    """把 Agent 的记忆回滚到快照状态。
+
+    **这是破坏性的**，会清空并重建适配器指向的记忆目录。三道闸在适配器里
+    （见 memory/adapters/file_memory.py），这里不重复判断。
+    """
+    payload = await store.load(ref.id)
+    adapter.restore(payload)
 
 
 async def finish_run(

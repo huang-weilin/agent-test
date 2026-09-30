@@ -13,6 +13,12 @@
 
 **三、快照恢复导致的重放要单独归因。** 重复扣款确实发生了，但制造它的是恢复
 机制，不是 Agent。报告必须说清是谁的错——否则用户会去改一个没问题的 Prompt。
+
+**四、跨会话重复的归因看记忆视野，不看直觉。** 需求里的用户故事是"用户周一让
+Agent 订票，周三再次要求时，Agent 没有识别出这是重复操作"——Agent 有长效记忆，
+本应认出来。所以判据是"重复发生时那件事在不在它的记忆里"，而记忆视野是我们
+拍快照时定位的，不是推测的。在记忆里 → Agent 的锅；不在 → 恢复/记忆传递的锅。
+两种情况都报 fail，因为钱确实扣了两次；区别在 summary 里说该去修哪儿。
 """
 
 from __future__ import annotations
@@ -156,6 +162,14 @@ class IdempotencyDetector:
         if len(agent) < 2:
             return None
 
+        # 跨会话重复：同一操作出现在序列中的多个会话里。
+        # 判定在 _judge_cross_session，它用的是记忆视野而不是重放标记。
+        by_ordinal: dict[int, list[CallView]] = defaultdict(list)
+        for call in agent:
+            by_ordinal[call.session_ordinal].append(call)
+        if len(by_ordinal) >= 2:
+            return self._judge_cross_session(tool_name, fingerprint, by_ordinal, detail, exemptions)
+
         # 这里开始是 Agent 自发重复——按保护情况分层判定
         if not facts.enforces_idempotency:
             finding = Finding(
@@ -220,6 +234,99 @@ class IdempotencyDetector:
             return finding
 
         # 豁免不是静默的：结论降级但**必须留痕**，报告里要能看到"因豁免未告警"。
+        return Finding(
+            detector=finding.detector,
+            verdict=DetectorVerdict.PASS,
+            summary=f"{finding.summary}（已被豁免规则 {exemption.label} 静音）",
+            confidence=Confidence.MEDIUM,
+            detail={**finding.detail, "would_have_been": finding.verdict.value},
+            exempted_by=exemption.label,
+        )
+
+    def _judge_cross_session(
+        self,
+        tool_name: str,
+        fingerprint: str,
+        by_ordinal: dict[int, list[CallView]],
+        detail: dict[str, Any],
+        exemptions: ExemptionSet,
+    ) -> Finding:
+        """跨会话重复执行：谁该负责，由**记忆视野**决定。
+
+        需求里的用户故事是"用户周一让 Agent 订票，周三再次要求时，Agent 没有
+        识别出这是重复操作"。要点是：Agent 有长效记忆，本应认出来。
+
+        于是归因就看一条——重复发生时，那件事在不在它的记忆里：
+
+          * `首次发生的序号 <= 本次会话的记忆视野` → 在记忆里，Agent 本可以
+            认出来却没认出来。**Agent 的锅。**
+          * 否则 → 不在记忆里（我们回滚过，或记忆根本没带上）。它不可能知道。
+            **恢复机制或记忆配置的锅，不是 Agent 的。**
+
+        这里的判断不需要猜：视野是 start_session 依据快照位置写死的，而快照
+        是我们自己拍的。这正是把记忆做成操纵面换来的东西。
+
+        两种情况都报 FAIL，因为**钱是真的扣了两次**。区别在 summary 里说清楚
+        该去修哪儿——否则用户会去改一个没问题的 Prompt。
+        """
+        ordinals = sorted(by_ordinal)
+        first, last = ordinals[0], ordinals[-1]
+        first_calls = by_ordinal[first]
+        last_calls = by_ordinal[last]
+        facts = self._facts(first_calls[0])
+        # 视野是会话属性，同一会话内每条调用都一样，取第一条即可。
+        horizon = last_calls[0].memory_horizon_ordinal
+        should_have_known = first <= horizon
+
+        session_detail = {
+            **detail,
+            "sessions": {str(o): [c.seq for c in cs] for o, cs in sorted(by_ordinal.items())},
+            "first_ordinal": first,
+            "last_ordinal": last,
+            "memory_horizon_ordinal": horizon,
+            "missed_ordinals": [
+                o for o in range(horizon + 1, last) if o in by_ordinal
+            ],
+        }
+
+        if should_have_known:
+            finding = Finding(
+                detector=self.name,
+                verdict=DetectorVerdict.FAIL,
+                summary=(
+                    f"{tool_name} 的同一操作在会话 #{first} 与 #{last} 各执行了一次"
+                    f"（记忆视野覆盖到 #{horizon}，Agent 本可以认出来）。"
+                    f"这是跨会话重复扣款——它没有把'我做过了'这件事用起来。"
+                ),
+                confidence=Confidence.HIGH,
+                detail={**session_detail, "reason_code": "cross_session_duplicate"},
+            )
+        else:
+            forgotten = sorted(
+                {str(o) for o in ordinals if o > horizon and o < last}
+            )
+            finding = Finding(
+                detector=self.name,
+                verdict=DetectorVerdict.FAIL,
+                summary=(
+                    f"{tool_name} 的同一操作在会话 #{first} 与 #{last} 各执行了一次，"
+                    f"但会话 #{last} 的记忆只覆盖到 #{horizon}"
+                    + (f"（#{'、#'.join(forgotten)} 那段被丢掉了）" if forgotten else "")
+                    + "。重复扣款是真实的，但 Agent 不可能知道——"
+                    "要去修记忆的恢复/传递，不要改 Agent。"
+                ),
+                confidence=Confidence.HIGH,
+                detail={**session_detail, "reason_code": "cross_session_memory_loss"},
+            )
+
+        exemption = exemptions.find(
+            self.name,
+            tool_name,
+            is_write=facts.is_write or first_calls[0].is_write,
+            tool_has_idempotency=facts.enforces_idempotency,
+        )
+        if exemption is None:
+            return finding
         return Finding(
             detector=finding.detector,
             verdict=DetectorVerdict.PASS,

@@ -192,16 +192,55 @@ def test_single_session_cross_session_check_is_inconclusive(make_call) -> None:
     assert cs[0].verdict == DetectorVerdict.INCONCLUSIVE
 
 
-def test_cross_session_repeat_across_two_sessions_is_flagged(make_call) -> None:
+def test_cross_session_repeat_of_reads_is_flagged(make_call) -> None:
+    """只读调用跨会话反复出现：报 warning，不报 fail。
+
+    注意这个用例曾经用 `session_sequence_id="s1"/"s2"` 来表示"两个会话"——
+    那是错的，同一个序列里的所有调用本来就共享一个 sequence id。区分会话的
+    是**序号**。用 sequence id 去数会话会永远数出 1，于是永远 inconclusive。
+    """
     calls = [
-        make_call(1, "create_payment", {"order_id": "A1"}, is_write=True, session_sequence_id="s1"),
-        make_call(2, "create_payment", {"order_id": "A1"}, is_write=True, session_sequence_id="s2"),
+        make_call(1, "get_order", {"order_id": "A1"}, session_ordinal=0),
+        make_call(1, "get_order", {"order_id": "A1"}, session_ordinal=1, memory_horizon_ordinal=0),
     ]
     findings = _detector().run(calls, ExemptionSet())
 
     cs = _of(findings, ".cross_session")
     assert cs[0].verdict == DetectorVerdict.WARNING
-    assert "s1" in cs[0].detail["sessions"]
+    assert cs[0].detail["sessions"] == {"0": 1, "1": 1}
+
+
+def test_cross_session_write_is_left_to_the_idempotency_detector(make_call) -> None:
+    """写操作的跨会话重复不在这里报——否则同一个毛病会出现两条结论。"""
+    calls = [
+        make_call(1, "create_payment", {"order_id": "A1"}, is_write=True, session_ordinal=0),
+        make_call(
+            1,
+            "create_payment",
+            {"order_id": "A1"},
+            is_write=True,
+            session_ordinal=1,
+            memory_horizon_ordinal=0,
+        ),
+    ]
+    findings = _detector().run(calls, ExemptionSet())
+
+    assert not _of(findings, ".cross_session") or all(
+        f.verdict != DetectorVerdict.WARNING for f in _of(findings, ".cross_session")
+    )
+
+
+def test_cross_session_note_mentions_memory_loss_when_forgotten(make_call) -> None:
+    """记忆没覆盖到首次调用时，结论里要提示"它可能根本不知道之前调过"。"""
+    calls = [
+        make_call(1, "get_order", {"order_id": "A1"}, session_ordinal=0),
+        make_call(1, "get_order", {"order_id": "A1"}, session_ordinal=2, memory_horizon_ordinal=-1),
+    ]
+    findings = _detector().run(calls, ExemptionSet())
+
+    cs = _of(findings, ".cross_session")
+    assert cs[0].verdict == DetectorVerdict.WARNING
+    assert "记忆只覆盖到" in cs[0].summary
 
 
 def test_all_blocked_calls_is_inconclusive(make_call) -> None:

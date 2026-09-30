@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     # trace 层时按当时实际使用的版本核实并钉死，不要让属性名散落在业务代码里。
     otel_semconv_version: str = "TO_BE_PINNED"
 
+    # --- 记忆快照（跨会话测试的操纵面）--------------------------------------
+    # 快照与 Agent 记忆目录的根。**必须落在 data/ 之下**——那里已被 gitignore，
+    # 而记忆快照里往往含对话历史与用户数据，绝不能进版本库。
+    memory_root: Path = REPO_ROOT / "data" / "memory"
+    # 恢复快照是破坏性操作（要覆盖 Agent 的记忆目录）。开启后，只允许恢复到
+    # memory_root 之下的路径；指向别处会直接拒绝。
+    # 关掉它只有一个正当理由：测试真实 Agent 时它的记忆目录不在我们管辖内。
+    # 那种情况下请显式关闭，而不是让它默认就敢往任意路径写。
+    memory_restore_guard: bool = True
+
     @property
     def is_lite_profile(self) -> bool:
         """Lite profile：SQLite + 进程内 sidecar，无需 Docker。"""

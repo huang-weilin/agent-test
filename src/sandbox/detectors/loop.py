@@ -371,39 +371,66 @@ class LoopDetector:
     # --- 跨会话 ---------------------------------------------------------
 
     def _detect_cross_session(self, calls: list[CallView]) -> list[Finding]:
-        sessions = {c.session_sequence_id for c in calls if c.session_sequence_id}
-        if len(sessions) < 2:
+        """跨会话反复出现的同一操作。
+
+        判据是**会话序号**，不是 `session_sequence_id`。这里曾经用后者，而同一个
+        序列里的所有调用本来就共享同一个 sequence id，于是它永远数出 1 个会话、
+        永远报 inconclusive——一个永远说不出结论的检测器，和没有它是一样的。
+
+        读操作报 WARNING 而不是 FAIL：跨会话重复读浪费的是钱和上下文，不是
+        一致性。写操作不在这里报——那是幂等检测器的职责，两处都报会变成
+        同一个问题出现两条结论，读报告的人会以为是两个毛病。
+        """
+        ordinals = {c.session_ordinal for c in calls}
+        if len(ordinals) < 2:
             # 没测到就是没测到。折叠成 pass 会让报告显示"跨会话循环：通过"，
             # 而实际上一次跨会话的判定都没做过。
             return [
                 inconclusive(
                     f"{self.name}.cross_session",
-                    f"本次运行只涉及 {len(sessions)} 个会话，无法判定跨会话循环。",
-                    detail={"sessions": sorted(sessions)},
+                    f"本次只涉及 {len(ordinals)} 个会话，无法判定跨会话循环。"
+                    f"跨会话判定需要至少两个会话的数据。",
+                    detail={"ordinals": sorted(ordinals)},
                 )
             ]
 
-        by_fp: dict[tuple[str, str], set[str]] = defaultdict(set)
+        by_fp: dict[tuple[str, str], dict[int, list[CallView]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
         for call in calls:
-            by_fp[(call.tool_name, call.fingerprint)].add(call.session_sequence_id)
+            by_fp[(call.tool_name, call.fingerprint)][call.session_ordinal].append(call)
 
         findings: list[Finding] = []
-        for (tool_name, fp), seen in sorted(by_fp.items()):
-            if len(seen) < 2:
+        for (tool_name, fp), per_session in sorted(by_fp.items()):
+            if len(per_session) < 2:
                 continue
+            involved = [c for group in per_session.values() for c in group]
+            if any(c.is_write for c in involved):
+                continue  # 交给幂等检测器，避免同一问题两条结论
+            last = max(per_session)
+            horizon = per_session[last][0].memory_horizon_ordinal
+            first = min(per_session)
             findings.append(
                 Finding(
                     detector=f"{self.name}.cross_session",
                     verdict=DetectorVerdict.WARNING,
                     summary=(
-                        f"{tool_name} 的同一次调用出现在 {len(seen)} 个不同会话中，"
+                        f"{tool_name} 的同一调用出现在 {len(per_session)} 个会话中"
+                        f"（#{'、#'.join(str(o) for o in sorted(per_session))}），"
                         f"疑似跨会话重复。"
+                        + (
+                            ""
+                            if first <= horizon
+                            else f"注意会话 #{last} 的记忆只覆盖到 #{horizon}，"
+                            f"它可能根本不知道之前调过。"
+                        )
                     ),
                     confidence=Confidence.MEDIUM,
                     detail={
                         "tool_name": tool_name,
                         "fingerprint": fp[:16],
-                        "sessions": sorted(seen),
+                        "sessions": {str(o): len(g) for o, g in sorted(per_session.items())},
+                        "memory_horizon_ordinal": horizon,
                     },
                 )
             )
@@ -412,9 +439,11 @@ class LoopDetector:
                 Finding(
                     detector=f"{self.name}.cross_session",
                     verdict=DetectorVerdict.PASS,
-                    summary=f"已在 {len(sessions)} 个会话间比对，未发现跨会话重复调用。",
+                    summary=(
+                        f"已在 {len(ordinals)} 个会话间比对，未发现跨会话重复的只读调用。"
+                    ),
                     confidence=Confidence.HIGH,
-                    detail={"sessions": sorted(sessions)},
+                    detail={"ordinals": sorted(ordinals)},
                 )
             )
         return findings

@@ -40,6 +40,15 @@ class CallView:
     is_write: bool
     session_sequence_id: str = ""
     session_id: str = ""
+    # 会话序号与记忆视野。两者其实是**会话**的属性，冗余到每条调用上——
+    # 与已经这么做的 session_id / session_sequence_id 同一套路。理由是检测器
+    # 的契约是"只吃 list[CallView]"，为跨会话检测单独开一条参数通道会让
+    # 所有检测器的签名一起变复杂，换来的只是省两个字段。
+    #
+    # 判断跨会话重复时用的就是 memory_horizon_ordinal：它比 session_ordinal
+    # 小，说明这段记忆被回滚掉了，Agent 不可能知道——归因的分界线就在这里。
+    session_ordinal: int = 0
+    memory_horizon_ordinal: int = -1
     idempotency_key: str | None = None
     replay_reason: str | None = None
     blocked_by_proxy: bool = False
