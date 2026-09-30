@@ -44,10 +44,15 @@ async def inspect_run(
     if not calls:
         return []
 
-    det = detector or _default_detector
-    findings = det.run(calls, ExemptionSet())
-
     active = runs.get(run_id)
+    # **豁免要跟着进来看门狗这一侧。** 检测器本来就会把命中的豁免降级成 pass
+    # 并留下 `exempted_by`，所以这里只要把场景声明的那一套传进去，"一条被豁免的
+    # 循环不算缺陷"这句话就同时在熔断和事后报告两边成立。传空集合的话，两边会
+    # 给出相反结论：进程被杀，报告却说"已豁免、通过"。
+    findings = (detector or _default_detector).run(
+        calls, active.exemptions if active else ExemptionSet()
+    )
+
     ctx = active.ctx if active else None
     if ctx is None:
         return findings
@@ -76,6 +81,22 @@ async def enforce(run_id: str, detector: LoopDetector | None = None) -> str | No
         if finding.detector not in KILL_ON_DETECTORS:
             continue
         if finding.verdict != DetectorVerdict.FAIL:
+            if finding.exempted_by is not None:
+                # 本该杀、被豁免拦下了。**这不是静音**——结论里带着
+                # `exempted_by`，报告会照原样印出理由。但日志里要留一笔：
+                # 一个确实在打转、而我们放它继续跑的运行，事后该能查得到。
+                #
+                # 每次工具调用都会重扫，所以同一条只报一次：反复刷同一行会把
+                # "查得到"变成"翻不到"。
+                key = f"{finding.detector}/{finding.exempted_by}"
+                if active is not None and key not in active.warned_exemptions:
+                    active.warned_exemptions.add(key)
+                    log.warning(
+                        "watchdog.exempted",
+                        run_id=run_id,
+                        detector=finding.detector,
+                        exempted_by=finding.exempted_by,
+                    )
             continue
 
         reason = f"{finding.detector}: {finding.summary}"

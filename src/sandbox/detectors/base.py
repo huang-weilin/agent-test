@@ -149,10 +149,56 @@ class Exemption:
         """
         return f"（已被豁免规则 {self.label} 静音：{self.reason}）"
 
+    def to_dict(self) -> dict[str, Any]:
+        """过线用的形状。字段名与场景 YAML 里的写法一致，读的人不用学第二套。"""
+        return {
+            "detector": self.detector,
+            "tool": self.tool,
+            "reason": self.reason,
+            "match": dict(self.match),
+            "allow_write": self.allow_write,
+        }
+
+    @classmethod
+    def of(cls, rule: dict[str, Any]) -> Exemption:
+        """从过线的形状还原一条规则，**校验照走一遍**。
+
+        直接 `Exemption(**rule)` 不行：字典里多一个键就是一个 `TypeError`，
+        而那种报错读起来像程序崩了，不像"你的规则写错了"。少一个键、写错一个
+        检测器名、`match` 里写错键——三条路都在这里变回同一种说法：
+        这条规则错在哪。
+        """
+        if not isinstance(rule, dict):
+            raise ValueError(f"豁免规则要是一个对象（字段名: 值），收到 {rule!r}。")
+        unknown = set(rule) - {"detector", "tool", "reason", "match", "allow_write"}
+        if unknown:
+            raise ValueError(
+                f"豁免规则里有不认识的字段 {sorted(unknown)}。"
+                f"认得的只有 detector / tool / reason / match / allow_write。"
+            )
+        for required in ("detector", "reason"):
+            if not rule.get(required):
+                raise ValueError(f"豁免规则缺少 {required}：{rule!r}")
+        return cls(
+            detector=rule["detector"],
+            tool=rule.get("tool"),
+            reason=rule["reason"],
+            match=dict(rule.get("match") or {}),
+            allow_write=bool(rule.get("allow_write", False)),
+        )
+
 
 class ExemptionSet:
     def __init__(self, rules: list[Exemption] | None = None) -> None:
         self.rules = list(rules or [])
+
+    def to_dicts(self) -> list[dict[str, Any]]:
+        return [rule.to_dict() for rule in self.rules]
+
+    @classmethod
+    def of(cls, rules: list[dict[str, Any]] | None) -> ExemptionSet:
+        """从过线的形状还原一整套规则。空/缺省 = 一条都没有。"""
+        return cls([Exemption.of(rule) for rule in rules or []])
 
     def find(
         self,

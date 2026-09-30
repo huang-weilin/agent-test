@@ -1,0 +1,76 @@
+id: loop_exempted
+description: >
+  和 loop.yaml 一字不差的脚本，只在场景里多声明一条豁免。8 次完全相同的
+  只读调用照样发生，但这一次看门狗不杀进程——声明说这个重复是被允许的，
+  而熔断发生在运行当中，那时看门狗唯一读得到的就是场景声明下来的那套规则。
+
+  这一对是这一节的受控对照：loop.yaml 在第 3 次调用时被带外熔断终止，
+  这里跑完全部 8 次、脚本耗尽后自己结束。两份文件除了 `exemptions` 那一段
+  之外一字不差（`id`、散文与人写的那把尺子本来就是两边必须不同的东西），
+  所以结论不同只可能是那一行造成的。
+
+  被静音的结论不会消失：它会带着"已被豁免规则静音：<理由>"留在报告里，
+  并且 detail 里记着 would_have_been: fail。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我把订单 A1 处理掉。
+  model: stub-model
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+# 豁免是声明，不是判定——它不减掉观测，只把结论降级成 pass 并留下理由。
+# 理由这一栏是必填的：没有理由的豁免在报告里没法复核，等于永久静音。
+exemptions:
+  - detector: loop.strict
+    tool: get_order
+    reason: 这个场景要证明"声明了豁免之后熔断不再杀进程"，这 8 次重复是刻意构造的样本
+
+sessions:
+  # 与 loop.yaml 一样：脚本里没有 content 步骤，所以这个循环不会自己停——
+  # 它只会停在上游脚本耗尽时那句强制终止。消费量是 9 而不是 8。
+  - name: 停不下来的查询
+    script:
+      - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
+      - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
+      - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
+      - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
+      - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
+      - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
+      - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
+      - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
+
+expected_charges: 0
+
+expect:
+  - detector: loop.strict
+    verdict: pass
+    note: >
+      8 次完全相同的调用确实发生了——严格层也确实判出来了，只是被场景声明的那条
+      豁免降级成了 pass。这里断言 pass 而不是"没有这条结论"：**被豁免的结论要
+      留在报告里**，理由和 would_have_been: fail 都跟着走。一条消失的结论读起来
+      和"没发生过"一模一样。
+
+# 不写 loop.cross_session 的预期：这个场景只有一个会话，它给 inconclusive，
+# 如实列在"未覆盖"那一栏，不算通过也不算失败。

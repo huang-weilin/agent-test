@@ -582,6 +582,10 @@ class ScenarioRunner:
                     # 场景里那份声明只被列给 Agent 看过，从来没人拿它核对过
                     # 一次真实调用，于是沙箱里的目标系统比真实的那一个宽松。
                     "tool_schemas": {t.name: t.parameters for t in scenario.tools},
+                    # 豁免规则也要过线。**看门狗在运行当中读的就是它**——不传的
+                    # 话，一条"这个重复是我允许的"在事后把结论降级成 pass，而
+                    # 进程早在第 3 次调用时就被杀了。见 runtime.ActiveRun.exemptions。
+                    "exemptions": scenario.exemption_set().to_dicts(),
                 },
             )
             resp.raise_for_status()

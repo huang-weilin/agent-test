@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 
 from sandbox.config import settings
 from sandbox.db.models import Confidence, DetectorVerdict
+from sandbox.detectors.base import ExemptionSet
 from sandbox.gateway.budget import BudgetExceededError
 from sandbox.gateway.stub import scripted_upstream
 from sandbox.runtime import runs
@@ -149,8 +150,8 @@ async def list_runs() -> dict[str, Any]:
     return {"runs": runs.snapshot()}
 
 
-@app.post("/_sandbox/runs")
-async def create_run(payload: dict[str, Any]) -> dict[str, Any]:
+@app.post("/_sandbox/runs", response_model=None)
+async def create_run(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
     """开一个运行并签发沙箱令牌。
 
     declared_writes 由场景工具声明提供——**必须显式声明**，不能只靠工具名启发式，
@@ -180,6 +181,14 @@ async def create_run(payload: dict[str, Any]) -> dict[str, Any]:
         declared_writes=set(payload["declared_writes"]) if payload.get("declared_writes") else None,
         idempotency_key_params=payload.get("idempotency_key_params") or {},
     )
+    # 豁免规则也要在场——**看门狗读的就是它**（见 `runtime.ActiveRun.exemptions`）。
+    # 校验在这里照走一遍：线上的形状是 JSON，手工 curl 也会走这条路，规则写错
+    # 要让调用方看见是哪一条错在哪，而不是等熔断那一刻才炸。
+    try:
+        exemptions = ExemptionSet.of(payload.get("exemptions"))
+    except ValueError as exc:
+        return _error(400, f"豁免规则有问题：{exc}", err_type="bad_exemptions")
+
     active = runs.register(
         ctx,
         scenario_id=payload.get("scenario_id", "adhoc"),
@@ -189,6 +198,7 @@ async def create_run(payload: dict[str, Any]) -> dict[str, Any]:
         tools=tool_table,
         # 参数 schema，出口代理拿它核对每一次调用。与上面那张表同源同命，见上。
         tool_schemas=schema_table,
+        exemptions=exemptions,
     )
     return {
         "run_id": ctx.run_id,

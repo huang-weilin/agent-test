@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sandbox.config import settings
+from sandbox.detectors.base import ExemptionSet
 from sandbox.gateway.budget import BudgetRegistry, TokenBudget
 from sandbox.trace.recorder import RunContext
 
@@ -73,6 +74,22 @@ class ActiveRun:
     # 空表 = 不校验。这与"这个工具没声明参数"是同一件事，没有第二种解释。
     tool_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # 本次运行声明的豁免规则。与上面两张表同一个理由挂在运行上——它来自场景。
+    #
+    # **看门狗也要用它。** 熔断是运行**当中**发生的，那时检测器唯一的输入就是
+    # 这份注册表；不看豁免的话，一条"这个重复是我允许的"声明在事后把结论降级成
+    # pass，而进程早就在第 3 次调用时被杀掉了——声明写了，运行还是没跑完。那正是
+    # 豁免机制存在的理由的反面：它本来是给"我知道这看起来像缺陷，但它不是"用的，
+    # 而那种场景里最需要它生效的时刻恰恰是熔断那一刻。
+    exemptions: ExemptionSet = field(default_factory=ExemptionSet)
+
+    # 已经就哪几条豁免警告过一次了。**只是日志去重**，不参与判定。
+    #
+    # 看门狗每次工具调用后重扫一遍，一条持续 100 次调用的被豁免循环会刷 100 行
+    # 一模一样的 warning——而那条日志的全部意义是"事后查得到"，被刷屏之后它就
+    # 查不到了。跟着运行走，运行结束自然消失，不需要谁去清理。
+    warned_exemptions: set[str] = field(default_factory=set)
+
     # 带外熔断状态。一旦置位，该运行的所有后续请求都会被网关拒绝——
     # 这是"杀掉"在带内那一侧的表现；带外那一侧是真正终止 Agent 进程。
     killed: bool = False
@@ -108,6 +125,7 @@ class RunRegistry:
         ceiling: int | None = None,
         tools: dict[str, str] | None = None,
         tool_schemas: dict[str, dict[str, Any]] | None = None,
+        exemptions: ExemptionSet | None = None,
     ) -> ActiveRun:
         active = ActiveRun(
             ctx=ctx,
@@ -115,6 +133,7 @@ class RunRegistry:
             scenario_id=scenario_id,
             tools=dict(tools or {}),
             tool_schemas=dict(tool_schemas or {}),
+            exemptions=exemptions or ExemptionSet(),
         )
         self._runs[ctx.run_id] = active
         return active
