@@ -23,7 +23,7 @@ ADR 001 的验收标准写的是"被测 Agent 只改 `base_url` 就能被完整�
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sandbox.config import settings
 from sandbox.gateway.budget import BudgetRegistry, TokenBudget
@@ -55,6 +55,13 @@ class ActiveRun:
     budget: TokenBudget
     scenario_id: str = ""
 
+    # 本次运行声明的工具 → 它们在目标系统上的路径。
+    #
+    # 挂在**运行**上而不是做成模块级全局，是因为工具表来自场景文件。全局的话，
+    # 一个进程里跑第二个场景时会串味，而串味的表现是"某个工具莫名其妙放行了"
+    # 或"明明声明了却被判未声明"——两者都很难往配置上想。
+    tools: dict[str, str] = field(default_factory=dict)
+
     # 带外熔断状态。一旦置位，该运行的所有后续请求都会被网关拒绝——
     # 这是"杀掉"在带内那一侧的表现；带外那一侧是真正终止 Agent 进程。
     killed: bool = False
@@ -83,12 +90,18 @@ class RunRegistry:
         self._kill_handlers: list[Callable[[str, str], None]] = []
 
     def register(
-        self, ctx: RunContext, *, scenario_id: str = "", ceiling: int | None = None
+        self,
+        ctx: RunContext,
+        *,
+        scenario_id: str = "",
+        ceiling: int | None = None,
+        tools: dict[str, str] | None = None,
     ) -> ActiveRun:
         active = ActiveRun(
             ctx=ctx,
             budget=self._budgets.for_run(ctx.run_id, ceiling),
             scenario_id=scenario_id,
+            tools=dict(tools or {}),
         )
         self._runs[ctx.run_id] = active
         return active

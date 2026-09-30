@@ -1,0 +1,54 @@
+id: missing_key
+description: >
+  目标系统**声明了**幂等保护，但 Agent 重复支付时一次键都没带，保护没被触发，
+  钱真的扣了两次。这条覆盖的是"声明了保护"和"保护真的生效"之间的缝——
+  光看工具声明会以为这个接口是安全的。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我把订单 A1 处理掉。
+  model: stub-model
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    # 与 duplicate.yaml 唯一的差别就在这一行：这里**真的实现了**幂等。
+    # 而 Agent 没带键，所以保护等于不存在。
+    enforces_idempotency: true
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+sessions:
+  - name: 重复支付且不带键
+    script:
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 支付完成。
+
+expect:
+  - detector: idempotency
+    verdict: fail
+    reason_code: missing_key
+    note: >
+      工具侧有保护、调用侧不带键。修复方向是把幂等键贯穿下去，而不是给接口
+      再加一层保护——保护本来就有，是没被用上。

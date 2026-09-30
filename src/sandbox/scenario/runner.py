@@ -1,0 +1,672 @@
+"""场景执行器：把一份 `Scenario` 变成一次真实的、有结论的运行。
+
+**它与 `scripts/run_walking_skeleton.py` 的分工。** 那个脚本是"证明这条链路
+跨进程成立"的演示，场景硬编码在它自己的字典里。这个模块是"跑任意场景"的引擎，
+场景来自数据。两者跑的是同一套服务，走的是同一条路径。
+
+执行顺序（一个场景 = 一次 TestRun = N 个 Session）：
+
+    init_db → 起三个服务 → 开运行（带场景的工具表）
+      → 装拼接后的上游脚本
+      → 对每个会话：
+            [恢复记忆] → start_session → [拍快照]
+            → 拉起 Agent 子进程 → 等它退出
+            → [拍快照] → **检查这一段的脚本被消费掉了多少**
+      → finish_run → 跑检测器 → 比对预期 → 报告
+
+三个决定值得单独说明，因为它们都是"不做就会静默出错"的那类：
+
+1. **上游脚本按会话拼接，但消费量按会话检查。** 单游标顺序读没问题，问题是
+   Agent 提前退出时，游标停在中间——下一个会话会读到**上一个会话**的步骤，
+   于是它做的事和场景写的完全不是一回事，而检测器照样给出一份看起来正常的
+   报告。所以每个会话结束都要断言"这一段被消费完了"，不满足就是前提没成立，
+   不是通过。
+
+2. **端口由操作系统分配。** 固定端口在并发跑两个场景时会抢，抢输的那个起不来，
+   报错却指向"服务启动失败"这种和场景毫无关系的地方。
+
+3. **Agent 的子进程环境里主动剔除已知的上游凭据变量名。** ADR 003 写着凭据
+   绝不进被测 Agent 的进程环境。`**os.environ` 会把开发机上碰巧 export 过的
+   真实密钥一起带进去——这条不是防 Agent，是防我们自己手滑。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import socket
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import httpx
+import structlog
+import uvicorn
+
+from sandbox.config import REPO_ROOT, settings
+from sandbox.db.engine import init_db
+from sandbox.detectors.base import ExemptionSet, Finding
+from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
+from sandbox.detectors.loop import LoopDetector
+from sandbox.gateway.stub import scripted_upstream
+from sandbox.memory.adapters.file_memory import FileMemoryAdapter
+from sandbox.memory.snapshot import SnapshotRef, SnapshotStore
+from sandbox.scenario.expect import ExpectResult, evaluate
+from sandbox.scenario.spec import Scenario
+from sandbox.trace.reader import load_session_sequence
+from sandbox.watchdog import summarize_verdicts
+
+log = structlog.get_logger(__name__)
+
+# 从 Agent 子进程环境里剔除的变量名。见模块 docstring 第 3 点。
+_STRIP_FROM_AGENT_ENV = frozenset(
+    {
+        "SANDBOX_UPSTREAM_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+    }
+)
+
+
+@dataclass
+class SessionOutcome:
+    """一个会话实际发生了什么。**这些是事实，不是判断。**"""
+
+    name: str
+    ordinal: int
+    memory_horizon_ordinal: int
+    restored_from: str | None
+    exit_code: int | None
+    elapsed_s: float
+    timed_out: bool
+    # 本会话声明的脚本步数 vs 上游游标实际前进的步数。
+    script_steps_declared: int
+    script_steps_consumed: int
+    tool_calls: int
+    # 这一次会话**自己**把运行触发了熔断（而不是进来时就已经是熔断状态）。
+    killed: bool = False
+    kill_reason: str = ""
+    stdout_tail: str = ""
+
+    @property
+    def premise_held(self) -> bool:
+        """这次测试的前提成立吗。
+
+        **不满足意味着"什么都没测到"，而不是"Agent 表现得很好"。** 分不清
+        这两者的报告会把空结果读成全绿——这正是本工具最严重的失效方式，
+        所以它是一个独立于检测结论的字段。
+
+        两个成立条件，第二个容易被漏掉：
+
+        1. 脚本被消费完了 —— Agent 确实做完了场景写的那些动作。
+        2. **本会话自己把运行跑到了熔断。** 被熔断时脚本必然没消费完，但那
+           恰恰是循环类场景的预期结果：检测器判出来了、看门狗动手了，说明
+           场景想制造的行为确实发生了。按条件 1 判的话，一个完美触发的循环
+           场景会被报成"没测到"——判据把成功的信号读成了失败。
+        """
+        return self.script_steps_consumed >= self.script_steps_declared or self.killed
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "ordinal": self.ordinal,
+            "memory_horizon_ordinal": self.memory_horizon_ordinal,
+            "restored_from": self.restored_from,
+            "exit_code": self.exit_code,
+            "elapsed_s": round(self.elapsed_s, 2),
+            "timed_out": self.timed_out,
+            "script_steps_declared": self.script_steps_declared,
+            "script_steps_consumed": self.script_steps_consumed,
+            "premise_held": self.premise_held,
+            "tool_calls": self.tool_calls,
+            "killed": self.killed,
+            "kill_reason": self.kill_reason,
+        }
+
+
+@dataclass
+class ScenarioResult:
+    scenario_id: str
+    run_id: str
+    sessions: list[SessionOutcome] = field(default_factory=list)
+    findings: list[Finding] = field(default_factory=list)
+    expectation: ExpectResult | None = None
+    summary: dict[str, float] = field(default_factory=dict)
+    egress_charges: int = 0
+    error: str | None = None
+
+    @property
+    def premises_held(self) -> bool:
+        return bool(self.sessions) and all(s.premise_held for s in self.sessions)
+
+    @property
+    def ok(self) -> bool:
+        """整体是否通过。
+
+        前提没成立时一律不通过，**无论检测器说了什么**——检测器是在一段
+        不符合场景描述的轨迹上跑出来的结论，那些结论不指向被测对象。
+        """
+        if self.error is not None or not self.premises_held:
+            return False
+        return self.expectation is not None and self.expectation.ok
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scenario_id": self.scenario_id,
+            "run_id": self.run_id,
+            "ok": self.ok,
+            "premises_held": self.premises_held,
+            "error": self.error,
+            "sessions": [s.to_dict() for s in self.sessions],
+            "summary": self.summary,
+            "egress_charges": self.egress_charges,
+            "findings": [
+                {
+                    "detector": f.detector,
+                    "verdict": f.verdict.value,
+                    "summary": f.summary,
+                    "detail": f.detail,
+                }
+                for f in self.findings
+            ],
+            "expectation": self.expectation.to_dict() if self.expectation else None,
+        }
+
+
+async def _serve(app: Any, sock: socket.socket) -> tuple[uvicorn.Server, asyncio.Task[None]]:
+    """在一个已经 bind+listen 的套接字上起一个 uvicorn。
+
+    套接字由调用方准备好，端口就由内核分配——见模块 docstring 第 2 点。
+
+    返回 server 和它的 task 两个东西：关服务时只置 `should_exit` 是不够的，
+    必须等 task 真的跑完再关套接字。不然 lifespan 还挂在 receive 上，套接字
+    一关就抛一串 CancelledError——看着像崩溃，其实什么都没坏，白让人查一轮。
+    """
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
+    task = asyncio.create_task(server.serve(sockets=[sock]))
+    while not server.started:
+        if task.done():
+            task.result()  # 把真实异常抛出来，而不是报一句"启动失败"
+        await asyncio.sleep(0.02)
+    return server, task
+
+
+def _bind(port: int = 0) -> tuple[socket.socket, int]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", port))
+    sock.listen(128)
+    return sock, sock.getsockname()[1]
+
+
+class ScenarioRunner:
+    """跑场景。一个实例可以被复用跑多个场景（每个场景内部自建服务）。"""
+
+    def __init__(
+        self,
+        *,
+        repo_root: Path = REPO_ROOT,
+        session_timeout_s: float = 180.0,
+        keep_servers: bool = False,
+    ) -> None:
+        self.repo_root = Path(repo_root)
+        self.session_timeout_s = session_timeout_s
+        self.keep_servers = keep_servers
+
+    # --- 对外入口 ---------------------------------------------------------
+
+    async def run(self, scenario: Scenario) -> ScenarioResult:
+        result = ScenarioResult(scenario_id=scenario.id, run_id="")
+        try:
+            await self._run(scenario, result)
+        except Exception as exc:  # noqa: BLE001 — 引擎的异常要进报告，不是崩掉 CLI
+            log.exception("scenario.run_failed", scenario=scenario.id)
+            result.error = f"{type(exc).__name__}: {exc}"
+        return result
+
+    # --- 主体 -------------------------------------------------------------
+
+    async def _run(self, scenario: Scenario, result: ScenarioResult) -> None:
+        # 延迟导入：把 app 模块的导入推迟到真的要起服务时，这样只做加载/校验的
+        # 路径（CLI 的 --list、加载测试）不必拉起整个 web 栈。
+        from sandbox.gateway import app as gateway_app
+        from sandbox.mock import server as mock_server
+        from sandbox.proxy import app as proxy_app
+        from sandbox.runtime import runs
+
+        await init_db()
+        state = mock_server.get_state()
+        state.reset()
+        # mock 目标系统侧是否真的按幂等键去重。
+        #
+        # 场景是按**工具**声明这个属性的，而 mock 只有一个全局开关——因为
+        # mock 里目前只有一个写工具，两者等价。加第二个写工具时这里必须改成
+        # 按工具分别控制，否则"工具 A 幂等、工具 B 不幂等"这种场景根本表达不出来。
+        state.enforce_idempotency = any(
+            t.enforces_idempotency for t in scenario.tools if t.is_write
+        )
+        proxy_app.set_policy(None)
+        proxy_app.set_transport(None)
+        # clear() 会连带外处理器一起清掉（见 runtime.RunRegistry.clear 的说明），
+        # 所以处理器必须在 clear 之后注册。
+        runs.clear()
+
+        gw_sock, gw_port = _bind()
+        px_sock, px_port = _bind()
+        mk_sock, mk_port = _bind()
+        servers = [
+            await _serve(gateway_app.app, gw_sock),
+            await _serve(proxy_app.app, px_sock),
+            await _serve(mock_server.app, mk_sock),
+        ]
+        tasks = [task for _, task in servers]
+
+        # 代理转发到"目标系统"的地址来自配置，而 mock 现在绑在随机端口上。
+        # 不覆盖的话，代理会去敲配置里那个端口——可能没人监听（连接被拒），
+        # 更糟的是**可能有另一个场景的 mock 在听**，于是两个场景互相往对方的
+        # 目标系统里写数据，而两边报告都正常。所以必须把实际端口告诉它。
+        #
+        # 跑完恢复原值：这是进程级配置，泄漏到下一个场景会让它指向一个已经
+        # 关掉的端口。
+        original_upstream = settings.tool_upstream_base_url
+        settings.tool_upstream_base_url = f"http://127.0.0.1:{mk_port}"
+
+        try:
+            await self._run_sessions(scenario, result, gw_port, px_port, mk_port, runs)
+        finally:
+            settings.tool_upstream_base_url = original_upstream
+            if not self.keep_servers:
+                for server, _ in servers:
+                    server.should_exit = True
+                # 等三个服务真的收完再关套接字，顺序反了会刷一屏 CancelledError。
+                await asyncio.gather(*tasks, return_exceptions=True)
+                for sock in (gw_sock, px_sock, mk_sock):
+                    sock.close()
+
+    async def _run_sessions(
+        self,
+        scenario: Scenario,
+        result: ScenarioResult,
+        gw_port: int,
+        px_port: int,
+        mk_port: int,
+        runs: Any,
+    ) -> None:
+        # 不导入 finish_run：收尾走 HTTP 端点，那条路径顺带验证了端点本身能用。
+        from sandbox.trace.recorder import (
+            capture_snapshot,
+            horizon_of,
+            restore_snapshot,
+            start_session,
+        )
+
+        # 记忆目录由**引擎**开出来，再通过环境变量交给 Agent。让 Agent 自己
+        # 决定记忆放哪儿的话，测试框架的回滚就可能回滚到一处它根本不读的地方——
+        # 而那时报告会显示"回滚过了，还是重复扣款"，把 Agent 冤枉成不读记忆。
+        memory_root = settings.memory_root / scenario.id
+        memory_root.mkdir(parents=True, exist_ok=True)
+        adapter = FileMemoryAdapter(root=memory_root)
+        store = SnapshotStore()
+        # 名字 → 快照引用。场景用名字引用快照，引擎记住这个名字对应哪一次。
+        named: dict[str, SnapshotRef] = {}
+
+        # 上游脚本按会话顺序拼接。单游标顺序读，所以每个会话的步骤必须
+        # 紧跟在它前面那个会话的步骤之后——见下面消费量检查。
+        full_script: list[dict[str, Any]] = []
+        for session in scenario.sessions:
+            full_script.extend(session.script)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{gw_port}/_sandbox/runs",
+                json={
+                    "scenario_id": scenario.id,
+                    "agent_version": scenario.agent.version,
+                    "config": {"scenario": scenario.id, "model": scenario.agent.model},
+                    "declared_writes": sorted(scenario.declared_writes()),
+                    "idempotency_key_params": scenario.idempotency_params(),
+                    "tools": {t.name: f"/tools/{t.name}" for t in scenario.tools},
+                },
+            )
+            resp.raise_for_status()
+            run = resp.json()
+            run_id = run["run_id"]
+            result.run_id = run_id
+
+            scripted_upstream.register(run_id, full_script)
+
+            # 带外熔断处理器。Agent 进程每个会话换一个，所以用可变容器持有
+            # "当前那个"，而不是在闭包里捕获第一个。
+            current: dict[str, subprocess.Popen[str] | None] = {"proc": None}
+
+            def kill_handler(_rid: str, reason: str) -> None:
+                proc = current["proc"]
+                if proc is not None and proc.poll() is None:
+                    log.warning("scenario.kill_agent_process", reason=reason)
+                    proc.terminate()
+
+            runs.on_kill(kill_handler)
+
+            active = runs.get(run_id)
+            assert active is not None  # 刚注册的，不可能不在
+
+            for index, spec in enumerate(scenario.sessions):
+                ordinal = index  # 会话 0 由 start_run 建出，从会话 1 起要显式开
+                restored: SnapshotRef | None = None
+                if spec.restore_from is not None:
+                    restored = named[spec.restore_from]
+                    # allow_create=True：这个目录是引擎自己开的，见上面。
+                    await restore_snapshot(restored, adapter, store, allow_create=True)
+
+                if index > 0:
+                    await start_session(active.ctx, restored_from=restored)
+
+                if spec.snapshot_before:
+                    named[spec.snapshot_before] = await capture_snapshot(
+                        active.ctx, adapter, store
+                    )
+
+                cursor_before = scripted_upstream.calls_made(run_id)
+                # 熔断状态是运行级的、会一直留着，所以要分"进来时就已经熔断"
+                # 和"这一次会话把它跑熔断了"。前者说明这个会话根本没机会跑，
+                # 后者才是"循环场景如期触发"。
+                killed_before = active.killed
+                exit_code, timed_out, stdout, elapsed = await self._launch_agent(
+                    scenario, run["api_key"], gw_port, px_port, memory_root, current
+                )
+                cursor_after = scripted_upstream.calls_made(run_id)
+
+                if spec.snapshot_after:
+                    named[spec.snapshot_after] = await capture_snapshot(
+                        active.ctx, adapter, store
+                    )
+
+                result.sessions.append(
+                    SessionOutcome(
+                        name=spec.name,
+                        ordinal=ordinal,
+                        memory_horizon_ordinal=active.ctx.memory_horizon_ordinal,
+                        restored_from=spec.restore_from,
+                        exit_code=exit_code,
+                        elapsed_s=elapsed,
+                        timed_out=timed_out,
+                        script_steps_declared=len(spec.script),
+                        script_steps_consumed=cursor_after - cursor_before,
+                        tool_calls=0,  # 稍后按会话回填
+                        killed=active.killed and not killed_before,
+                        kill_reason=active.kill_reason,
+                        stdout_tail=stdout[-2000:],
+                    )
+                )
+
+            # 收尾：注销路由（Agent 已经全部退出，不会再产生调用了）。
+            await client.post(f"http://127.0.0.1:{gw_port}/_sandbox/runs/{run_id}/finish")
+
+        # 检测跑在**会话序列**上，而不是单个运行上——跨会话归因需要
+        # (ordinal, seq) 这个顺序，而它是会话序列的属性。
+        calls = await load_session_sequence(active.ctx.session_sequence_id)
+        per_ordinal: dict[int, int] = {}
+        for call in calls:
+            per_ordinal[call.session_ordinal] = per_ordinal.get(call.session_ordinal, 0) + 1
+        for outcome in result.sessions:
+            outcome.tool_calls = per_ordinal.get(outcome.ordinal, 0)
+
+        result.findings = _run_detectors(scenario, calls)
+        result.expectation = evaluate(scenario, result.findings)
+        result.summary = summarize_verdicts(result.findings)
+        result.egress_charges = await self._charges(mk_port)
+
+        # 快照位置随报告一起给出：跨会话结论的归因完全建立在"回滚到了哪儿"上，
+        # 不给出来就没法复核。
+        refs = await store.list_for_sequence(active.ctx.session_sequence_id)
+        log.info(
+            "scenario.snapshots",
+            scenario=scenario.id,
+            positions=[
+                {
+                    "name": _name_of(ref, named),
+                    "position": ref.position,
+                    "horizon": horizon_of(ref),
+                    "entries": ref.entry_count,
+                }
+                for ref in refs
+            ],
+        )
+
+    async def _launch_agent(
+        self,
+        scenario: Scenario,
+        token: str,
+        gw_port: int,
+        px_port: int,
+        memory_root: Path,
+        current: dict[str, subprocess.Popen[str] | None],
+    ) -> tuple[int | None, bool, str, float]:
+        """拉起被测 Agent 进程，等它退出。返回 (退出码, 是否超时, 输出, 耗时)。"""
+        agent_dir = self.repo_root / "agents" / scenario.agent.directory
+        python = agent_dir / ".venv" / "Scripts" / "python.exe"
+        if not python.exists():
+            # Windows 的 venv 布局。非 Windows 上退回 posix 布局，让这个
+            # 运行器至少能在别处跑起来，而不是只在开发机上能跑。
+            alt = agent_dir / ".venv" / "bin" / "python"
+            python = alt if alt.exists() else python
+        if not python.exists():
+            raise FileNotFoundError(
+                f"Agent 解释器不存在：{python}。请先在 {agent_dir} 下建好 venv 并装依赖"
+                f"（见 agents/{scenario.agent.directory}/README.md）。"
+            )
+
+        env = {
+            # 场景自带的环境变量放在前面，让沙箱注入的**覆盖**它。
+            # 反过来的话，场景可以把 Agent 指向真实上游，那观测就断了。
+            **scenario.agent.env,
+            **{k: v for k, v in os.environ.items() if k not in _STRIP_FROM_AGENT_ENV},
+            "SANDBOX_GATEWAY_BASE_URL": f"http://127.0.0.1:{gw_port}/v1",
+            "SANDBOX_AGENT_API_KEY": token,
+            "SANDBOX_TOOL_BASE_URL": f"http://127.0.0.1:{px_port}",
+            "SANDBOX_AGENT_MODEL": scenario.agent.model,
+            "SANDBOX_AGENT_TASK": scenario.agent.task,
+            # 记忆目录由引擎创建并告知 Agent。Agent 不该自己猜路径，
+            # 否则测试框架的回滚就回滚到了一处它不读的地方。
+            "SANDBOX_AGENT_MEMORY_DIR": str(memory_root),
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
+        }
+
+        started = time.perf_counter()
+        proc = subprocess.Popen(
+            [str(python), scenario.agent.entry],
+            cwd=str(agent_dir),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        current["proc"] = proc
+
+        timed_out = False
+        try:
+            stdout, _ = await asyncio.to_thread(proc.communicate, self.session_timeout_s)
+        except (TimeoutError, subprocess.TimeoutExpired):
+            # 超时**不能**当成"Agent 结束了"。它还在跑、还在烧钱，只是我们
+            # 不等了；结论必须标出来，否则报告会把它读成一次正常结束。
+            timed_out = True
+            proc.kill()
+            await asyncio.to_thread(proc.communicate)
+            stdout = "(Agent 超时未退出，已强杀)"
+        finally:
+            current["proc"] = None
+
+        return proc.returncode, timed_out, stdout or "", time.perf_counter() - started
+
+    async def _charges(self, mock_port: int) -> int:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"http://127.0.0.1:{mock_port}/_mock/charges")
+                return int(resp.json().get("count", 0))
+        except Exception:  # noqa: BLE001 — mock 没起来不该让整份报告丢掉
+            return -1
+
+
+def _name_of(ref: SnapshotRef, named: dict[str, SnapshotRef]) -> str | None:
+    return next((k for k, v in named.items() if v.id == ref.id), None)
+
+
+def _run_detectors(scenario: Scenario, calls: list[Any]) -> list[Finding]:
+    """跑全套检测器。工具事实来自场景声明，是写/读属性的单一来源。
+
+    顺序固定：输出顺序稳定，比对预期时不会因为字典序漂移而时红时绿。
+    """
+    facts = {
+        t.name: ToolFacts(t.name, t.is_write, t.enforces_idempotency) for t in scenario.tools
+    }
+    findings: list[Finding] = []
+    findings.extend(IdempotencyDetector(facts).run(calls, ExemptionSet()))
+    findings.extend(LoopDetector().run(calls, ExemptionSet()))
+    return findings
+
+
+def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
+    """人类可读报告。"""
+    lines: list[str] = []
+    add = lines.append
+
+    add(f"=== 场景 {result.scenario_id} ===")
+    if scenario and scenario.description:
+        add(f"    {scenario.description}")
+    add(f"    运行 {result.run_id or '(未创建)'}")
+
+    if result.error:
+        add(f"\n!! 执行失败：{result.error}")
+        return "\n".join(lines)
+
+    add("\n--- 会话 ---")
+    for s in result.sessions:
+        mark = "ok" if s.premise_held else "!!"
+        restored = f" ← 恢复到 {s.restored_from}" if s.restored_from else ""
+        timeout = " [超时强杀]" if s.timed_out else ""
+        killed = " [已被熔断]" if s.killed else ""
+        add(
+            f"  {mark} #{s.ordinal} {s.name}{restored}{timeout}{killed}"
+            f"  退出码 {s.exit_code}  {s.elapsed_s:.1f}s"
+        )
+        add(
+            f"       记忆视野 ≤ 会话 {s.memory_horizon_ordinal}"
+            f" / 工具调用 {s.tool_calls} 次"
+        )
+        consumed = f"       脚本消费 {s.script_steps_consumed}/{s.script_steps_declared}"
+        if s.killed:
+            consumed += f"（熔断所致，前提成立）\n       熔断原因：{s.kill_reason}"
+        elif not s.premise_held:
+            consumed += "  ** 这一段没跑完，前提未成立 **"
+        add(consumed)
+
+    add("\n--- 检测结论 ---")
+    if not result.findings:
+        add("  （无）")
+    for f in result.findings:
+        flag = {"pass": "  ", "fail": "!!", "warning": " ?", "inconclusive": ".."}[
+            f.verdict.value
+        ]
+        add(f"  {flag} [{f.verdict.value:<12}] {f.detector}")
+        add(f"       {f.summary}")
+
+    add("\n--- 汇总（四态，inconclusive 不并入 pass）---")
+    s = result.summary
+    add(
+        f"  通过 {s.get('pass', 0):.0f} / 失败 {s.get('fail', 0):.0f} / "
+        f"警告 {s.get('warning', 0):.0f} / **未覆盖 {s.get('inconclusive', 0):.0f}**"
+    )
+    add(
+        f"  覆盖率 {s.get('coverage_ratio', 0):.0%}"
+        f"（已覆盖部分的失败率 {s.get('failure_rate_among_covered', 0):.0%}）"
+    )
+    if result.egress_charges >= 0:
+        add(f"  mock 侧真实扣款 {result.egress_charges} 笔")
+
+    if result.expectation is not None:
+        e = result.expectation
+        add("\n--- 预期 ---")
+        for expectation, finding in e.matched:
+            add(f"  命中  {expectation.detector}/{expectation.verdict.value}：{finding.summary}")
+        for expectation in e.missing:
+            code = f"/{expectation.reason_code}" if expectation.reason_code else ""
+            add(
+                f"  未命中 {expectation.detector}/{expectation.verdict.value}{code}"
+                f"{'：' + expectation.note if expectation.note else ''}"
+            )
+        for finding in e.unexpected:
+            add(f"  意外  [{finding.verdict.value}] {finding.detector}：{finding.summary}")
+        for finding in e.uncovered:
+            add(f"  未覆盖 [{finding.verdict.value}] {finding.detector}：{finding.summary}")
+
+    if not result.premises_held:
+        add(
+            "\n  ** 有会话没把脚本跑完，检测结论不指向被测对象，本次不算通过。**\n"
+            "     常见原因：Agent 提前退出（工具调用报错、导入失败、环境变量没配好）。"
+        )
+
+    add(f"\n  结论：{'通过' if result.ok else '不通过'}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`scripts/run_scenario.py` 的实现，放这里是为了让脚本只做参数转发。"""
+    import argparse
+    import json
+
+    from sandbox.scenario.loader import ScenarioError, load_all, load_scenario
+
+    parser = argparse.ArgumentParser(description="跑一个场景（数据驱动）")
+    parser.add_argument("scenarios", nargs="*", help="场景文件或目录")
+    parser.add_argument("--dir", default=str(REPO_ROOT / "scenarios"), help="场景目录")
+    parser.add_argument("--list", action="store_true", help="只列出场景，不跑")
+    parser.add_argument("--json", action="store_true", help="输出 JSON 报告")
+    parser.add_argument("--timeout", type=float, default=180.0, help="单会话超时（秒）")
+    parser.add_argument("--keep-servers", action="store_true", help="跑完不关服务")
+    args = parser.parse_args(argv)
+
+    targets = args.scenarios or [args.dir]
+    try:
+        scenarios = []
+        for target in targets:
+            path = Path(target)
+            scenarios.extend(load_all(path) if path.is_dir() else [load_scenario(path)])
+    except ScenarioError as exc:
+        print(f"场景不合法：\n{exc}", file=sys.stderr)
+        return 2
+
+    if args.list:
+        for scenario in scenarios:
+            print(f"{scenario.id:<24} {scenario.description}")
+            print(
+                f"    会话 {len(scenario.sessions)} 个 / 工具 {len(scenario.tools)} 个 "
+                f"/ 预期 {len(scenario.expect)} 条"
+            )
+        return 0
+
+    async def _all() -> int:
+        runner = ScenarioRunner(
+            session_timeout_s=args.timeout, keep_servers=args.keep_servers
+        )
+        failed = 0
+        for scenario in scenarios:
+            result = await runner.run(scenario)
+            if args.json:
+                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                print(render(result, scenario))
+                print()
+            failed += 0 if result.ok else 1
+        if len(scenarios) > 1:
+            print(f"===== {len(scenarios) - failed}/{len(scenarios)} 个场景通过 =====")
+        return 1 if failed else 0
+
+    return asyncio.run(_all())

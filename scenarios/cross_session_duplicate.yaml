@@ -1,0 +1,63 @@
+id: cross_session_duplicate
+description: >
+  两次会话之间恢复到**付款之后**的快照，于是第二次会话的记忆里确实有那笔付款，
+  但它又付了一次。钱扣了两次，这次是 Agent 的锅——它本可以认出来。
+
+  与 cross_session_memory_loss.yaml 对照着看：两份报告的 verdict 完全相同，
+  只有 reason_code 和"该去修哪儿"不同。这正是把记忆快照做成操纵面换来的东西——
+  归因由我们回滚到了哪儿唯一确定，不需要启发式。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我把订单 A1 处理掉。
+  model: stub-model
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+sessions:
+  - name: 第一次，付了款
+    script:
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 订单 A1 已支付。
+    # 拍在付款**之后**。位置是 (会话 0, seq≥1)，记忆视野算出来是 0——
+    # 也就是说"付过款"这件事在第二次会话的记忆里。
+    snapshot_after: after_pay
+
+  - name: 第二次，记忆里有那笔付款
+    restore_from: after_pay
+    script:
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 订单 A1 已支付。
+
+expect:
+  - detector: idempotency
+    verdict: fail
+    reason_code: cross_session_duplicate
+    note: >
+      归因指向 Agent。注意演示 Agent 是无状态的、根本不读记忆目录，所以它
+      必然落到这一支——这个场景证明的是**归因逻辑**，不是这个 Agent 会犯这个错。

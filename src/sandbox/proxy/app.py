@@ -29,7 +29,6 @@ from fastapi.responses import JSONResponse
 from sandbox import watchdog
 from sandbox.config import settings
 from sandbox.db.models import Confidence, DetectorVerdict
-from sandbox.mock.toolspec import TOOL_SPECS
 from sandbox.proxy.policy import EgressPolicy, host_of
 from sandbox.runtime import runs
 from sandbox.trace.recorder import record_finding, record_tool_call
@@ -121,8 +120,11 @@ async def call_tool(
         )
     ctx = active.ctx
 
-    spec = TOOL_SPECS.get(tool_name)
-    if spec is None:
+    # 工具表来自**本次运行**（场景文件声明的），不是模块级全局。
+    # 用全局的话，一个进程里跑第二个场景会串味，而串味的表现是"某个工具
+    # 莫名放行"或"明明声明了却判未声明"——两种都很难往配置上想。
+    tool_path = active.tools.get(tool_name)
+    if tool_path is None:
         # Agent 调用了未声明的工具。这不是"出口被拒"，是行为异常，
         # 所以要留一条独立的 finding——它往往比重复扣款更早暴露问题。
         await record_tool_call(
@@ -139,11 +141,15 @@ async def call_tool(
             verdict=DetectorVerdict.FAIL,
             summary=f"Agent 调用了未声明的工具 {tool_name!r}",
             confidence=Confidence.HIGH,
-            detail={"tool_name": tool_name, "args": payload, "declared": sorted(TOOL_SPECS)},
+            detail={
+                "tool_name": tool_name,
+                "args": payload,
+                "declared": sorted(active.tools),
+            },
         )
         return _error(403, f"工具 {tool_name!r} 未在场景中声明。", "undeclared_tool")
 
-    target = f"{settings.tool_upstream_base_url.rstrip('/')}{spec.path}"
+    target = f"{settings.tool_upstream_base_url.rstrip('/')}{tool_path}"
     target_host = host_of(target)
     decision = get_policy().check(target_host, tool_name)
 
@@ -183,7 +189,10 @@ async def call_tool(
     headers = {
         "X-Sandbox-Run-Id": ctx.run_id,
         "X-Sandbox-Tool-Call-Id": call_id,
-        "X-Sandbox-Is-Write": "1" if spec.is_write else "0",
+        # 写判定取自运行的 declared_writes，与 record_tool_call 落库时用的是同一处
+        # 依据。两边各判一次的话，总有一天会不一致，而那时报告会显示"这是个读操作"
+        # 却同时报出一条重复扣款。
+        "X-Sandbox-Is-Write": "1" if tool_name in ctx.declared_writes else "0",
     }
     return JSONResponse(status_code=status_code, content=body, headers=headers)
 

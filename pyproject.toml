@@ -13,6 +13,10 @@ dependencies = [
     "httpx>=0.28",
     "aiosqlite>=0.20",
     "structlog>=24.4",
+    # 场景文件是 YAML，而场景 DSL 是核心功能不是可选项，所以显式声明。
+    # 之前它只是靠 uvicorn[standard] 传递进来的——传递依赖哪天被上游砍掉，
+    # 场景加载会在一个和 YAML 毫无关系的地方报 ImportError。
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

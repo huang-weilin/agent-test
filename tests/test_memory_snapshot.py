@@ -223,10 +223,15 @@ def test_symlinked_directories_are_not_walked_into(memory_root: Path, tmp_path: 
         # 退到 junction。Windows 上 mklink /J 不需要管理员权限。
         import subprocess
 
+        # errors="replace"：mklink 的输出走 Windows 控制台代码页（中文机器上
+        # 是 GBK），按 UTF-8 硬解会在 reading 线程里抛 UnicodeDecodeError。
+        # 那个异常不影响 returncode，但会让每一次测试运行都挂一条告警——
+        # 一条永远在的告警会训练人忽略告警。
         result = subprocess.run(
             ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
             capture_output=True,
             text=True,
+            errors="replace",
         )
         if result.returncode != 0:
             pytest.skip(f"本机既建不了符号链接也建不了 junction：{result.stderr.strip()}")

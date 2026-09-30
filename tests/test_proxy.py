@@ -171,6 +171,74 @@ async def test_undeclared_tool_is_a_finding_not_an_egress_block(
     assert findings[0].verdict == "fail"
 
 
+async def test_two_runs_in_one_process_do_not_share_their_tool_table(
+    gw_client, px_client, db
+) -> None:
+    """工具表是**每次运行**的，不是进程全局的。
+
+    这是场景 DSL 带来的要求：一个进程要能连着跑多个场景，而场景文件各自
+    声明自己的工具。用全局表的话，第二个场景会看见第一个的工具——表现是
+    "某个工具莫名放行了"或者"明明声明了却判未声明"，两种都很难往配置上想，
+    因为报告本身看起来是正常的。
+
+    用两张**不同**的表来验：谁都不该看见对方的工具。
+    """
+    charges: list[dict] = []
+    proxy_app.set_transport(_mock_backend(charges))
+
+    first = await _register(
+        gw_client, scenario_id="scen-a", tools={"only_in_a": "/tools/only_in_a"}
+    )
+    second = await _register(
+        gw_client, scenario_id="scen-b", tools={"only_in_b": "/tools/only_in_b"}
+    )
+    assert first["api_key"] != second["api_key"]
+
+    # 各自调自己的：都该放行，且都该落到自己的运行上。
+    ok_a = await px_client.post(
+        "/tools/only_in_a", json={}, headers={"Authorization": f"Bearer {first['api_key']}"}
+    )
+    assert ok_a.status_code == 200, ok_a.text
+    ok_b = await px_client.post(
+        "/tools/only_in_b", json={}, headers={"Authorization": f"Bearer {second['api_key']}"}
+    )
+    assert ok_b.status_code == 200, ok_b.text
+
+    # 各自调对方的：都该被判未声明，而不是"因为另一个运行声明过所以放行"。
+    cross_a = await px_client.post(
+        "/tools/only_in_b", json={}, headers={"Authorization": f"Bearer {first['api_key']}"}
+    )
+    assert cross_a.status_code == 403
+    assert cross_a.json()["error"]["type"] == "undeclared_tool"
+
+    cross_b = await px_client.post(
+        "/tools/only_in_a", json={}, headers={"Authorization": f"Bearer {second['api_key']}"}
+    )
+    assert cross_b.status_code == 403
+    assert cross_b.json()["error"]["type"] == "undeclared_tool"
+
+    # 归属也要对：越界的调用必须记在**发起它的那个**运行上。
+    blocked = (
+        (await db.execute(select(ToolCall).where(ToolCall.status == "blocked"))).scalars().all()
+    )
+    assert {c.test_run_id for c in blocked} == {first["run_id"], second["run_id"]}
+
+
+async def test_a_run_without_a_declared_tool_table_falls_back_to_the_builtin(
+    gw_client, px_client
+) -> None:
+    """没传 tools 时回落到内置工具表。
+
+    手工 curl 起一个运行来排查时不该被迫先声明一遍工具。回落是**显式**的默认：
+    传了就完全以传的为准（上一条测试覆盖）。
+    """
+    await _register(gw_client, scenario_id="adhoc")
+    proxy_app.set_transport(_mock_backend([]))
+
+    resp = await px_client.post("/tools/get_order", json={"order_id": "A1"})
+    assert resp.status_code == 200, resp.text
+
+
 async def test_generic_fetch_is_denied_by_default_and_marked_blocked(
     gw_client, px_client, db
 ) -> None:

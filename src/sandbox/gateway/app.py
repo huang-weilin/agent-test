@@ -77,6 +77,21 @@ def _upstream_url(base: str) -> str:
     return f"{base}/v1/chat/completions"
 
 
+def _default_tools() -> dict[str, str]:
+    """未声明工具时的回落表：内置 mock 的工具 → 路径。
+
+    这个耦合方向（网关 → mock）是**故意局限在兜底上**的，所以用延迟导入把它
+    挡在模块导入图之外：网关的核心职责不认识 mock，只有"手工起一个运行来排查"
+    这条便利路径需要一份现成的工具表。场景运行一律自带 tools，走不到这里。
+
+    要是哪天这里被当成正常路径用了，说明场景文件没把工具声明传下来——那时
+    该修的是传参，不是把这张表做大。
+    """
+    from sandbox.mock.toolspec import TOOL_SPECS
+
+    return {name: spec.path for name, spec in TOOL_SPECS.items()}
+
+
 async def _call_real_upstream(payload: dict[str, Any]) -> dict[str, Any]:
     """转发到真实上游。真实密钥只在这里出现。"""
     if not settings.upstream_ready:
@@ -143,6 +158,12 @@ async def create_run(payload: dict[str, Any]) -> dict[str, Any]:
         ctx,
         scenario_id=payload.get("scenario_id", "adhoc"),
         ceiling=payload.get("token_ceiling"),
+        # 场景声明的工具 → 路径。代理据此判断调用是否越界，
+        # 所以必须在开跑前定下来，不能等第一个请求到了再补。
+        #
+        # 不传则回落到内置工具表：手工 curl 起一个运行来排查时不该被迫先声明
+        # 一遍工具。回落值是显式的默认，不是隐式行为——传了就完全以传的为准。
+        tools=payload.get("tools") or _default_tools(),
     )
     return {
         "run_id": ctx.run_id,

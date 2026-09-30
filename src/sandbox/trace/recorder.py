@@ -234,14 +234,27 @@ async def capture_snapshot(
     )
 
 
-async def restore_snapshot(ref: SnapshotRef, adapter: MemoryAdapter, store: SnapshotStore) -> None:
+async def restore_snapshot(
+    ref: SnapshotRef,
+    adapter: MemoryAdapter,
+    store: SnapshotStore,
+    *,
+    allow_create: bool = False,
+) -> None:
     """把 Agent 的记忆回滚到快照状态。
 
     **这是破坏性的**，会清空并重建适配器指向的记忆目录。三道闸在适配器里
     （见 memory/adapters/file_memory.py），这里不重复判断。
+
+    `allow_create` 默认 False：记忆目录不存在时拒绝恢复。这是对的默认——
+    "目录不在那儿"最常见的原因是**路径搞错了**，而那时恢复等于在一个别的地方
+    凭空造一份记忆出来，删掉的可能是无关的东西。
+
+    场景执行器会传 True，因为那个目录是它自己开出来、自己注入给 Agent 的：
+    它知道路径是对的，"目录还没有"只是因为 Agent 这次一个字都没往记忆里写。
     """
     payload = await store.load(ref.id)
-    adapter.restore(payload)
+    adapter.restore(payload, allow_create=allow_create)
 
 
 async def finish_run(

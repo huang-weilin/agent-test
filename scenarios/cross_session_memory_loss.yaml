@@ -1,0 +1,63 @@
+id: cross_session_memory_loss
+description: >
+  两次会话之间把记忆回滚到**付款之前**，于是第二次会话不可能知道付过款，
+  又付了一次。钱确实扣了两次——但要修的不是 Agent，是记忆的恢复/传递。
+
+  这条和 cross_session_duplicate.yaml 是**同一个事实、不同归因**的一对。
+  两份报告里的 verdict、fingerprint、工具名完全一样，只有 reason_code 和
+  "该去修哪儿"不同。这个区别不靠推测，靠的是我们回滚到了哪儿。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我把订单 A1 处理掉。
+  model: stub-model
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+sessions:
+  - name: 第一次，付了款
+    # 拍在付款**之前**。位置是 (会话 0, seq 0)，所以它的记忆视野算出来是 -1：
+    # 恢复它等于把 Agent 的记忆清空到"什么都还没发生"。
+    snapshot_before: before_pay
+    script:
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 订单 A1 已支付。
+
+  - name: 第二次，记忆被回滚过
+    restore_from: before_pay
+    script:
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 订单 A1 已支付。
+
+expect:
+  - detector: idempotency
+    verdict: fail
+    reason_code: cross_session_memory_loss
+    note: >
+      归因指向记忆恢复。报告里必须出现"不要改 Agent"——否则用户会去改 Prompt，
+      而 Prompt 改成什么样都救不了"它根本不知道"。
