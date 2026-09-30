@@ -236,6 +236,15 @@
         {% if s.autonomous %}<div class="note"><strong>无人值守</strong>：这一段没有人在场</div>{% endif %}
         {% if s.restored_from %}<div class="note">恢复到 <code>{{ s.restored_from }}</code></div>{% endif %}
         {% if s.timed_out %}<div class="note bad">超时强杀</div>{% endif %}
+        {# 出岔子的那几段把 Agent 输出摆出来——崩了要看 traceback、卡住了要看它
+           停在哪一行。正常结束的会话不摆：那几千字会把页面淹掉，而它们什么都没
+           解释。抬头写清是末尾一段，免得被读成"它一共就打印了这些"。 #}
+        {% if s.stdout_tail and not s.ended_normally %}
+        <details>
+          <summary class="dim">Agent 输出（末尾 {{ s.stdout_tail | length }} 字符）</summary>
+          <pre class="wrap">{{ s.stdout_tail }}</pre>
+        </details>
+        {% endif %}
         {% if s.killed %}<div class="note">已被熔断<div class="dim">{{ s.kill_reason }}</div></div>{% endif %}
       </td>
       <td class="nowrap">≤ 会话 {{ s.memory_horizon_ordinal }}</td>

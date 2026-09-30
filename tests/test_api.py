@@ -1114,6 +1114,66 @@ async def test_a_run_that_never_reached_a_session_gets_no_chain(
     assert "<h2>调用链</h2>" not in text
 
 
+# --- 会话出岔子时，Agent 的输出要摆出来 ----------------------------------------
+
+
+def _report_with_output(*, tail: str, ended_normally: bool) -> dict:
+    """一次带 Agent 输出的报告。会话那段单独改，其余沿用长时运行那份快照。"""
+    report = _long_run_report()
+    first = report["sessions"][0]
+    first["stdout_tail"] = tail
+    first["ended_normally"] = ended_normally
+    return report
+
+
+async def test_a_session_that_went_wrong_shows_what_the_agent_printed(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """崩了要看 traceback、卡住了要看它停在哪一行——这条一直没给任何人看过。
+
+    `stdout_tail` 抓了 2000 字符，然后命令行不印、JSON 里没有、界面上也没有。
+    """
+    await _seed_diff_run(
+        db,
+        "run-out-bad",
+        _report_with_output(tail="Traceback: 订单服务连不上", ended_normally=False),
+    )
+
+    text = (await client.get("/runs/run-out-bad")).text
+    assert "Traceback: 订单服务连不上" in text
+    # 抬头必须写明这是**末尾一段**：不写的话，"它一共就打印了这些"是读出来的意思。
+    assert "末尾" in text and "字符" in text
+
+
+async def test_a_clean_session_does_not_dump_its_output(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """正常结束的会话不摆输出：那几千字会把页面淹掉，而它们什么都没解释。"""
+    await _seed_diff_run(
+        db, "run-out-ok", _report_with_output(tail="一切正常我付完了", ended_normally=True)
+    )
+
+    assert "一切正常我付完了" not in (await client.get("/runs/run-out-ok")).text
+
+
+async def test_the_agent_output_is_escaped(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """Agent 的 stdout 是**外部输入**，原样塞进 HTML 就是一个注入点。
+
+    它比工具参数更危险：那是被测对象自己写的东西，而我们要把它摆到页面上。
+    """
+    await _seed_diff_run(
+        db,
+        "run-out-xss",
+        _report_with_output(tail="<script>alert(1)</script>", ended_normally=False),
+    )
+
+    text = (await client.get("/runs/run-out-xss")).text
+    assert "<script>alert(1)</script>" not in text
+    assert "&lt;script&gt;" in text
+
+
 # --- JSON 接口 ----------------------------------------------------------------
 
 

@@ -10,6 +10,10 @@ dist/
 # Agents 各自独立环境
 agents/**/.venv/
 
+# 演示 Agent 跑起来之后自己写下的记忆。是**运行产物**，不是源码——
+# 跑一次场景它就变一次，提交进去等于把上一次运行的状态当成下一次的起点。
+agents/**/.agent-memory/
+
 # 测试与缓存
 .pytest_cache/
 .mypy_cache/

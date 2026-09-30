@@ -161,6 +161,21 @@ class SessionOutcome:
         ran_out = self.script_steps_consumed >= self.script_steps_declared or self.killed
         return ran_out and self.clock_matched
 
+    @property
+    def ended_normally(self) -> bool:
+        """这一段是不是正常结束的。**不是判定**，只决定要不要把 Agent 的输出印出来。
+
+        判据是"有没有出岔子"：被强杀、被熔断、退出码非 0、脚本没跑完，四种都算。
+        正常结束的会话照样有几千字输出，全印出来会把报告淹掉——而真正需要看输出的
+        恰恰是出了岔子的那几次：崩了要看 traceback，卡住了要看它最后停在哪一行。
+        """
+        return (
+            not self.timed_out
+            and not self.killed
+            and self.exit_code == 0
+            and self.premise_held
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -182,6 +197,11 @@ class SessionOutcome:
             "observed_offset_s": self.observed_offset_s,
             "clock_matched": self.clock_matched,
             "autonomous": self.autonomous,
+            # 输出**照原样入库**，不因为"这一段很正常"就清空。清空是一种静默省略：
+            # 读 JSON 的人分不出"它什么都没打印"和"我们没放进来"。要筛的是**展示**
+            # （命令行与界面只在出岔子的那几段印它），不是记录。
+            "stdout_tail": self.stdout_tail,
+            "ended_normally": self.ended_normally,
         }
 
 
@@ -368,6 +388,54 @@ async def _serve(app: Any, sock: socket.socket) -> tuple[uvicorn.Server, asyncio
             task.result()  # 把真实异常抛出来，而不是报一句"启动失败"
         await asyncio.sleep(0.02)
     return server, task
+
+
+# 每段会话最多留多少 Agent 输出。**这个数只有一个来源**：印出来的那行抬头和
+# 真正截断的地方读的是同一个常量，各写各的迟早会说成两个数。
+_STDOUT_TAIL_CHARS = 2000
+
+# 超时之后盖在输出上的那句话。写在**末尾**：会话把输出截成最后 2000 字符
+# （`SessionOutcome.stdout_tail`），盖在前面的话，输出一长就被截掉了——而那句话
+# 正是"这一次不是正常结束"的唯一说明。
+TIMEOUT_MARK = "(Agent 超时未退出，已强杀)"
+
+
+async def _wait_for_exit(proc: subprocess.Popen[str], timeout_s: float) -> tuple[bool, str]:
+    """等 Agent 退出，超时就不再等。返回 (是否超时, 它吐出来的输出)。
+
+    **超时参数必须写成关键字 `timeout=`，这是这个函数存在的理由。**
+    `Popen.communicate` 的签名是 `communicate(input=None, timeout=None)`——第一个
+    位置参数是 `input`，不是 `timeout`。而这里的 `stdin` 根本不是管道，于是传进去的
+    那个数被**静默丢掉**，`communicate` 退化成一句没有超时的 `wait()`：Agent 挂住多久，
+    框架就等多久。它不报错、不留痕，只是那个 `--timeout` 从来没有生效过。
+
+    （实测过：子进程睡 5 秒，`communicate(1.0)` 等满 5.09 秒正常返回；
+    `communicate(timeout=1.0)` 在 1.00 秒抛 `TimeoutExpired`。）
+
+    超时**不能**当成"Agent 结束了"。它还在跑、还在烧钱，只是我们不等了；结论必须
+    标出来，否则报告会把它读成一次正常结束。它是独立于脚本消费量的第二道依据——
+    消费量数的是**网关那边**被取走了几步（`scripted_upstream.calls_made`），
+    一个卡在推理里还没发出请求的 Agent 在那条线上看起来和"刚开始跑"一样。
+
+    已经吐出来的输出**留着**，盖在那句话前面：一个挂住的 Agent 最后打印的那一行
+    往往就是唯一的线索，丢掉它等于把"它在干什么"换成一句"我们不等了"。
+
+    输出要从**第二次** `communicate` 的返回值里拿，不能指望异常上那份：
+    `TimeoutExpired.output` 在这条路上是 `None`（实测过）。标准库的承诺是
+    "抓住超时之后再 communicate 一次不会丢输出"，所以那次调用的返回值才是它。
+    **别把那个返回值写丢了**——写丢了就只剩一句"我们不等了"。
+
+    做不到的事也要说清：输出走的是块缓冲的管道，Agent 没 flush 就被杀掉的话，
+    它最后打印的东西是真的没了。引擎**不会**替它加 `-u`——那是在改被测进程里的
+    行为，而 ADR 001 只允许换 base_url 和 api_key。
+    """
+    try:
+        stdout, _ = await asyncio.to_thread(proc.communicate, timeout=timeout_s)
+        return False, stdout or ""
+    except (TimeoutError, subprocess.TimeoutExpired):
+        proc.kill()
+        drained, _ = await asyncio.to_thread(proc.communicate)
+        return True, f"{drained or ''}\n{TIMEOUT_MARK}"
 
 
 def _bind(port: int = 0) -> tuple[socket.socket, int]:
@@ -709,7 +777,7 @@ class ScenarioRunner:
                         tool_calls=0,  # 稍后按会话回填
                         killed=active.killed and not killed_before,
                         kill_reason=active.kill_reason,
-                        stdout_tail=stdout[-2000:],
+                        stdout_tail=stdout[-_STDOUT_TAIL_CHARS:],
                         virtual_started_at=world_at_start,
                         after_gap_s=spec.after_gap_s,
                         declared_offset_s=declared_offset,
@@ -829,20 +897,12 @@ class ScenarioRunner:
         )
         current["proc"] = proc
 
-        timed_out = False
         try:
-            stdout, _ = await asyncio.to_thread(proc.communicate, self.session_timeout_s)
-        except (TimeoutError, subprocess.TimeoutExpired):
-            # 超时**不能**当成"Agent 结束了"。它还在跑、还在烧钱，只是我们
-            # 不等了；结论必须标出来，否则报告会把它读成一次正常结束。
-            timed_out = True
-            proc.kill()
-            await asyncio.to_thread(proc.communicate)
-            stdout = "(Agent 超时未退出，已强杀)"
+            timed_out, stdout = await _wait_for_exit(proc, self.session_timeout_s)
         finally:
             current["proc"] = None
 
-        return proc.returncode, timed_out, stdout or "", time.perf_counter() - started
+        return proc.returncode, timed_out, stdout, time.perf_counter() - started
 
     async def _charges(self, mock_port: int) -> int:
         try:
@@ -933,6 +993,13 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
         elif not s.premise_held:
             consumed += "   这一段没跑完，前提未成立 "
         add(consumed)
+        # 出岔子的那几段把 Agent 输出印出来——崩了要看 traceback，卡住了要看它
+        # 停在哪一行，而在此之前它抓了 2000 字符**从来没给任何人看过**。
+        # 正常结束的会话不印：那几千字会把报告淹掉，而它们什么都没解释。
+        if s.stdout_tail and not s.ended_normally:
+            add(f"       --- Agent 输出（末尾 {_STDOUT_TAIL_CHARS} 字符）---")
+            for line in s.stdout_tail.strip().splitlines():
+                add(f"       {line}")
 
     # 调用链紧跟在会话表后面：会话表说"这一段跑了多久、调了几次"，链说"那几次
     # 是按什么顺序发生的、哪几次没成功"。两者都是**看**的结果，判定在下面。

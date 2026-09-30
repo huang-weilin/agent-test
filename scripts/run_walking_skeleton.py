@@ -175,10 +175,15 @@ async def _run_one(scenario: str) -> int:
         )
 
         try:
-            stdout, _ = await asyncio.to_thread(agent_proc.communicate, 180)
-        except TimeoutError:
+            # `timeout=` 是关键字，**不能**写成位置参数：`communicate` 的第一个
+            # 位置参数是 `input`，而这里的 stdin 不是管道，传进去会被静默丢掉，
+            # 于是退化成一句没有超时的 wait()。同 `scenario/runner._wait_for_exit`。
+            stdout, _ = await asyncio.to_thread(agent_proc.communicate, timeout=180)
+        except (TimeoutError, subprocess.TimeoutExpired):
             agent_proc.kill()
-            stdout = "(Agent 超时未退出，已强杀)"
+            # 输出在**第二次** communicate 的返回值里，不在异常上。
+            drained, _ = await asyncio.to_thread(agent_proc.communicate)
+            stdout = f"{drained or ''}\n(Agent 超时未退出，已强杀)"
         elapsed = time.perf_counter() - started
 
         print("--- Agent 输出 ---")
