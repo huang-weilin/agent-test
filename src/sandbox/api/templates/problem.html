@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block body %}
+<h1>{{ title }}</h1>
+<div class="panel bad">
+  {# 原样显示，不加工。这里的文本来自场景加载器，是**写给用户看的**：
+     它会说清哪个文件、哪一行、为什么不行。套上一层"操作失败"反而是噪音。 #}
+  <pre class="wrap">{{ detail }}</pre>
+</div>
+<p><a href="/">回到场景列表</a></p>
+{% endblock %}

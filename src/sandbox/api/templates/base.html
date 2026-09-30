@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}行为级测试沙盒{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <nav>
+    <a class="brand" href="/">行为级测试沙盒</a>
+    <a href="/">场景</a>
+    <a href="/runs">运行记录</a>
+    <a href="/cost">成本</a>
+  </nav>
+  {% if active %}
+  <span class="running" title="{{ active.scenario_id }} 正在运行">
+    <span class="dot"></span>正在跑 {{ active.scenario_id }}
+  </span>
+  {% endif %}
+</header>
+<main>
+{% block body %}{% endblock %}
+</main>
+<footer>
+  黑盒边界拦截 · 自研库为唯一真相源 · 出口默认拒绝
+  （ADR <code>docs/decisions/</code>）
+</footer>
+</body>
+</html>

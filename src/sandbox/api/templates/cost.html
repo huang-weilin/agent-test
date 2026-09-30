@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}成本{% endblock %}
+{% block body %}
+
+<h1>成本</h1>
+<p class="lede">
+  单次运行的花费随报告出。这一页回答的是另一个问题——
+  <strong>这个月已经烧掉多少、烧在哪儿</strong>。
+  云端常驻 Agent 的成本失控不会发生在一次运行里。
+</p>
+
+{% if budget %}
+<section class="cards">
+{% for b in budget %}
+  <div class="card {{ 'bad' if b.exceeded else '' }}">
+    <div class="k">{{ {'day': '本日', 'week': '本周', 'month': '本月'}[b.period] }}</div>
+    <div class="v">${{ b.spent_usd | money }}</div>
+    <div class="sub">预算 ${{ b.ceiling_usd | money }}（{{ '%.0f' % (b.ratio * 100) }}%）</div>
+  </div>
+{% endfor %}
+</section>
+<p class="note">
+  超预算**不会**让任何运行算作不通过——它是对累计花费的陈述，和被测 Agent
+  这次做没做错事没有关系。见 <code>docs/cost.md</code>。
+</p>
+{% else %}
+<div class="panel">
+  没设预算。<code>0</code> 表示不设限，这是默认值。
+  在 <code>.env</code> 里配 <code>SANDBOX_COST_BUDGET_DAILY_USD</code> /
+  <code>_WEEKLY_USD</code> / <code>_MONTHLY_USD</code> 开启。
+  <div class="note">
+    **默认关掉是刻意的。** 一个没配过的阈值一旦生效，就会在别人第一次跑的
+    时候弹出一堆他不认识的告警——而告警一多就会被整体忽略，包括真正要紧的那个。
+  </div>
+</div>
+{% endif %}
+
+<nav class="tabs">
+  {% for p, label in [('day', '按天'), ('week', '按周'), ('month', '按月')] %}
+    <a href="/cost?period={{ p }}" class="{{ 'on' if period == p else '' }}">{{ label }}</a>
+  {% endfor %}
+</nav>
+
+{% macro rollup_table(title, rows, first_col) %}
+  {% if rows %}
+  <h2>{{ title }}</h2>
+  <table class="grid">
+    <thead>
+      <tr><th>{{ first_col }}</th><th class="num">调用</th>
+          <th class="num">输入</th><th class="num">输出</th><th class="num">花费</th></tr>
+    </thead>
+    <tbody>
+    {% for label, r in rows %}
+      <tr>
+        <td><code>{{ label }}</code></td>
+        <td class="num">{{ r.llm_calls }}</td>
+        <td class="num">{{ r.input_tokens | tokens }}</td>
+        <td class="num">{{ r.output_tokens | tokens }}</td>
+        <td class="num nowrap">{{ m.cost_cell(r) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+{% endmacro %}
+
+{{ rollup_table({'day': '按天', 'week': '按周', 'month': '按月'}[period] ~ '（近 30 个）',
+                history, '周期') }}
+{{ rollup_table('按场景', by_scenario | dictsort, '场景') }}
+{{ rollup_table('按 Agent 版本', by_agent | dictsort, 'Agent') }}
+{{ rollup_table('按模型', by_model | dictsort, '模型') }}
+{{ m.lower_bound_note(by_model.values() | list) }}
+
+<p class="note">
+  <strong>归期用运行的开始时间，不是每次调用的时间戳。</strong>
+  一次运行整个算在它开始的那个周期里。按调用时间归期的话，跑过零点的运行
+  会被劈成两半，两边的数都对不上任何一次运行——而对不上账的账单比没有账单更糟。
+</p>
+
+<h2>没做的：按工具拆解</h2>
+<p class="note">
+  需求要求按 Agent、工具、场景三个维度拆解。Agent 和场景做了，<strong>工具没做</strong>，
+  因为做不出一个诚实的版本：工具调用本身不花 token，token 花在 LLM 上。
+  沿时间线把"产生这次工具调用的那次 LLM 调用"配上去是个错的近似——
+  工具<strong>返回的内容</strong>会留在上下文里，让之后每一次调用继续为它付钱。
+  硬报一个数，用户会拿它去砍工具，而那个数是错的。
+</p>
+
+{% endblock %}

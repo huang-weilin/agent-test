@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}正在运行 {{ job.scenario_id }}{% endblock %}
+{% block body %}
+
+{# 轮询用 `<meta http-equiv="refresh">`，不用 JavaScript。
+   一次场景运行会真的起三个服务、拉起 Agent 子进程，十几秒到一分钟。
+   没有页面能同步等它——而拉一整套前端构建链只为轮询一个状态，
+   对一个要求"一条命令就能用"的本地工具不划算。
+
+   这个页面同时是**无 JS 也能用**的证明：刷新是浏览器的能力，不是脚本的。 #}
+{% if job.is_running %}
+<meta http-equiv="refresh" content="2">
+{% endif %}
+
+<h1>正在运行 <code>{{ job.scenario_id }}</code></h1>
+
+{% if job.is_running %}
+<div class="panel">
+  <p>起三个服务（网关 / 出口代理 / mock 目标系统），逐会话拉起 Agent 进程，
+     跑完检测器再比对预期。</p>
+  <p class="note">本页每 2 秒自动刷新。已经跑了
+     {{ job.started_at | localdt('%H:%M:%S') }} 起。</p>
+</div>
+{% else %}
+  {% if job.error %}
+  <div class="panel bad">
+    <strong>执行失败。</strong>
+    <pre class="wrap">{{ job.error }}</pre>
+    <p class="note">
+      执行失败和"没通过"是两回事：前者说明这次测试根本没跑成，
+      结论不指向被测对象。运行记录里能看到它停在哪一步。
+    </p>
+  </div>
+  {% endif %}
+  {% if not job.run_id %}
+  <div class="panel bad">
+    运行记录都没有建起来就失败了，所以没有报告可看。
+    <a href="/">回到场景列表</a>
+  </div>
+  {% endif %}
+{% endif %}
+
+{% endblock %}

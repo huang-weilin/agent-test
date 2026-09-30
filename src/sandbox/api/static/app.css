@@ -1,0 +1,189 @@
+/* 手写 CSS，不引框架、不引 CDN。
+ *
+ * 两个理由，都不是"省事"：
+ * 1. 离线可用。远程 CDN 一断，界面就变成一坨没有样式的 HTML——而这是
+ *    一个给人**排查问题**用的工具，它自己不能有额外的失败模式。
+ * 2. 不引构建步骤。需求原本规划的是 React + Vite，那要求目标机器上有一条
+ *    Node 工具链；见 api/app.py 的模块注释。
+ *
+ * 配色只做一件事：让**四态**在扫一眼时就能分开，且不靠颜色单独承载信息
+ * （徽章里永远有文字）。色弱的人也要能读。
+ */
+
+:root {
+  --bg: #fbfbfa;
+  --panel: #ffffff;
+  --ink: #1c1e21;
+  --dim: #6b7280;
+  --line: #e3e5e8;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.7 var(--sans);
+}
+
+code, pre { font-family: var(--mono); font-size: 0.92em; }
+
+a { color: #1a56b8; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* --- 页头 ---------------------------------------------------------------- */
+
+header.top {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; padding: 0.7rem 1.5rem;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 10;
+}
+header.top nav { display: flex; align-items: center; gap: 1.1rem; }
+header.top .brand { font-weight: 600; color: var(--ink); }
+header.top .running { color: var(--dim); font-size: 0.9em; display: flex; align-items: center; }
+
+.dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #1a73e8;
+  display: inline-block; margin-right: 0.45rem; animation: pulse 1.4s infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
+
+main { max-width: 1180px; margin: 0 auto; padding: 1.6rem 1.5rem 4rem; }
+
+footer {
+  max-width: 1180px; margin: 0 auto; padding: 1rem 1.5rem 2rem;
+  color: var(--dim); font-size: 0.85em; border-top: 1px solid var(--line);
+}
+
+h1 { font-size: 1.45rem; margin: 0 0 0.4rem; font-weight: 600; }
+h2 { font-size: 1.1rem; margin: 2rem 0 0.7rem; font-weight: 600; }
+h3 { font-size: 1rem; margin: 1.4rem 0 0.5rem; font-weight: 600; }
+
+.lede { color: var(--dim); margin: 0 0 1.2rem; }
+.note { color: var(--dim); font-size: 0.88em; margin: 0.5rem 0; }
+.nowrap { white-space: nowrap; }
+.dim { color: var(--dim); }
+.bad { color: #c5221f; }
+.star { color: #b06000; font-weight: 700; }
+
+/* --- 徽章 ---------------------------------------------------------------- */
+
+.badge {
+  display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
+  font-size: 0.82em; font-weight: 600; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.badge.pass    { background: #e6f4ea; color: #0d652d; border-color: #a8dab5; }
+.badge.fail    { background: #fce8e6; color: #a50e0e; border-color: #f4b8b4; }
+.badge.warn    { background: #fef7e0; color: #8a5300; border-color: #f5d98b; }
+.badge.unknown { background: #eef0f2; color: #5f6368; border-color: #d3d7db; }
+
+/* --- 面板 ---------------------------------------------------------------- */
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--line);
+  border-radius: 6px; padding: 0.85rem 1.1rem; margin: 0 0 1.2rem;
+}
+.panel.ok   { border-left-color: #34a853; }
+.panel.bad  { border-left-color: #d93025; }
+.panel.warn { border-left-color: #f9ab00; }
+
+pre.wrap {
+  white-space: pre-wrap; word-break: break-word; margin: 0.5rem 0 0;
+  background: #f6f7f8; padding: 0.7rem; border-radius: 4px;
+}
+
+/* --- 表格 ---------------------------------------------------------------- */
+
+table.grid {
+  width: 100%; border-collapse: collapse; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+  margin-bottom: 0.6rem;
+}
+table.grid th, table.grid td {
+  text-align: left; padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--line); vertical-align: top;
+}
+table.grid th { background: #f4f5f6; font-weight: 600; font-size: 0.88em; }
+table.grid tr:last-child td { border-bottom: none; }
+table.grid td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.grid.tight th, table.grid.tight td { padding: 0.3rem 0.5rem; }
+
+tr.passrow { background: #f4fbf6; }
+tr.failrow { background: #fef7f6; }
+tr.blockedrow { background: #f7f8fa; }
+
+.args { word-break: break-all; color: #444; }
+
+/* --- 卡片（三个独立判定） ------------------------------------------------ */
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 0.9rem; margin: 1.2rem 0; }
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-top: 3px solid var(--line); border-radius: 6px; padding: 0.8rem 1rem;
+}
+.card.ok  { border-top-color: #34a853; }
+.card.bad { border-top-color: #d93025; }
+.card .k { color: var(--dim); font-size: 0.85em; }
+.card .v { font-size: 1.15rem; font-weight: 600; margin: 0.15rem 0; }
+.card .sub { color: var(--dim); font-size: 0.85em; }
+
+/* --- 编辑器布局 ---------------------------------------------------------- */
+
+.split { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 1.5rem; }
+@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+
+textarea {
+  width: 100%; font-family: var(--mono); font-size: 13px; line-height: 1.55;
+  padding: 0.7rem; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--ink); resize: vertical;
+  tab-size: 2; white-space: pre; overflow-wrap: normal; overflow-x: auto;
+}
+textarea:focus { outline: 2px solid #a8c7fa; outline-offset: -1px; }
+
+.row { display: flex; align-items: center; gap: 0.8rem; margin: 0.6rem 0 1.2rem; flex-wrap: wrap; }
+.row .note { margin: 0; }
+
+button {
+  font: inherit; padding: 0.35rem 0.9rem; border-radius: 5px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
+button:hover:not(:disabled) { background: #f2f3f4; border-color: #c8ccd0; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; font-weight: 600; }
+button.primary:hover:not(:disabled) { background: #1667d0; border-color: #1667d0; }
+
+form.inline { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+form.inline input {
+  font: inherit; padding: 0.35rem 0.7rem; border: 1px solid var(--line);
+  border-radius: 5px; background: var(--panel); color: var(--ink); min-width: 22rem;
+}
+td.actions form { display: inline; }
+
+dl { margin: 0.4rem 0; }
+dt { font-weight: 600; margin-top: 0.7rem; font-size: 0.9em; }
+dd { margin: 0.1rem 0 0; }
+
+/* --- 预算 ---------------------------------------------------------------- */
+
+.budget {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 0.5rem 0.9rem; margin-bottom: 0.5rem; font-variant-numeric: tabular-nums;
+}
+.budget.over { border-color: #f4b8b4; background: #fef7f6; }
+.budget .mark { font-family: var(--mono); font-weight: 700; margin-right: 0.5rem; color: #0d652d; }
+.budget.over .mark { color: #a50e0e; }
+
+/* --- 标签页 -------------------------------------------------------------- */
+
+.tabs { display: flex; gap: 1rem; margin: 1.2rem 0 0.6rem; border-bottom: 1px solid var(--line); }
+.tabs a { padding: 0.3rem 0; color: var(--dim); }
+.tabs a.on { color: var(--ink); font-weight: 600; border-bottom: 2px solid #1a73e8; }
+
+details { margin-top: 0.4rem; }
+details summary { cursor: pointer; font-size: 0.88em; }
+details pre { background: #f6f7f8; padding: 0.6rem; border-radius: 4px; margin: 0.4rem 0 0; }

@@ -53,6 +53,8 @@ from sandbox.db.engine import init_db
 from sandbox.detectors.base import ExemptionSet, Finding
 from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
 from sandbox.detectors.loop import LoopDetector
+from sandbox.formatting import money as _money
+from sandbox.formatting import tokens as _tokens
 from sandbox.gateway.stub import scripted_upstream
 from sandbox.memory.adapters.file_memory import FileMemoryAdapter
 from sandbox.memory.snapshot import SnapshotRef, SnapshotStore
@@ -265,7 +267,33 @@ class ScenarioRunner:
         except Exception as exc:  # noqa: BLE001 — 引擎的异常要进报告，不是崩掉 CLI
             log.exception("scenario.run_failed", scenario=scenario.id)
             result.error = f"{type(exc).__name__}: {exc}"
+            await self._record_abort(result)
         return result
+
+    async def _record_abort(self, result: ScenarioResult) -> None:
+        """执行中途炸了：把运行标成失败，并留下结论。
+
+        **不做的话那条 `TestRun` 会永远停在 `running`。** 收尾走的是网关的
+        `/finish` 端点，而异常路径根本到不了那里。CLI 上看不出问题（它直接把
+        `result` 打进终端，那个对象是对的），但界面要列**历史**运行，于是一次
+        崩掉的运行会一直显示"进行中"——用户以为它还在跑，等一个永远不会来的结果。
+
+        结论照常写，`ok=False` 是**真的**：`ok` 的定义里第一条就是"没有执行
+        失败"。这和"没记录"是两回事——后者是加这个字段之前的历史运行，界面
+        必须显示"结论未留存"，而不是替它编一个红叉。
+
+        整个动作包在 try 里：收尾失败不该盖掉真正的异常，那是唯一能说明
+        出了什么事的线索。
+        """
+        if not result.run_id:
+            return  # 连运行都还没建起来，没有可标记的对象
+        try:
+            from sandbox.trace.recorder import mark_run_failed, record_verdict
+
+            await record_verdict(result.run_id, ok=False, report=result.to_dict())
+            await mark_run_failed(result.run_id)
+        except Exception:  # noqa: BLE001
+            log.exception("scenario.record_abort_failed", run=result.run_id)
 
     # --- 主体 -------------------------------------------------------------
 
@@ -339,6 +367,7 @@ class ScenarioRunner:
         from sandbox.trace.recorder import (
             capture_snapshot,
             horizon_of,
+            record_verdict,
             restore_snapshot,
             start_session,
         )
@@ -473,6 +502,11 @@ class ScenarioRunner:
         result.session_costs = await cost.by_session(run_id)
         result.budget = await cost.budget_status()
 
+        # 判定与完整报告落库。放在最后——到这一步 `result` 才完整，之前任何
+        # 一个字段都还在变。CLI 直接把 result 打进终端，但 Web 界面要列出
+        # **历史**运行，那时内存里的 result 早没了，只能靠这条记录。
+        await record_verdict(run_id, ok=result.ok, report=result.to_dict())
+
         # 快照位置随报告一起给出：跨会话结论的归因完全建立在"回滚到了哪儿"上，
         # 不给出来就没法复核。
         refs = await store.list_for_sequence(active.ctx.session_sequence_id)
@@ -583,25 +617,6 @@ def _run_detectors(scenario: Scenario, calls: list[Any]) -> list[Finding]:
     findings.extend(IdempotencyDetector(facts).run(calls, ExemptionSet()))
     findings.extend(LoopDetector().run(calls, ExemptionSet()))
     return findings
-
-
-def _tokens(n: int) -> str:
-    """千分位。成本是给人看的，`1234567` 和 `1,234,567` 读起来不是一回事。"""
-    return f"{n:,}"
-
-
-def _money(usd: float) -> str:
-    """按量级选精度，且不留无意义的零。
-
-    固定两位小数会把一个 $0.0001 的额度印成 `$0.00`——看起来像"没设预算"，
-    于是那条 `!! 超预算 339%` 就成了自相矛盾的胡话。而真实预算（$10、$50）
-    又不需要小数点后四位。让金额自己决定印几位。
-    """
-    for decimals in (2, 4, 6):
-        if abs(usd) >= 10 ** -decimals:
-            break
-    text = f"{usd:.{decimals}f}".rstrip("0").rstrip(".")
-    return text or "0"
 
 
 def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:

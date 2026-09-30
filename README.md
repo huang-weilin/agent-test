@@ -84,9 +84,30 @@ Agent 查不查记忆。三个分支必须给出三种不同的结论，否则�
 视野是 `-1`，Agent 查了但**不可能知道**；`duplicate` 保住了那段，视野是 `0`，记忆就
 在那儿**它本可以知道**。演示 Agent 的 stdout 会打印读到了几条记录作为直接证据。
 
-209 个单测覆盖网关、代理、记录器、规范化、两个检测器、记忆快照、跨会话归因、
-被测 Agent 的记忆模块、成本聚合与预算，以及场景 DSL（加载校验 / 预期比对 /
-前提判定 / 地面真值）。
+256 个单测覆盖网关、代理、记录器、规范化、两个检测器、记忆快照、跨会话归因、
+被测 Agent 的记忆模块、成本聚合与预算、场景 DSL（加载校验 / 预期比对 / 前提判定 /
+地面真值），以及 Web 界面（路径白名单 / 先校验后落盘 / 并发拒绝 / 结论标签）。
+
+## 界面
+
+```bash
+./.venv/Scripts/python.exe scripts/serve_ui.py     # → http://127.0.0.1:8765
+```
+
+首页列场景与最近运行，能改场景（YAML 直接编辑）、能发起运行、能看报告（检测结论 /
+工具调用审计 / 记忆快照 / 成本）与成本看板。**零 JavaScript**——轮询用
+`<meta http-equiv="refresh">`，保存用 form POST，所以没有构建步骤。
+
+| 约束 | 为什么 |
+|---|---|
+| **只监听回环地址**，不给远程开关 | 这个服务没有任何认证，而它能写场景文件、能拉起子进程。要远程用 `ssh -L 8765:127.0.0.1:8765 <主机>`，那条路上至少有认证 |
+| **一次只跑一个场景**，第二个请求返回 409 | 执行器会改进程级的 `settings.tool_upstream_base_url`（`runner.py:342`）。两次运行重叠会互相把对方的代理指向错误的 mock，**两边都报出看起来正常的报告，而数据是串的**。拒绝比排队好：排队意味着用户等了十分钟才发现排的是错的 |
+| **保存前先校验 YAML** | 全部用例都在这些文件里，写坏一个等于弄丢一个用例。校验不过就回显用户刚敲的内容并拒绝落盘 |
+| **场景标识走白名单**（`api/paths.py`） | 从 URL 取来的字符串会被拼进文件路径，不校验就是一个任意文件写 |
+
+报告的结论标签有**三种**，不是两种：`通过` / `不通过` / `未留存`。
+`TestRun.verdict_ok` 可空，**NULL 不是 False**——它是加这个字段之前跑的历史运行，
+没有留下结论。显示成红叉等于替一条没有结论的运行编一个结论出来。详见 `docs/ui.md`。
 
 **已知缺口（不是疏忽，是排期）：**
 
@@ -121,6 +142,7 @@ Agent 查不查记忆。三个分支必须给出三种不同的结论，否则�
 | `docs/detectors.md` | 检测器的精度目标、豁免机制、**四态结果语义**（`inconclusive` 不可折叠为 `pass`） |
 | `docs/scenarios.md` | 怎么写一个场景；跨会话归因的判据；`expected_charges`；三方受控实验；为什么 `is_write` 没有默认值 |
 | `docs/cost.md` | 长期预算 vs 单次上限的分工；为什么预算不进 findings；未定价为什么必须标成"下界" |
+| `docs/ui.md` | 界面为什么只绑回环、为什么一次只跑一个、`verdict_ok` 为什么可空、先校验后落盘 |
 
 ## 环境约束（本机）
 
@@ -191,20 +213,33 @@ src/sandbox/
 │   └─ runner.py      执行器：起服务 → 逐会话跑 Agent → 检测 → 比对 → 报告
 │                     另含 `charges_ok`：独立于检测结论的地面真值
 ├─ session/        Session 序列追踪器             ← 占位，能力已在 trace/ 与 memory/
-└─ api/            面向用户的 FastAPI              ← 占位，未实现
+└─ api/            面向用户的 Web 界面（Phase 1d）—— **服务端渲染，不是 React**
+    ├─ app.py        路由：页面 + 一组只读 JSON
+    ├─ paths.py      场景标识校验与文件定位。**整个 Web 层唯一碰磁盘的地方**
+    ├─ jobs.py       一次只跑一个（并发会让两个运行互相改掉对方的上游地址）
+    ├─ queries.py    界面要读的东西。与 HTTP 无关，可单独测
+    ├─ templates/    Jinja2 模板。自动转义是**引它的理由**，不是排版
+    └─ static/       手写 CSS，无 CDN、无框架
 
 agents/react_demo/    被测 Agent（独立 venv，装不上 sandbox 包）
 ├─ agent.py           两个工具 + 记忆守卫；**不 import 任何 sandbox.***
 └─ memory.py          文件型记忆，只用标准库。目录由 SANDBOX_AGENT_MEMORY_DIR 指定
 scenarios/            场景文件（YAML）。加用例 = 加文件，不改代码
-scripts/              入口脚本：run_scenario.py（跑用例）、cost_report.py（看长期花费）、
-                      run_walking_skeleton.py（跨进程证明，给人手工排查用）
-tests/                185 个单测；tests/corpus/ 是留给精度验收的标注语料目录
+scripts/              入口脚本：run_scenario.py（跑用例）、serve_ui.py（起界面）、
+                      cost_report.py（看长期花费）、run_walking_skeleton.py
+                      （跨进程证明，给人手工排查用）
+tests/                256 个单测；tests/corpus/ 是留给精度验收的标注语料目录
 docs/decisions/       ADR 001~003
 ```
 
 `trace/` 里的 OTel 归一化层**还没写**——目前只有自研的规范化。
-`session/`/`api/` 是目录占位，不要按它们已存在去排期。
+`session/` 是目录占位，不要按它已存在去排期。
+
+**需求第 250 行写的前端栈是 React + TS + Vite，这里没有照做。** 那是个合理的长期
+选择，但它要求目标机器上有一条 Node 构建链——而本工具的 lite profile 恰恰是
+"7.9GB 内存、不装 Docker、一条命令跑起来"。为了一个本地测试工具拉一整条前端工具链，
+换来的东西用户看不见。数据层（`api/queries.py`）与 HTTP 无关，将来真要换 React，
+**被替换掉的是模板，不是接口**。
 
 `tests/test_agent_memory.py` 用 `importlib` **按路径**加载 `agents/react_demo/memory.py`，
 不是当包导入——这个别扭的加载方式是故意的。那个文件属于被测 Agent，跑在另一个 venv 里，
@@ -218,8 +253,13 @@ docs/decisions/       ADR 001~003
 
 `scripts/run_walking_skeleton.py` 仍用固定端口，因为那是给人手工排查用的。
 
-**改过模型之后记得删掉 `data/sandbox.db`。** 建表走的是 `create_all`，它只建
-缺的表、不会给已存在的表加列（Alembic 已在依赖里但尚未启用）。dev 库是可丢弃的。
+**改过模型之后不必再删 `data/sandbox.db`。** `init_db()` 会在建表之后补上缺失的列
+（`db/engine.py` 的 `_add_missing_columns`），实测在 44 条历史运行的库上直接加列成功，
+老行的新列为 NULL。
+
+**但那不是迁移系统**：只加列，不改类型、不改名、不删列、不回填、不记版本。新加的可空列
+是安全的；**NOT NULL 且无 server_default 的列加不上去**——给历史行编一个值等于伪造事实，
+所以那种改动要走真的迁移（Alembic 已在依赖里但尚未启用）。dev 库仍可丢弃。
 
 ## W1–W2 walking skeleton：三条验收标准的结论
 

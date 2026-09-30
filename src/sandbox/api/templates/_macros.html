@@ -1,0 +1,60 @@
+{# 共用的渲染片段。**判定与"下界"这两个判断只写一遍**，因为它们各有一个
+   极易搞错的地方，写在四个页面里就有四次搞错的机会：
+
+   - `verdict_ok` 为 None 是**结论未留存**（加这个字段之前跑的运行），
+     不是"不通过"。渲染成红叉等于替一条没有结论的运行编一个结论出来。
+   - 有未定价调用时金额是**下界**。不标出来的话 `$0.0000` 会被读成
+     "这次不要钱"。 #}
+
+{% macro verdict_badge(ok) -%}
+  {%- if ok is none -%}
+    <span class="badge unknown" title="这次运行没有留下结论快照，不是失败">未留存</span>
+  {%- elif ok -%}
+    <span class="badge pass">通过</span>
+  {%- else -%}
+    <span class="badge fail">不通过</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro cost_cell(rollup) -%}
+  {#- 判"下界"用 `unpriced_calls` 而不是 `is_lower_bound`：这个宏会同时收到
+      `CostRollup` 对象（从库里现算的）和报告快照里的 dict。前者有
+      `is_lower_bound` 属性，但 `to_dict()` 里叫 `cost_is_lower_bound`——
+      属性名和键名不一样，用属性名的话快照那一支永远不显示星号，
+      金额会被读成准确值。`unpriced_calls` 两边同名。 -#}
+  {%- if rollup is none -%}
+    <span class="dim">—</span>
+  {%- elif rollup.llm_calls == 0 -%}
+    <span class="dim">无调用</span>
+  {%- else -%}
+    ${{ rollup.cost_usd | money }}{% if rollup.unpriced_calls %}<span class="star" title="含未定价调用，金额是下界">*</span>{% endif %}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro premise_badge(held) -%}
+  {%- if held -%}
+    <span class="badge pass">成立</span>
+  {%- else -%}
+    <span class="badge fail">未成立</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro lower_bound_note(rollups) -%}
+  {%- set unpriced = rollups | map(attribute='unpriced_calls') | sum -%}
+  {%- if unpriced -%}
+    <p class="note">
+      <span class="star">*</span>
+      有 {{ unpriced }} 次调用的模型不在定价表里，成本按 0 计。
+      **这些金额是下界，不是账单。** 定价表见
+      <code>src/sandbox/gateway/pricing.py</code>。
+    </p>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro verdict_pill(verdict) -%}
+  {%- set cls = {'pass': 'pass', 'fail': 'fail',
+                 'warning': 'warn', 'inconclusive': 'unknown'}.get(verdict, 'unknown') -%}
+  {%- set label = {'pass': '通过', 'fail': '不通过',
+                   'warning': '告警', 'inconclusive': '无法判定'}.get(verdict, verdict) -%}
+  <span class="badge {{ cls }}">{{ label }}</span>
+{%- endmacro %}

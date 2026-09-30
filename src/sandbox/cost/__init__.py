@@ -11,6 +11,7 @@ from sandbox.cost.aggregator import (
     by_session,
     for_period,
     for_run,
+    for_runs,
     period_start,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "by_session",
     "for_period",
     "for_run",
+    "for_runs",
     "period_start",
 ]

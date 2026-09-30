@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}场景{% endblock %}
+{% block body %}
+
+<h1>场景</h1>
+<p class="lede">
+  用例是数据，不是代码——加一个用例就是加一个 YAML 文件。
+  点「运行」跑的是**磁盘上的那份**，未保存的改动不参与。
+</p>
+
+{% if active %}
+<div class="panel warn">
+  <strong>{{ active.scenario_id }}</strong> 正在运行，此刻点别的场景会被拒绝。
+  沙箱一次只能跑一个——两次运行会互相改掉对方的上游地址，
+  两边都会给出看起来正常的报告，而数据是串的。
+</div>
+{% endif %}
+
+<table class="grid">
+  <thead>
+    <tr><th>场景</th><th>说明</th><th>会话</th><th>预期</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for s in scenarios %}
+    <tr>
+      <td>
+        {% if s.usable %}
+          <a href="/scenarios/{{ s.id }}"><code>{{ s.id }}</code></a>
+        {% else %}
+          <code class="dim">{{ s.id }}</code>
+        {% endif %}
+      </td>
+      <td>
+        {% if s.error %}
+          <span class="bad">打不开：{{ s.error }}</span>
+        {% else %}
+          {{ s.description }}
+        {% endif %}
+      </td>
+      <td>{{ s.sessions if s.sessions is defined else '—' }}</td>
+      <td>{{ s.expects if s.expects is defined else '—' }}</td>
+      <td class="actions">
+        {% if s.usable and not s.error %}
+        <form method="post" action="/scenarios/{{ s.id }}/run">
+          <button type="submit" {% if active %}disabled{% endif %}>运行</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="dim">scenarios/ 下没有 .yaml 文件。</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>新建场景</h2>
+<form class="inline" method="post" action="/scenarios">
+  <input name="new_id" placeholder="场景标识（小写字母、数字、-、_）" required>
+  <button type="submit">用骨架新建</button>
+</form>
+
+<h2>最近运行</h2>
+<table class="grid">
+  <thead>
+    <tr><th>时间</th><th>场景</th><th>结论</th><th>花费</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for r in runs %}
+    <tr>
+      <td class="nowrap">{{ r.started_at | localdt }}</td>
+      <td><code>{{ r.scenario_id }}</code></td>
+      <td>{{ m.verdict_badge(r.verdict_ok) }}</td>
+      <td class="nowrap">{{ m.cost_cell(r.cost) }}</td>
+      <td><a href="/runs/{{ r.id }}">报告</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="dim">还没跑过。</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{{ m.lower_bound_note(runs | map(attribute='cost') | list) }}
+
+{% if budget %}
+<h2>预算</h2>
+{% for b in budget %}
+  <div class="budget {{ 'over' if b.exceeded else '' }}">
+    <span class="mark">{{ '!!' if b.exceeded else 'ok' }}</span>
+    {{ {'day': '本日', 'week': '本周', 'month': '本月'}[b.period] }}
+    已花 ${{ b.spent_usd | money }} / 预算 ${{ b.ceiling_usd | money }}
+    （{{ '%.0f' % (b.ratio * 100) }}%）
+  </div>
+{% endfor %}
+<p class="note">
+  超预算**不会**让任何运行算作不通过。它是对累计花费的陈述，
+  和被测 Agent 这次做没做错事没有关系——混进检测结论会让一次干净运行
+  因为上个月跑太多而报 fail。见 <code>docs/cost.md</code>。
+</p>
+{% endif %}
+
+{% endblock %}

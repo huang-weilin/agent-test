@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}{{ scenario_id }}{% endblock %}
+{% block body %}
+
+<h1><code>{{ scenario_id }}</code></h1>
+{% if scenario and scenario.description %}<p class="lede">{{ scenario.description }}</p>{% endif %}
+
+{% if saved %}
+<div class="panel ok">已保存。改动从下一次运行开始生效。</div>
+{% endif %}
+
+{% if error %}
+<div class="panel bad">
+  <strong>这个场景现在加载不出来，保存已被拒绝。</strong>
+  <pre class="wrap">{{ error }}</pre>
+  <p class="note">
+    磁盘上的文件**没有被改动**——保存路径是先解析、解析通过才落盘。
+    不这样的话，一次笔误就能把场景文件写成一个加载不出来的样子，
+    而本工具的全部用例都在这些文件里。
+  </p>
+</div>
+{% endif %}
+
+{% if active %}
+<div class="panel warn">
+  <strong>{{ active.scenario_id }}</strong> 正在运行。此刻发起新运行会被拒绝。
+</div>
+{% endif %}
+
+<div class="split">
+  <section>
+    <form method="post" action="/scenarios/{{ scenario_id }}/save">
+      <textarea name="yaml_text" spellcheck="false" rows="34">{{ yaml_text }}</textarea>
+      <div class="row">
+        <button type="submit">保存</button>
+        <span class="note">
+          保存前会先按场景模型解析一遍。不通过就不写盘，错误显示在上面。
+        </span>
+      </div>
+    </form>
+
+    <form method="post" action="/scenarios/{{ scenario_id }}/run">
+      <div class="row">
+        <button type="submit" class="primary" {% if active %}disabled{% endif %}>
+          运行磁盘上的这一份
+        </button>
+        <span class="note">
+          **不是**编辑框里的这一份。改了还没保存的话，跑的是旧的。
+        </span>
+      </div>
+    </form>
+  </section>
+
+  <aside>
+    {% if scenario %}
+    <h2>这份场景说了什么</h2>
+    <dl>
+      <dt>Agent</dt><dd><code>{{ scenario.agent.version }}</code> · {{ scenario.agent.model }}</dd>
+      <dt>任务</dt><dd>{{ scenario.agent.task }}</dd>
+      <dt>会话</dt><dd>{{ scenario.sessions | length }}</dd>
+      <dt>工具</dt><dd>{{ scenario.tools | length }}</dd>
+      <dt>预期</dt><dd>{{ scenario.expect | length }} 条</dd>
+      {% if scenario.expected_charges is not none %}
+      <dt>目标系统侧扣款</dt>
+      <dd>
+        {{ scenario.expected_charges }} 笔
+        <div class="note">
+          地面真值，**独立于检测结论**。检测器只看得见网络边界，
+          钱是在目标系统里扣的——边界干净、检测全绿、钱却扣了两次的情况是存在的。
+        </div>
+      </dd>
+      {% endif %}
+    </dl>
+
+    <h2>工具</h2>
+    <table class="grid tight">
+      <thead><tr><th>名字</th><th>写</th><th>幂等参数</th><th>真强制</th></tr></thead>
+      <tbody>
+      {% for t in scenario.tools %}
+        <tr>
+          <td><code>{{ t.name }}</code></td>
+          <td>{% if t.is_write %}<span class="badge fail">写</span>{% else %}<span class="dim">只读</span>{% endif %}</td>
+          <td>{% if t.idempotency_param %}<code>{{ t.idempotency_param }}</code>{% else %}<span class="dim">未声明</span>{% endif %}</td>
+          <td>{{ '是' if t.enforces_idempotency else '否' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="note">
+      「声明了幂等参数」和「目标系统真的强制幂等」是两件事。前者是调用侧的
+      声明，后者是目标系统的实现——声明了却没实现，正是要测出来的那个缺陷。
+    </p>
+    {% endif %}
+
+    <h2>怎么写的</h2>
+    <p class="note">
+      完整写法见 <code>docs/scenarios.md</code>。
+      <code>is_write</code> 刻意没有默认值：给了 <code>false</code> 默认，
+      忘了声明的写工具会静默变成只读，重复扣款检测根本不覆盖它们。
+    </p>
+  </aside>
+</div>
+
+{% endblock %}

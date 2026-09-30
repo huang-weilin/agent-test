@@ -85,6 +85,28 @@ class TestRun(Base):
     total_output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
 
+    # --- 判定结果 --------------------------------------------------------
+    # `status` 说的是**执行**（跑完了 / 崩了 / 被熔断），`verdict_ok` 说的是
+    # **判定**（通过 / 不通过）。这两件事会分开，而且分开的方式正是本工具
+    # 反复强调的那类：一次正常跑完的运行完全可能不通过；而 `loop` 场景里
+    # 被熔断杀掉的那次运行——进程是被我们亲手杀的——恰恰是**通过**的。
+    # 压成一个字段就再也分不出"没跑起来"和"跑起来了但没通过"。
+    #
+    # 可为空：本字段之前的历史运行没存过结论，NULL 表示**没记录**。
+    # **NULL 不是 False。** 把没记录读成"不通过"，等于替一条没有结论的运行
+    # 编一个结论出来——界面必须显示"结论未留存"，而不是显示一个红叉。
+    verdict_ok: Mapped[bool | None] = mapped_column(Boolean)
+
+    # 这次运行的**完整结论快照**（`ScenarioResult.to_dict()`）。
+    #
+    # 为什么不从结构化表重算：结构化的表记的是**发生了什么**（调用、会话、
+    # 检测发现），快照记的是**当时报出去的结论**。后者含前者没有的事实——
+    # 每段脚本被消费了多少、Agent 的退出码、熔断该归到哪个会话——而且依赖
+    # 场景文件当时的样子；场景文件事后被编辑过，重算出来的是**另一份**结论。
+    #
+    # 两者冲突时以结构化表为准：它们是明细，快照只是投影。
+    report_json: Mapped[str | None] = mapped_column(Text)
+
     # 环境钉版本：回归可比性的前提（LLM 不确定，必须记录 seed/温度/模型版本）
     env_json: Mapped[str | None] = mapped_column(Text)
 

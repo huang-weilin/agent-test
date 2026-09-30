@@ -34,25 +34,54 @@ def load_scenario(path: str | Path) -> Scenario:
     path = Path(path)
     if not path.exists():
         raise ScenarioError(f"场景文件不存在：{path}")
+    return parse_scenario(path.read_text(encoding="utf-8"), source=str(path))
 
+
+def parse_scenario(text: str, *, source: str = "<内存中的场景>") -> Scenario:
+    """从 YAML 文本解析并校验一个场景。
+
+    与 `load_scenario` 分开，是为了让 Web 编辑器能**先校验、再落盘**。编辑器
+    的保存路径必须先解析成功才写文件，否则一次笔误就能把场景文件写成一个
+    加载不出来的样子——而本工具的全部用例都从这些文件来，写坏一个就等于
+    弄丢一个用例。写之前先问"这份文本能不能被加载"，是唯一能拦住这件事的地方。
+
+    `source` 只用于报错信息：解析的是文本不是文件，但错误必须说清是哪一份。
+    """
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ScenarioError(f"{path} 不是合法的 YAML：{exc}") from exc
+        raise ScenarioError(f"{source} 不是合法的 YAML：{exc}") from exc
 
     if not isinstance(raw, dict):
-        raise ScenarioError(f"{path} 的顶层必须是一个映射（mapping），实际是 {type(raw).__name__}")
+        raise ScenarioError(
+            f"{source} 的顶层必须是一个映射（mapping），实际是 {type(raw).__name__}"
+        )
 
     try:
         scenario = Scenario.model_validate(raw)
     except ValidationError as exc:
-        raise ScenarioError(f"{path} 场景定义不合法：\n{exc}") from exc
+        raise ScenarioError(f"{source} 场景定义不合法：\n{exc}") from exc
 
-    _check_references(scenario, path)
+    _check_references(scenario, source)
     return scenario
 
 
-def _check_references(scenario: Scenario, path: Path) -> None:
+def dump_scenario(scenario: Scenario) -> str:
+    """把场景写回 YAML 文本。编辑器"格式化"用。
+
+    刻意不做"保存时自动重排"：YAML 的注释、键顺序、锚点在往返里会丢，
+    而场景文件是**人写的**，注释里有"为什么这么写"的信息。格式化只在用户
+    明确点它的时候发生。
+    """
+    return yaml.safe_dump(
+        scenario.model_dump(mode="json", exclude_defaults=False),
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+    )
+
+
+def _check_references(scenario: Scenario, source: str) -> None:
     tool_names = set(scenario.tool_index())
 
     # --- 快照引用必须指向**之前**拍下的快照 ---
@@ -60,7 +89,7 @@ def _check_references(scenario: Scenario, path: Path) -> None:
     for index, session in enumerate(scenario.sessions):
         if session.restore_from is not None and session.restore_from not in defined:
             raise ScenarioError(
-                f"{path}: 会话 #{index}（{session.name}）要恢复到快照 "
+                f"{source}: 会话 #{index}（{session.name}）要恢复到快照 "
                 f"{session.restore_from!r}，但那个快照此时还不存在。\n"
                 f"到这一步为止可用的快照：{sorted(defined) or '（无）'}\n"
                 f"恢复到**之后**才拍的快照等于让记忆回到未来，"
@@ -79,7 +108,7 @@ def _check_references(scenario: Scenario, path: Path) -> None:
                 name = call.get("name")
                 if name not in tool_names:
                     raise ScenarioError(
-                        f"{path}: 会话 #{index}（{session.name}）第 {step_no} 步调用了 "
+                        f"{source}: 会话 #{index}（{session.name}）第 {step_no} 步调用了 "
                         f"未声明的工具 {name!r}。\n"
                         f"已声明的工具：{sorted(tool_names) or '（无）'}\n"
                         f"若确实要测「调用未声明工具被代理拦下」，"

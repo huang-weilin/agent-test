@@ -17,6 +17,15 @@ dependencies = [
     # 之前它只是靠 uvicorn[standard] 传递进来的——传递依赖哪天被上游砍掉，
     # 场景加载会在一个和 YAML 毫无关系的地方报 ImportError。
     "pyyaml>=6.0",
+    # Web 界面的模板引擎。**不是为了排版好看，是为了自动转义。**
+    # 报告里的检测器结论、Agent 的 stdout、工具参数全是外部输入，手写
+    # f-string 拼 HTML 意味着每一处都要记得 html.escape，漏一处就是一个 XSS。
+    # 模板引擎默认全转义，漏不掉。
+    "jinja2>=3.1",
+    # 解析 HTML 表单。界面上的保存/运行都是 form POST——**刻意不走 JSON**，
+    # 这样没有 JavaScript 也能用。FastAPI 的 `Form()` 在缺它时直接抛错
+    # （不是降级），所以必须显式声明，不能指望谁把它传递进来。
+    "python-multipart>=0.0.18",
 ]
 
 [project.optional-dependencies]

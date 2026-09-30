@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}运行记录{% endblock %}
+{% block body %}
+
+<h1>运行记录</h1>
+{% if scenario_id %}
+<p class="lede">只看 <code>{{ scenario_id }}</code>。<a href="/runs">看全部</a></p>
+{% endif %}
+
+<table class="grid">
+  <thead>
+    <tr>
+      <th>开始</th><th>结束</th><th>场景</th><th>Agent</th>
+      <th>执行状态</th><th>结论</th><th>花费</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in runs %}
+    <tr>
+      <td class="nowrap">{{ r.started_at | localdt }}</td>
+      <td class="nowrap">{{ r.completed_at | localdt }}</td>
+      <td><code>{{ r.scenario_id }}</code></td>
+      <td class="dim">{{ r.agent_version }}</td>
+      <td>
+        {# 执行状态与结论是**两件事**。一次被熔断杀掉的运行（loop 场景）
+           在左边显示 killed，在右边显示通过——那不是矛盾，是预期结果。
+           压成一列就再也分不出"没跑起来"和"跑起来了但没通过"。 #}
+        <span class="dim">{{ r.status }}</span>
+      </td>
+      <td>{{ m.verdict_badge(r.verdict_ok) }}</td>
+      <td class="nowrap">{{ m.cost_cell(r.cost) }}</td>
+      <td><a href="/runs/{{ r.id }}">报告</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="8" class="dim">还没有运行记录。</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{{ m.lower_bound_note(runs | map(attribute='cost') | list) }}
+
+<p class="note">
+  「执行状态」说的是跑完了没有（<code>completed</code> / <code>failed</code> /
+  <code>killed</code>），「结论」说的是通过没有。两者会分开：被熔断杀掉的那次
+  循环场景运行，执行状态是 <code>killed</code>，而结论是**通过**——进程是被
+  我们亲手杀的，那正是场景想制造的结果。
+</p>
+
+{% endblock %}

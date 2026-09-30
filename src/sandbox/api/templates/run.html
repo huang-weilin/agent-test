@@ -1,0 +1,337 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}运行 {{ run.id[:8] }}{% endblock %}
+{% block body %}
+
+<h1>
+  <code>{{ run.scenario_id }}</code>
+  {{ m.verdict_badge(run.verdict_ok) }}
+</h1>
+<p class="lede">
+  运行 <code>{{ run.id }}</code> ·
+  {{ run.started_at | localdt }} 起 ·
+  执行状态 <code>{{ run.status }}</code> ·
+  Agent <code>{{ run.agent_version }}</code>
+  {% if scenario %} · <a href="/scenarios/{{ run.scenario_id }}">打开场景</a>{% endif %}
+</p>
+
+{% if report is none %}
+<div class="panel warn">
+  <strong>这次运行没有留下结论快照。</strong>
+  它是在「结论落库」这个字段存在之前跑的，所以通过与否查不到。
+  <div class="note">
+    这里**不显示红叉**：没记录不是失败。替一条没有结论的运行编一个结论出来，
+    会让人去查一个根本不存在的缺陷。
+    下面的工具调用审计和记忆快照来自明细表，它们是有的。
+  </div>
+</div>
+{% else %}
+
+{% if report.error %}
+<div class="panel bad">
+  <strong>执行失败，这次测试没跑成。</strong>
+  <pre class="wrap">{{ report.error }}</pre>
+  <p class="note">
+    执行失败和"没通过"是两回事。前者说明结论不指向被测对象——
+    报告里其他的判定都是在一段残缺的轨迹上算出来的。
+  </p>
+</div>
+{% endif %}
+
+{# 三个**互相独立**的判定。合并成一个"通过/不通过"就再也看不出是哪一条不成立，
+   而这三条指向的修复方向完全不同：改 Agent、改场景、查目标系统。 #}
+<section class="cards">
+  <div class="card {{ 'ok' if report.expectation and report.expectation.ok else 'bad' }}">
+    <div class="k">检测结论</div>
+    <div class="v">
+      {% if report.expectation %}
+        {{ '符合预期' if report.expectation.ok else '不符合预期' }}
+      {% else %}
+        没有比对结果
+      {% endif %}
+    </div>
+    {% if report.expectation %}
+    <div class="sub">
+      命中 {{ report.expectation.matched | length }} ·
+      未命中 {{ report.expectation.missing | length }} ·
+      意外 {{ report.expectation.unexpected | length }} ·
+      未覆盖 {{ report.expectation.uncovered | length }}
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card {{ 'ok' if report.premises_held else 'bad' }}">
+    <div class="k">前提是否成立</div>
+    <div class="v">{{ '成立' if report.premises_held else '未成立' }}</div>
+    <div class="sub">
+      {% if report.premises_held %}
+        每段脚本都被消费完了
+      {% else %}
+        有会话没跑完 → 结论是在一段不符合场景描述的轨迹上得出的，
+        <strong>不指向被测对象</strong>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card {{ 'ok' if report.charges_ok else 'bad' }}">
+    <div class="k">目标系统侧扣款</div>
+    {% if report.expected_charges is none %}
+      <div class="v dim">未检查</div>
+      <div class="sub">这个场景没有写 <code>expected_charges</code></div>
+    {% elif report.egress_charges < 0 %}
+      <div class="v">查不到</div>
+      <div class="sub">
+        <strong>查不到不等于没问题</strong>——判为不通过。
+        把"没测到"读成"没问题"是这个工具最严重的失效方式。
+      </div>
+    {% else %}
+      <div class="v">实际 {{ report.egress_charges }} 笔 / 预期 {{ report.expected_charges }} 笔</div>
+      <div class="sub">
+        地面真值，**独立于检测结论**。检测器只看得见网络边界，钱是在目标系统里扣的。
+      </div>
+    {% endif %}
+  </div>
+</section>
+
+<h2>会话</h2>
+<table class="grid">
+  <thead>
+    <tr>
+      <th>#</th><th>名称</th><th>记忆视野</th><th>脚本消费</th>
+      <th>退出码</th><th>耗时</th><th>工具调用</th><th>前提</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for s in report.sessions %}
+    <tr>
+      <td>{{ s.ordinal }}</td>
+      <td>
+        {{ s.name }}
+        {% if s.restored_from %}<div class="note">恢复到 <code>{{ s.restored_from }}</code></div>{% endif %}
+        {% if s.timed_out %}<div class="note bad">超时强杀</div>{% endif %}
+        {% if s.killed %}<div class="note">已被熔断<div class="dim">{{ s.kill_reason }}</div></div>{% endif %}
+      </td>
+      <td class="nowrap">≤ 会话 {{ s.memory_horizon_ordinal }}</td>
+      <td class="nowrap">
+        {{ s.script_steps_consumed }}/{{ s.script_steps_declared }}
+        {% if s.killed %}<span class="dim">（熔断所致）</span>{% endif %}
+      </td>
+      <td>{{ s.exit_code }}</td>
+      <td class="nowrap">{{ '%.1f' % s.elapsed_s }}s</td>
+      <td>{{ s.tool_calls }}</td>
+      <td>{{ m.premise_badge(s.premise_held) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  <strong>记忆视野</strong>是跨会话归因的唯一依据：这个会话开始时，Agent 的记忆
+  覆盖到哪个序号为止。自然延续等于"记得此前一切"；从旧快照恢复时会比
+  <code>ordinal - 1</code> 小，<strong>缺的那一段就是它不可能知道的部分</strong>。
+  于是"是谁的锅"不需要猜——某次调用发生在序号 a、又在序号 b 重复，
+  <code>a ≤ 视野(b)</code> 就是 Agent 本可以知道，否则是记忆恢复机制的锅。
+</p>
+<p class="note">
+  <strong>熔断时脚本必然没消费完，但那不算前提不成立。</strong>
+  循环场景的预期结果就是被熔断：检测器判出来了、看门狗动手了，说明想制造的行为
+  确实发生了。不豁免的话，一个完美触发的循环场景会被报成"没测到"。
+</p>
+
+<h2>检测结论</h2>
+{% if report.findings %}
+<table class="grid">
+  <thead><tr><th>结论</th><th>检测器</th><th>说明</th></tr></thead>
+  <tbody>
+  {% for f in report.findings %}
+    <tr>
+      <td>{{ m.verdict_pill(f.verdict) }}</td>
+      <td><code>{{ f.detector }}</code></td>
+      <td>
+        {{ f.summary }}
+        {% if f.detail %}
+        <details>
+          <summary class="dim">细节</summary>
+          <pre class="wrap">{{ f.detail | tojson(indent=2) }}</pre>
+        </details>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="dim">没有检测结论。注意这不等于"全绿"——一个什么都没测到的运行
+  同样不会产生结论，而那正是覆盖率要盯着的东西。</p>
+{% endif %}
+
+{% if report.expectation %}
+<h2>预期比对</h2>
+<table class="grid">
+  <tbody>
+    {% for row in report.expectation.matched %}
+    <tr class="passrow">
+      <td><span class="badge pass">命中</span></td>
+      <td><code>{{ row.expect.detector }}</code> / {{ row.expect.verdict }}
+          {% if row.expect.reason_code %}<code>{{ row.expect.reason_code }}</code>{% endif %}</td>
+      <td>{{ row.got }}</td>
+    </tr>
+    {% endfor %}
+    {% for e in report.expectation.missing %}
+    <tr class="failrow">
+      <td><span class="badge fail">未命中</span></td>
+      <td><code>{{ e.detector }}</code> / 期望 {{ e.verdict }}
+          {% if e.reason_code %}<code>{{ e.reason_code }}</code>{% endif %}</td>
+      <td>{% if e.note %}{{ e.note }}{% else %}<span class="dim">场景预期它出现，但没出现</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    {% for f in report.expectation.unexpected %}
+    <tr class="failrow">
+      <td><span class="badge fail">意外</span></td>
+      <td><code>{{ f.detector }}</code> / {{ f.verdict }}</td>
+      <td>{{ f.summary }}</td>
+    </tr>
+    {% endfor %}
+    {% for f in report.expectation.uncovered %}
+    <tr>
+      <td><span class="badge unknown">未覆盖</span></td>
+      <td><code>{{ f.detector }}</code> / {{ f.verdict }}</td>
+      <td>
+        {{ f.summary }}
+        <div class="note">
+          场景没有对这条结论写预期。<strong>计入覆盖率，但不让运行失败</strong>——
+          "没测到"和"测过了没问题"是两回事，报告不能把前者藏进后者里。
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% endif %}{# /report is not none #}
+
+<h2>工具调用审计</h2>
+{% if tool_calls %}
+<table class="grid">
+  <thead>
+    <tr>
+      <th>seq</th><th>会话</th><th>工具</th><th>参数</th>
+      <th>幂等键</th><th>状态</th><th>耗时</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for c in tool_calls %}
+    <tr class="{{ 'blockedrow' if c.blocked_by_proxy else '' }}">
+      <td>{{ c.seq }}</td>
+      <td>#{{ c.session_ordinal if c.session_ordinal >= 0 else '—' }}</td>
+      <td>
+        <code>{{ c.tool_name }}</code>
+        {% if c.is_write %}<span class="badge fail">写</span>{% endif %}
+        {% if c.blocked_by_proxy %}<span class="badge unknown">代理拦下</span>{% endif %}
+        {% if c.replay_reason %}<div class="note">{{ c.replay_reason }}</div>{% endif %}
+      </td>
+      <td><code class="args">{{ c.args_short }}</code></td>
+      <td>{% if c.idempotency_key %}<code>{{ c.idempotency_key }}</code>{% else %}<span class="dim">—</span>{% endif %}</td>
+      <td>
+        {{ c.status }}
+        {% if c.error %}<div class="bad">{{ c.error }}</div>{% endif %}
+      </td>
+      <td class="nowrap">{{ c.latency_ms }}ms</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  被出口代理拒绝的调用（<code>blocked_by_proxy</code>）**不计入 Agent 异常行为**——
+  那是沙箱自己的策略（ADR 003 出口默认拒绝）在生效，不是被测对象做错了事。
+  混进检测结论会污染判定。
+</p>
+{% else %}
+<p class="dim">这次运行没有工具调用。</p>
+{% endif %}
+
+<h2>记忆快照</h2>
+{% if snapshots %}
+<table class="grid">
+  <thead>
+    <tr><th>取名于</th><th>adapter</th><th>条目</th><th>大小</th><th>摘要</th></tr>
+  </thead>
+  <tbody>
+  {% for s in snapshots %}
+    <tr>
+      <td>会话 {{ s.taken_at_ordinal }} 之后第 {{ s.taken_at_seq }} 步</td>
+      <td><code>{{ s.adapter }}</code></td>
+      <td>{{ s.entry_count }}</td>
+      <td class="nowrap">{{ s.size_bytes }} B</td>
+      <td><code class="dim">{{ s.digest[:12] }}</code></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  快照不是观测记录，是<strong>操纵记录</strong>：记忆在 Agent 进程内，
+  不在网络边界上，边界拦不到它。这里做的不是"看见 Agent 的记忆"，
+  而是"把它的记忆回滚到某个时刻，看它会不会因此重复扣款"。
+  <strong>回滚到哪儿由我们决定，所以"它本可以知道吗"有确定答案</strong>——
+  跨会话归因不需要猜，靠的就是这个。内容寻址的摘要用于判断"回滚到的是不是
+  同一个状态"。
+</p>
+{% else %}
+<p class="dim">这次运行的会话序列没有快照。单会话场景不拍快照。</p>
+{% endif %}
+
+{% if report and report.cost %}
+<h2>成本</h2>
+<p class="lede">
+  {{ report.cost.llm_calls }} 次 LLM 调用 ·
+  输入 {{ report.cost.input_tokens | tokens }} ·
+  输出 {{ report.cost.output_tokens | tokens }} ·
+  <strong>${{ report.cost.cost_usd | money }}</strong>
+  {% if report.cost.cost_is_lower_bound %}
+    <span class="star">*</span>
+  {% endif %}
+</p>
+{% if report.session_costs %}
+<table class="grid">
+  <thead><tr><th>会话</th><th class="num">调用</th><th class="num">输入</th>
+             <th class="num">输出</th><th class="num">花费</th></tr></thead>
+  <tbody>
+  {# 不在这里排序：`to_dict()` 已经按**整数**序号排好，JSON 对象保留插入顺序。
+     在这里按字符串键重排的话 "10" 会排在 "2" 前面，而那份表读起来像是有序的。 #}
+  {% for ordinal, c in report.session_costs.items() %}
+    <tr>
+      <td>{% if (ordinal | int) < 0 %}<span class="dim">会话之外</span>{% else %}#{{ ordinal }}{% endif %}</td>
+      <td class="num">{{ c.llm_calls }}</td>
+      <td class="num">{{ c.input_tokens | tokens }}</td>
+      <td class="num">{{ c.output_tokens | tokens }}</td>
+      <td class="num nowrap">{{ m.cost_cell(c) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<p class="note">
+  Token 计数<strong>以网关为准</strong>，不看 Agent 上报的 usage——
+  那是被测对象能改的值，用它算成本等于让被测对象自己写考卷。
+  花费一律从 <code>LlmCall</code> 明细重算，不用运行表上那个总结字段。
+  {% if report.cost.cost_is_lower_bound %}
+  <br><span class="star">*</span>
+  有 {{ report.cost.unpriced_calls }} 次调用的模型不在定价表里，按 0 计。
+  <strong>上面的金额是下界，不是账单。</strong>
+  {% endif %}
+</p>
+{% if report.budget %}
+<h3>预算</h3>
+{% for b in report.budget %}
+  <div class="budget {{ 'over' if b.exceeded else '' }}">
+    <span class="mark">{{ '!!' if b.exceeded else 'ok' }}</span>
+    {{ {'day': '本日', 'week': '本周', 'month': '本月'}[b.period] }}
+    已花 ${{ b.spent_usd | money }} / 预算 ${{ b.ceiling_usd | money }}
+    （{{ '%.0f' % (b.ratio * 100) }}%）
+  </div>
+{% endfor %}
+<p class="note">超预算**不会**让这次运行算作不通过。见 <code>docs/cost.md</code>。</p>
+{% endif %}
+{% endif %}
+
+{% endblock %}

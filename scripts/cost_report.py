@@ -22,19 +22,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sandbox.cost import aggregator as cost  # noqa: E402
 from sandbox.db.engine import init_db  # noqa: E402
+from sandbox.formatting import money as _money  # noqa: E402
+from sandbox.formatting import tokens as _tokens  # noqa: E402
 
 _PERIOD_LABEL = {"day": "本日", "week": "本周", "month": "本月"}
-
-
-def _money(usd: float) -> str:
-    for decimals in (2, 4, 6):
-        if abs(usd) >= 10**-decimals:
-            break
-    return f"{usd:.{decimals}f}".rstrip("0").rstrip(".") or "0"
-
-
-def _tokens(n: int) -> str:
-    return f"{n:,}"
 
 
 def _rollup_line(label: str, r: cost.CostRollup, width: int) -> str:

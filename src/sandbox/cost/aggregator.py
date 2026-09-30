@@ -135,6 +135,32 @@ async def for_run(run_id: str, *, db: AsyncSession | None = None) -> CostRollup:
     return await _with_db(db, _go)
 
 
+async def for_runs(
+    run_ids: list[str], *, db: AsyncSession | None = None
+) -> dict[str, CostRollup]:
+    """多个运行各自的花费，一次查完。
+
+    存在的理由是**不要 N+1**：运行列表要显示每一行的花费，逐行调 `for_run`
+    就是几十次往返。但也不能因此退回 `TestRun.total_cost_usd`——那是运行结束
+    时写一次的快照，用它做列表等于让列表和明细各说各话。分组聚合既是一次
+    查询，又仍然是从明细算的。
+
+    列表里没出现的运行 id 就是没有调用记录，调用方按"零"处理。
+    """
+
+    async def _go(session: AsyncSession) -> dict[str, CostRollup]:
+        if not run_ids:
+            return {}
+        stmt = (
+            select(LlmCall.test_run_id, *_sum_columns())
+            .where(LlmCall.test_run_id.in_(run_ids))
+            .group_by(LlmCall.test_run_id)
+        )
+        return {str(row[0]): _rollup(row[1:]) for row in (await session.execute(stmt)).all()}
+
+    return await _with_db(db, _go)
+
+
 async def by_session(run_id: str, *, db: AsyncSession | None = None) -> dict[int, CostRollup]:
     """按**会话序号**拆解一次运行的花费。
 

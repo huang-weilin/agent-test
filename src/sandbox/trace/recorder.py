@@ -286,6 +286,44 @@ async def finish_run(
             sess.status = "ended"
 
 
+async def mark_run_failed(run_id: str) -> None:
+    """把运行标成失败。**给异常收尾用。**
+
+    另一条路径是 `finish_run`，但它要一个 `RunContext`——执行中途抛异常的
+    时候那个上下文可能压根还没建起来。没有这个函数，崩掉的运行会永远停在
+    `running`，而界面会把"永远进行中"显示给用户。
+    """
+    async with session_scope() as db:
+        run = await db.get(TestRun, run_id)
+        if run is None:
+            return
+        run.status = RunStatus.FAILED.value
+        run.completed_at = datetime.now(UTC)
+
+
+async def record_verdict(run_id: str, *, ok: bool, report: dict[str, Any]) -> None:
+    """把判定结果与完整报告写回运行记录。
+
+    **刻意不在 `finish_run` 里做。** `finish_run` 发生在执行结束那一刻，而
+    结论要等检测器跑完、预期比对完才知道——中间隔着"判断"这一步。合并的话，
+    写下去的那个字段就同时背着"跑完了"和"通过了"两种含义，而它们会分开：
+    `loop` 场景里进程是被我们亲手熔断杀掉的（执行失败），但那次运行是
+    **通过**的。
+
+    `report` 存的是 `ScenarioResult.to_dict()` 的 JSON。写入用 `default=str`
+    兜底：报告是**记录**，里面有任何一个字段不是 JSON 原生类型，都不该让
+    整次运行的结论丢在地上。兜底转出来的字符串不好看，但比 lost update 好。
+
+    读侧（`api/queries.py`）必须把 NULL 当成"结论未留存"，不是"不通过"。
+    """
+    async with session_scope() as db:
+        run = await db.get(TestRun, run_id)
+        if run is None:
+            raise KeyError(f"run {run_id} 不存在")
+        run.verdict_ok = ok
+        run.report_json = json.dumps(report, ensure_ascii=False, default=str)
+
+
 async def recompute_totals(run_id: str) -> dict[str, float]:
     """从 LlmCall 明细重算运行总额。
 
