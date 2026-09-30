@@ -42,7 +42,8 @@ from sandbox.api.jobs import JobRegistry
 from sandbox.cost import aggregator as cost
 from sandbox.db.engine import init_db
 from sandbox.formatting import money, tokens
-from sandbox.scenario import loader
+from sandbox.regression import cases, diff
+from sandbox.scenario import identity, loader
 from sandbox.scenario.loader import ScenarioError
 from sandbox.scenario.spec import Scenario
 
@@ -87,6 +88,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 接受请求之前完成，而不是等第一次查询时才发现少一张表。
     await init_db()
     yield
+
+
+def _job_return_to(job: Any) -> str | None:
+    """作业跑完之后要跳回的那个内部地址。
+
+    `{run_id}` 占位符在这里替换——**跑完之后才知道运行 id**，所以它不能
+    在起作业时就被拼死。
+
+    这一层的存在是为了那句"宁可不跳也不乱跳"：`return_to` 目前只由服务端
+    自己拼，但它是被重定向出去的值，所以在这里挡一道——不以单个 `/` 开头
+    的地址（`//evil.example`、`https://…`）一律不跳，退回运行详情页。
+    少了这道检查，哪天有人接一个查询参数进来就是一个开放重定向。
+    """
+    target = getattr(job, "return_to", None)
+    if not target or not target.startswith("/") or target.startswith("//"):
+        return None
+    run_id = job.run_id
+    return target.replace("{run_id}", run_id) if run_id else None
 
 
 def create_app(
@@ -139,6 +158,19 @@ def create_app(
             {"title": title, "detail": detail},
             status_code=status,
         )
+
+    def _scenario_exists(application: FastAPI, scenario_id: str) -> bool:
+        """这个场景文件还在不在。
+
+        用例存的是场景 id，不是文件。文件被删掉之后用例本身仍然完整（基线是
+        冻结的），但重跑不了——这个区别要在页面上说清，不能等用户按了按钮
+        才报错。
+        """
+        root = application.state.scenarios_root
+        try:
+            return paths.scenario_file(scenario_id, root=root).exists()
+        except paths.ScenarioPathError:
+            return False
 
     # --- 页面 -------------------------------------------------------------
 
@@ -294,7 +326,8 @@ def create_app(
                 "如果它当时已经跑完，结论在「运行记录」里能查到。",
             )
         if job.state == "done" and job.run_id:
-            return RedirectResponse(f"/runs/{job.run_id}", status_code=303)
+            target = _job_return_to(job)
+            return RedirectResponse(target or f"/runs/{job.run_id}", status_code=303)
         return templates.TemplateResponse(
             request,
             "waiting.html",
@@ -435,6 +468,124 @@ def create_app(
             },
         )
 
+    # --- 回归集（需求 3.6） ------------------------------------------------
+    #
+    # 这一页的重点全在**别把话说错**上，而且比别的页更难：这里同时有"两次运行
+    # 的结论"和"这两次能不能放在一起比"两件事。混成一句"发现 3 处差异"，
+    # 用户只能自己猜哪几处算数。所以 `Comparison` 里的可比性与差异清单是
+    # 并列的，模板也必须把它们分开渲染——见 `regression/diff.py` 的模块注释。
+
+    @app.get("/regression", response_class=HTMLResponse)
+    async def regression_list(request: Request) -> Response:
+        return templates.TemplateResponse(
+            request,
+            "regression.html",
+            {
+                "cases": await cases.list_cases(),
+                "active": app.state.jobs.active,
+            },
+        )
+
+    @app.get("/regression/{case_id}", response_class=HTMLResponse)
+    async def regression_detail(
+        request: Request, case_id: str, run_id: str = ""
+    ) -> Response:
+        case = await cases.get_case(case_id)
+        if case is None:
+            return _problem(
+                request, 404, "找不到这条回归用例", f"{case_id} 不在库里。"
+            )
+
+        # 默认比"最近跑的那一次"，而不是"我刚点的那一次"：如果用户用别的方式
+        # 跑过（命令行、另一个标签页），最近一次才是最新的结论。`run_id` 只在
+        # 从别处带过来指定某一次时才用。
+        target = None
+        if run_id:
+            target = await cases.find_run(run_id)
+        if target is None:
+            target = await cases.latest_run_for(case)
+
+        comparison = (
+            diff.compare(cases.snapshot_of_case(case), cases.snapshot_of_run(target))
+            if target is not None
+            else None
+        )
+        return templates.TemplateResponse(
+            request,
+            "regression_detail.html",
+            {
+                "case": case,
+                "run": target,
+                "comparison": comparison,
+                "section_labels": identity.SECTION_LABELS,
+                "kinds": diff,
+                "active": app.state.jobs.active,
+                # 场景文件可能已经被删了。这时"一键回归测试"按下去会得到一句
+                # 说得清的错，而不是一个 500——所以先在这里判一次。
+                "scenario_exists": _scenario_exists(app, case.scenario_id),
+            },
+        )
+
+    @app.post("/regression", response_class=HTMLResponse)
+    async def regression_create(
+        request: Request,
+        run_id: str = Form(...),
+        name: str = Form(""),
+        note: str = Form(""),
+    ) -> Response:
+        # **用例从运行记录里建，不从表单里建。** 表单只提供名字和备注；
+        # 基线的那份结论是服务端从库里读的——让请求能把结论传进来，等于
+        # 允许一条手写的请求伪造一条判据，而它是之后所有比对的标准。
+        try:
+            case_id = await cases.create_case(run_id=run_id, name=name, note=note)
+        except KeyError:
+            return _problem(
+                request, 404, "找不到这次运行", f"{run_id} 不在库里，没法拿它当基线。"
+            )
+        except cases.NoConclusionError as exc:
+            return _problem(
+                request,
+                400,
+                "这次运行没有结论，不能当基线",
+                f"{exc} 拿一个没有结论的运行当基线，之后每一次比对都会报出一个"
+                f"假的差异（「未留存 → 不通过」），而它看起来像是真的抓到了退化。",
+            )
+        return RedirectResponse(f"/regression/{case_id}", status_code=303)
+
+    @app.post("/regression/{case_id}/run", response_class=HTMLResponse)
+    async def regression_run(request: Request, case_id: str) -> Response:
+        case = await cases.get_case(case_id)
+        if case is None:
+            return _problem(request, 404, "找不到这条回归用例", f"{case_id} 不在库里。")
+
+        path = paths.scenario_file(case.scenario_id, root=app.state.scenarios_root)
+        if not path.exists():
+            return _problem(
+                request,
+                404,
+                "场景文件不在了",
+                f"这条用例测的是 {case.scenario_id}，但 scenarios/ 下已经没有这个文件了。"
+                f"用例的基线还在（结论是冻结的），但没法重跑。",
+            )
+        scenario = loader.load_scenario(path)
+        blocker = app.state.jobs.active
+        if blocker is not None:
+            return _problem(
+                request,
+                409,
+                "已经有一次运行在跑",
+                f"上一次运行（{blocker.scenario_id}）还没结束。"
+                f"沙箱一次只能跑一个场景——两次运行会互相改掉对方的上游地址，"
+                f"两边都会给出看起来正常的报告，而数据是串的。请等它跑完。",
+            )
+        # 跑完直接回到对比页，带上这次的 run_id。**这里是服务端拼的**，
+        # 没有一处用到请求里的字符串——所以不存在开放重定向。
+        job = app.state.jobs.start(
+            scenario, return_to=f"/regression/{case_id}?run_id={{run_id}}"
+        )
+        assert job is not None
+        return RedirectResponse(f"/jobs/{job.id}", status_code=303)
+
     # --- JSON 接口 --------------------------------------------------------
     #
     # 只读的那几个 + 一个"发起运行"。**没有 JSON 写接口**：改场景文件的路径
@@ -496,6 +647,72 @@ def create_app(
                 }
             )
         return JSONResponse(report)
+
+    @app.get("/api/regression")
+    async def api_regression_list() -> list[dict[str, Any]]:
+        return [
+            {
+                "id": c.id,
+                "name": c.name,
+                "scenario_id": c.scenario_id,
+                "note": c.note,
+                "baseline_run_id": c.baseline_run_id,
+                # NULL 原样给 null，不折成 false："没留存"和"不通过"是两回事，
+                # 折进 JSON 之后调用方再也分不出来。
+                "baseline_verdict_ok": c.baseline_verdict_ok,
+                "baseline_started_at": (
+                    c.baseline_started_at.isoformat() if c.baseline_started_at else None
+                ),
+                "created_at": c.created_at.isoformat(),
+            }
+            for c in await cases.list_cases()
+        ]
+
+    @app.get("/api/regression/{case_id}")
+    async def api_regression_detail(case_id: str, run_id: str = "") -> Response:
+        case = await cases.get_case(case_id)
+        if case is None:
+            return JSONResponse({"error": "找不到这条回归用例", "id": case_id}, status_code=404)
+        target = await cases.find_run(run_id) if run_id else None
+        target = target or await cases.latest_run_for(case)
+        if target is None:
+            return JSONResponse(
+                {
+                    "id": case.id,
+                    "name": case.name,
+                    "scenario_id": case.scenario_id,
+                    "run_id": None,
+                    "comparison": None,
+                    "note": "这个场景还没有跑过第二次，没有可比的东西。",
+                }
+            )
+        comparison = diff.compare(cases.snapshot_of_case(case), cases.snapshot_of_run(target))
+        return JSONResponse(
+            {
+                "id": case.id,
+                "name": case.name,
+                "scenario_id": case.scenario_id,
+                "baseline_run_id": case.baseline_run_id,
+                "run_id": target.id,
+                "comparison": {
+                    "comparability": comparison.comparability,
+                    "outcome": comparison.outcome,
+                    "headline": comparison.headline,
+                    "counts": comparison.counts,
+                    "changed_sections": comparison.changed_sections,
+                    "notes": comparison.notes,
+                    "differences": [
+                        {
+                            "kind": d.kind,
+                            "subject": d.subject,
+                            "before": d.before,
+                            "after": d.after,
+                        }
+                        for d in comparison.differences
+                    ],
+                },
+            }
+        )
 
     @app.post("/api/runs")
     async def api_start_run(payload: dict[str, Any]) -> Response:

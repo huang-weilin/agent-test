@@ -210,6 +210,29 @@
 
 {% endif %}{# /report is not none #}
 
+<h2>存为回归用例</h2>
+{# 把这次运行的结论钉成基线，以后改完东西重跑就能比对。
+   **不在没有结论的运行上开这个口子**：没有结论的基线一比就是"未留存 →
+   不通过"，那个"退化"是假的，而它会写进用例里再也改不掉。 #}
+{% if report is none %}
+<p class="dim">
+  这次运行没有留下结论，不能当基线——一个没有结论的基线比出来的每一个差异
+  都是假的。等一次有结论的运行。
+</p>
+{% else %}
+<form class="inline" method="post" action="/regression">
+  <input type="hidden" name="run_id" value="{{ run.id }}">
+  <input type="text" name="name" placeholder="用例名，比如「支付幂等：正常单笔」"
+         aria-label="用例名">
+  <input type="text" name="note" placeholder="备注（可选）" aria-label="备注">
+  <button type="submit" class="primary">存为回归用例</button>
+</form>
+<p class="note">
+  存下来的是**这次运行的结论快照**，不是"指向这次运行"。基线必须自足：
+  这次运行哪天被清理掉，用例仍然比得了。
+</p>
+{% endif %}
+
 <h2>工具调用审计</h2>
 {% if tool_calls %}
 <table class="grid">

@@ -172,6 +172,14 @@ form.inline label { display: inline-flex; gap: 0.3rem; align-items: center; font
 form.inline label.check { color: var(--dim); }
 td.actions form { display: inline; }
 
+/* 页面级的操作条（"一键回归测试"这类）。和 form.inline 分开：那是表单自己
+   的排版，这是"一行按钮加一句在旁边解释它为什么不能按"的排版。 */
+.actions {
+  display: flex; gap: 0.9rem; align-items: center; flex-wrap: wrap;
+  margin: 0.8rem 0 1.2rem;
+}
+.actions .note { margin: 0; max-width: 46rem; }
+
 dl { margin: 0.4rem 0; }
 dt { font-weight: 600; margin-top: 0.7rem; font-size: 0.9em; }
 dd { margin: 0.1rem 0 0; }

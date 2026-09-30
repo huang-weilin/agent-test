@@ -20,6 +20,7 @@ from pathlib import Path
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sandbox.api import paths
@@ -888,3 +889,470 @@ def test_args_are_truncated_with_a_visible_marker() -> None:
     cut = _shorten_args(long_args)
     assert len(cut) == 141  # 140 + 省略号
     assert cut.endswith("…")
+
+
+# =============================================================================
+# 回归集（需求 3.6）
+# =============================================================================
+#
+# 这些用例盯的是**能不能据此下结论**，而不是"页面打得开"。一个总是给出结论
+# 的回归工具比没有回归工具更坏：它会把"我改了 Prompt"报成"Agent 退化了"，
+# 于是下一次没人再信它。所以"配置变了要说这次不作数"和"结论一致要说没变"
+# 是同等重要的用例。
+
+
+def _regression_report(
+    *,
+    ok: bool = True,
+    egress: int = 1,
+    horizon: int = -1,
+    finding: str = "pass",
+) -> dict:
+    return {
+        "scenario_id": "clean",
+        "ok": ok,
+        "premises_held": True,
+        "charges_ok": True,
+        "error": None,
+        "sessions": [
+            {
+                "name": "第一次",
+                "ordinal": 0,
+                "memory_horizon_ordinal": horizon,
+                "restored_from": None,
+                "premise_held": True,
+            }
+        ],
+        "findings": [{"detector": "idempotency", "verdict": finding, "summary": "只付了一次"}],
+        "expectation": {"matched": [], "missing": [], "unexpected": [], "uncovered": []},
+        "egress_charges": egress,
+        "expected_charges": 1,
+        "cost": {"total_usd": 0.01, "llm_calls": 3},
+    }
+
+
+def _regression_config(*, task: str = "帮我把订单 A1 处理掉。") -> dict:
+    """一份五节齐全的配置，形状与 `identity.sections()` 一致。"""
+    return {
+        "prompt": {"task": task, "model": "stub-model"},
+        "tools": [{"name": "create_payment", "is_write": True}],
+        "script": [{"name": "第一次", "script": [{"tool_calls": []}]}],
+        "agent": {"version": "react_demo@0.1", "directory": "react_demo", "entry": "agent.py"},
+        "expect": {"expect": [], "unexpected_failures": "fail", "expected_charges": 1},
+    }
+
+
+async def _seed_run(
+    *,
+    run_id: str,
+    started_at,
+    ok: bool = True,
+    report: dict | None = None,
+    config_parts: dict | None = None,
+    scheme: str | None = "2",
+    scenario_id: str = "clean",
+) -> None:
+    """塞一次**带完整结论与配置**的运行。
+
+    回归对比要读的列比别的页面多（结论、口径、分节原值），所以这里不能像
+    `seeded` 那样只填 id 和状态——缺哪一列，对比就会走进"不可比"那条分支，
+    而测试会以为那是对的。
+    """
+    from sandbox.db.engine import session_scope
+
+    parts = config_parts if config_parts is not None else _regression_config()
+    async with session_scope() as db:
+        db.add(
+            TestRun(
+                id=run_id,
+                scenario_id=scenario_id,
+                agent_version="react_demo@0.1",
+                config_hash="c" * 64,
+                config_scheme=scheme,
+                config_parts_json=json.dumps(parts) if parts is not None else None,
+                session_sequence_id=f"seq-{run_id}",
+                status="completed",
+                started_at=started_at,
+                completed_at=started_at,
+                verdict_ok=ok,
+                report_json=json.dumps(
+                    report if report is not None else _regression_report(ok=ok)
+                ),
+                env_json=json.dumps({"model": "stub-model", "llm_upstream": "scripted"}),
+            )
+        )
+
+
+@pytest_asyncio.fixture
+async def baseline_run(temp_db: str) -> str:
+    """一次跑得对的运行，用来当基线。"""
+    from datetime import UTC, datetime, timedelta
+
+    await _seed_run(
+        run_id="run-old", started_at=datetime.now(UTC) - timedelta(minutes=10)
+    )
+    return "run-old"
+
+
+async def _save_case(
+    client: httpx.AsyncClient, run_id: str, name: str = "用例", **extra
+) -> str:
+    """存成用例，返回用例页地址。"""
+    r = await client.post(
+        "/regression",
+        data={"run_id": run_id, "name": name, **extra},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, r.text
+    return r.headers["location"]
+
+
+async def test_saving_a_run_as_a_case_freezes_its_conclusion(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """存下来的是**结论本身**，不是"指向这次运行"。"""
+    case_url = await _save_case(client, baseline_run, "支付幂等", note="正常单笔")
+
+    page = await client.get(case_url)
+    assert page.status_code == 200
+    assert "支付幂等" in page.text
+    assert "正常单笔" in page.text
+
+    from sandbox.db.engine import session_scope
+    from sandbox.db.models import RegressionCase, TestRun
+
+    case_id = case_url.rsplit("/", 1)[-1]
+    async with session_scope() as db:
+        case = await db.get(RegressionCase, case_id)
+        run = await db.get(TestRun, baseline_run)
+        assert case.baseline_report_json == run.report_json
+        assert case.baseline_config_parts_json == run.config_parts_json
+        assert case.baseline_config_scheme == run.config_scheme
+        assert case.baseline_verdict_ok is True
+        assert case.baseline_run_id == run.id
+
+
+async def test_a_case_survives_its_baseline_run_being_deleted(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """**这是"冻结"这个设计的全部理由。**
+
+    只存 run_id 的话，运行记录被清理之后用例会静默退化成"没有基线"——
+    而它在列表里看起来仍然正常。静默退化比报错难查得多。
+    """
+    from datetime import UTC, datetime
+
+    from sandbox.db.engine import session_scope
+    from sandbox.db.models import Session, TestRun, ToolCall
+
+    case_url = await _save_case(client, baseline_run, "会被清理的基线")
+    await _seed_run(run_id="run-new", started_at=datetime.now(UTC))
+
+    # 把**基线那次运行**整个删掉
+    async with session_scope() as db:
+        for model in (ToolCall, Session):
+            found = await db.execute(select(model).where(model.test_run_id == baseline_run))
+            for obj in found.scalars():
+                await db.delete(obj)
+        await db.delete(await db.get(TestRun, baseline_run))
+
+    page = await client.get(case_url)
+    assert page.status_code == 200
+    # 比对照样做得出来：基线是冻结的那份，不依赖运行表
+    assert "没变" in page.text
+    listing = await client.get("/regression")
+    assert "运行已清理" in listing.text
+
+
+async def test_cannot_baseline_a_run_without_a_conclusion(
+    client: httpx.AsyncClient, temp_db: str
+) -> None:
+    """没有结论的运行不能当基线。
+
+    一个没有结论的基线，比出来的每一个差异都是假的（"未留存 → 不通过"），
+    而且它会写进用例里再也改不掉。
+    """
+    from datetime import UTC, datetime
+
+    from sandbox.db.engine import session_scope
+
+    async with session_scope() as db:
+        db.add(
+            TestRun(
+                id="run-empty",
+                scenario_id="clean",
+                agent_version="react_demo@0.1",
+                config_hash="c" * 64,
+                status="failed",
+                started_at=datetime.now(UTC),
+            )
+        )
+
+    r = await client.post(
+        "/regression", data={"run_id": "run-empty", "name": "空的"}, follow_redirects=False
+    )
+    assert r.status_code == 400
+    assert "没有结论" in r.text
+
+
+async def test_unknown_run_id_is_reported_not_crashed(client: httpx.AsyncClient) -> None:
+    r = await client.post(
+        "/regression", data={"run_id": "nope", "name": "x"}, follow_redirects=False
+    )
+    assert r.status_code == 404
+
+
+async def test_unknown_case_is_reported_not_crashed(client: httpx.AsyncClient) -> None:
+    r = await client.get("/regression/nope")
+    assert r.status_code == 404
+    assert "找不到这条回归用例" in r.text
+
+
+async def test_a_case_with_only_its_own_baseline_says_there_is_nothing_to_compare(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """基线往往就是那个场景最近的一次运行——人总是在跑得对的那次上点存为用例。
+
+    这时候如果拿基线和它自己比，页面会渲染出"配置一致，结论未变"——
+    一句什么都没说的话，而它读起来像是"我确认过，没退化"。
+    """
+    case_url = await _save_case(client, baseline_run, "只有基线")
+    page = await client.get(case_url)
+    assert page.status_code == 200
+    assert "还没有可比的东西" in page.text
+    assert "一处差异都没有" not in page.text
+
+
+async def test_runs_from_before_the_case_was_created_do_not_count_as_reruns(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """**建立用例之前**跑的那些不能拿来比。
+
+    回归问的是"我认定这个结论是对的之后，它还好不好"。页面若拿一次更早的
+    运行比出一句"结论未变"，用户会以为回归已经验过了——而其实一次都没重跑。
+    """
+    from datetime import UTC, datetime, timedelta
+
+    # 用例建立**之前**的一次运行（时间戳比 created_at 早）
+    await _seed_run(
+        run_id="run-earlier", started_at=datetime.now(UTC) - timedelta(minutes=1)
+    )
+    case_url = await _save_case(client, baseline_run, "旧运行不算")
+
+    page = await client.get(case_url)
+    assert page.status_code == 200
+    assert "还没有可比的东西" in page.text, "把建立用例之前的运行当成了一次回归"
+
+
+async def test_a_run_newer_than_the_baseline_but_older_than_the_case_is_still_excluded(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """比基线晚、但比"建立用例"早的那次也不能算。
+
+    分界是**用户做出断言的时刻**，不是基线那次执行开始的时刻。落在两者之间的
+    运行发生在断言之前，回答不了"断言之后还好不好"。
+    """
+    from datetime import UTC, datetime, timedelta
+
+    # 比基线后、但仍在"现在"之前 → 一定早于 created_at
+    await _seed_run(
+        run_id="run-between", started_at=datetime.now(UTC) - timedelta(seconds=1)
+    )
+    case_url = await _save_case(client, baseline_run, "夹在中间")
+
+    assert "还没有可比的东西" in (await client.get(case_url)).text
+
+
+async def test_a_fresh_rerun_replaces_the_vacuous_comparison(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """跑过第二次之后，比的仍然是**最近一次**而不是基线自己。"""
+    from datetime import UTC, datetime, timedelta
+
+    case_url = await _save_case(client, baseline_run, "跑过第二次")
+    await _seed_run(
+        run_id="run-new", started_at=datetime.now(UTC) + timedelta(minutes=1)
+    )
+
+    page = await client.get(case_url)
+    assert "一处差异都没有" in page.text
+    assert "还没有可比的东西" not in page.text
+
+
+async def test_identical_reruns_report_no_change(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    from datetime import UTC, datetime
+
+    case_url = await _save_case(client, baseline_run, "没变")
+    await _seed_run(run_id="run-new", started_at=datetime.now(UTC))
+
+    page = await client.get(case_url)
+    assert page.status_code == 200
+    assert "算数" in page.text
+    assert "一处差异都没有" in page.text
+
+
+async def test_a_flipped_verdict_is_called_a_behaviour_difference(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """配置一致 + 通过变不通过 = 行为差异。这是这个工具存在的理由。"""
+    from datetime import UTC, datetime
+
+    case_url = await _save_case(client, baseline_run, "退化了")
+    await _seed_run(
+        run_id="run-new",
+        started_at=datetime.now(UTC),
+        ok=False,
+        report=_regression_report(ok=False, egress=2, finding="fail"),
+    )
+
+    page = await client.get(case_url)
+    assert "退化了" in page.text
+    assert "这是行为差异" in page.text
+    # 地面真值也变了，且必须单独出现在清单里：检测器可能报出漂亮的 pass
+    # 而钱其实被扣了两次——这一行独立于检测结论。
+    assert "目标系统" in page.text
+
+
+async def test_a_config_change_says_the_comparison_does_not_count(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """**本模块最要紧的一条。**
+
+    改了 Prompt 之后重跑，结论完全可能跟着变——那时候报"Agent 退化了"
+    会让用户去查一个他刚刚亲手改过的东西。
+    """
+    from datetime import UTC, datetime
+
+    case_url = await _save_case(client, baseline_run, "改过 Prompt")
+    await _seed_run(
+        run_id="run-new",
+        started_at=datetime.now(UTC),
+        ok=False,
+        report=_regression_report(ok=False),
+        config_parts=_regression_config(task="换个任务试试。"),
+    )
+
+    page = await client.get(case_url)
+    assert "配置变了" in page.text
+    assert "不构成结论" in page.text
+    assert "比不出来" in page.text
+    # 差异仍然列出来，只是标明不作数
+    assert "整体判定" in page.text
+
+
+async def test_a_changed_scenario_script_is_reported_as_the_test_changing(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """改脚本不是"配置变更"的一种：两次比的是两套测试。"""
+    from datetime import UTC, datetime
+
+    case_url = await _save_case(client, baseline_run, "改了脚本")
+    parts = _regression_config()
+    parts["script"] = [{"name": "第一次", "script": [{"tool_calls": [{"name": "x"}]}]}]
+    await _seed_run(run_id="run-new", started_at=datetime.now(UTC), config_parts=parts)
+
+    page = await client.get(case_url)
+    assert "测试变了" in page.text
+    assert "会话脚本" in page.text
+
+
+async def test_one_click_rerun_returns_to_the_comparison(
+    client: httpx.AsyncClient, baseline_run: str, runner_state: dict
+) -> None:
+    """跑完直接回到对比页，不用再点一次——差异才是用户要的东西。"""
+    runner_state["run_id"] = "run-new"
+    case_url = await _save_case(client, baseline_run, "一键回归")
+    case_id = case_url.rsplit("/", 1)[-1]
+
+    started = await client.post(f"/regression/{case_id}/run", follow_redirects=False)
+    assert started.status_code == 303
+    assert started.headers["location"].startswith("/jobs/")
+
+    runner_state["release"].set()
+    job = await client.get(started.headers["location"], follow_redirects=False)
+    for _ in range(200):
+        if job.status_code == 303:
+            break
+        await asyncio.sleep(0.02)
+        job = await client.get(started.headers["location"], follow_redirects=False)
+
+    assert job.status_code == 303
+    assert job.headers["location"] == f"{case_url}?run_id=run-new"
+    assert runner_state["ran"] == ["clean"]
+
+
+async def test_rerun_refuses_while_another_run_is_active(
+    client: httpx.AsyncClient, baseline_run: str, runner_state: dict
+) -> None:
+    """并发必须拒绝，而且要说清为什么，不能转圈。"""
+    case_url = await _save_case(client, baseline_run, "并发")
+    case_id = case_url.rsplit("/", 1)[-1]
+
+    await client.post(f"/regression/{case_id}/run", follow_redirects=False)
+    again = await client.post(f"/regression/{case_id}/run", follow_redirects=False)
+    assert again.status_code == 409
+    assert "还没结束" in again.text
+    runner_state["release"].set()
+
+
+async def test_rerun_reports_a_missing_scenario_file(
+    client: httpx.AsyncClient, temp_db: str
+) -> None:
+    """场景文件被删了：用例还在，但重跑不了。这两件事要分开说。"""
+    from datetime import UTC, datetime
+
+    await _seed_run(run_id="run-gone", started_at=datetime.now(UTC), scenario_id="deleted")
+    case_url = await _save_case(client, "run-gone", "场景没了")
+    case_id = case_url.rsplit("/", 1)[-1]
+
+    page = await client.get(f"/regression/{case_id}")
+    assert "场景文件不在了" in page.text
+
+    posted = await client.post(f"/regression/{case_id}/run", follow_redirects=False)
+    assert posted.status_code == 404
+    assert "场景文件不在了" in posted.text
+
+
+async def test_json_api_reports_comparability_separately(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """JSON 侧同样要能分出"算数吗"和"差在哪"——它们是并列的两个字段。"""
+    from datetime import UTC, datetime
+
+    case_url = await _save_case(client, baseline_run, "接口")
+    case_id = case_url.rsplit("/", 1)[-1]
+    await _seed_run(run_id="run-new", started_at=datetime.now(UTC))
+
+    data = (await client.get(f"/api/regression/{case_id}")).json()
+    assert data["comparison"]["comparability"] == "comparable"
+    assert data["comparison"]["counts"] is True
+    assert data["comparison"]["differences"] == []
+    assert data["run_id"] == "run-new"
+
+    listing = (await client.get("/api/regression")).json()
+    assert any(c["id"] == case_id for c in listing)
+
+
+async def test_json_api_gives_null_for_a_missing_verdict(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """「没留存」必须在 JSON 里原样是 null。
+
+    折成 false 之后调用方再也分不出"不通过"和"没记录"——而那正是四态语义
+    反复强调的一处。
+    """
+    from sandbox.db.engine import session_scope
+    from sandbox.db.models import RegressionCase
+
+    case_url = await _save_case(client, baseline_run, "没结论")
+    case_id = case_url.rsplit("/", 1)[-1]
+    async with session_scope() as db:
+        case = await db.get(RegressionCase, case_id)
+        case.baseline_verdict_ok = None
+        case.baseline_report_json = None
+
+    data = (await client.get("/api/regression")).json()
+    row = next(c for c in data if c["id"] == case_id)
+    assert row["baseline_verdict_ok"] is None

@@ -53,6 +53,12 @@ class Job:
     ok: bool | None = None
     error: str = ""
     result: ScenarioResult | None = field(default=None, repr=False)
+    #: 跑完之后跳到哪儿。None = 跳这次运行的详情页。
+    #:
+    #: 从回归用例点"一键回归测试"进来时放的是对比页——跑完直接看差异，
+    #: 不用再点一次。**不由请求里的参数决定**（那会变成一个开放重定向），
+    #: 调用方在服务端拼好，见 `_safe_return_to`。
+    return_to: str | None = None
 
     @property
     def is_running(self) -> bool:
@@ -81,7 +87,7 @@ class JobRegistry:
 
     # --- 启动 -------------------------------------------------------------
 
-    def start(self, scenario: Scenario) -> Job | None:
+    def start(self, scenario: Scenario, *, return_to: str | None = None) -> Job | None:
         """占住执行位并起一个后台任务。已经有运行在跑时返回 None。
 
         `_active` 的"检查后置位"没有加锁，这是**对的**：asyncio 是单线程的，
@@ -95,6 +101,7 @@ class JobRegistry:
             id=str(uuid.uuid4()),
             scenario_id=scenario.id,
             started_at=datetime.now(UTC),
+            return_to=return_to,
         )
         self._active = job
         task = asyncio.create_task(self._execute(job, scenario))

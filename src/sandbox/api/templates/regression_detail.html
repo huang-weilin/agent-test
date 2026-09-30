@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}回归用例 {{ case.name }}{% endblock %}
+{% block body %}
+
+<h1>{{ case.name }}</h1>
+<p class="lede">
+  场景 <code>{{ case.scenario_id }}</code> ·
+  基线取自运行 <a href="/runs/{{ case.baseline_run_id }}"><code>{{ case.baseline_run_id[:8] }}</code></a>
+  {% if run %} · 比对运行 <a href="/runs/{{ run.id }}"><code>{{ run.id[:8] }}</code></a>{% endif %}
+  · <a href="/regression">← 全部用例</a>
+</p>
+{% if case.note %}<p class="note">{{ case.note }}</p>{% endif %}
+
+{% if not scenario_exists %}
+<div class="panel warn">
+  <strong>场景文件不在了，这条用例没法重跑。</strong>
+  <code>scenarios/{{ case.scenario_id }}.yaml</code> 已经不在磁盘上。
+  <div class="note">
+    基线本身仍然完整（它是冻结的），所以下面这些比对还看得到；
+    但要重跑得先把场景文件放回去。
+  </div>
+</div>
+{% endif %}
+
+<div class="actions">
+  <form class="inline" method="post" action="/regression/{{ case.id }}/run">
+    <button type="submit" {% if active or not scenario_exists %}disabled{% endif %}>
+      一键回归测试
+    </button>
+  </form>
+  {% if active %}
+  <span class="note">
+    <span class="dot"></span>{{ active.scenario_id }} 正在跑，等它结束。
+    （沙箱一次只能跑一个场景：两次运行会互相改掉对方的上游地址，
+    两边都会给出看起来正常的报告，而数据是串的。）
+  </span>
+  {% endif %}
+</div>
+
+{% if comparison is none %}
+<div class="panel warn">
+  <strong>还没有可比的东西。</strong>
+  这个场景只有基线那一次运行。点上面的"一键回归测试"跑第二次。
+</div>
+{% else %}
+
+{# --- 第一件事：这次比较算不算数 --------------------------------------------
+   可比性和差异清单是并列的，这里必须分开渲染。合成一句"发现 3 处差异"，
+   用户只能自己猜哪几处算数——而"我改了 Prompt，报告说 Agent 退化了"
+   正是这个页面最不该给出的结论。 #}
+<section class="cards">
+  <div class="card {{ 'ok' if comparison.counts else 'bad' }}">
+    <div class="k">这次比较算不算数</div>
+    <div class="v">
+      {% if comparison.comparability == kinds.COMPARABLE %}算数
+      {% elif comparison.comparability == kinds.CONFIG_CHANGED %}配置变了
+      {% elif comparison.comparability == kinds.TEST_CHANGED %}测试变了
+      {% else %}不可比{% endif %}
+    </div>
+    <div class="sub">
+      {% if comparison.counts %}
+        两次运行的配置一致，所以下面的差异是**行为差异**。
+      {% elif comparison.comparability == kinds.TEST_CHANGED %}
+        改的是测试本身，两次比的是两套测试。
+      {% elif comparison.comparability == kinds.CONFIG_CHANGED %}
+        结论差异可能就是这么来的。
+      {% else %}
+        缺少判断"配置动没动"的依据。
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card {{ 'ok' if comparison.outcome in (kinds.SAME, kinds.FIXED) else 'bad' }}">
+    <div class="k">结论走向</div>
+    <div class="v">
+      {% if not comparison.counts %}比不出来
+      {% elif comparison.outcome == kinds.SAME %}没变
+      {% elif comparison.outcome == kinds.REGRESSED %}退化了
+      {% elif comparison.outcome == kinds.FIXED %}已修复
+      {% else %}比不出来{% endif %}
+    </div>
+    <div class="sub">
+      {% if not comparison.counts %}
+        配置或口径变了，通过与否不是同一个问题的答案。
+      {% elif comparison.outcome == kinds.INDETERMINATE %}
+        前提不同，或有一侧没留下结论。
+      {% else %}
+        基线 {{ m.verdict_badge(case.baseline_verdict_ok) }}
+        →
+        本次 {{ m.verdict_badge(run.verdict_ok) }}
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="k">差异</div>
+    <div class="v">{{ comparison.differences | length }} 处</div>
+    <div class="sub">
+      {% if comparison.counts %}
+        每一处都是行为差异。
+      {% else %}
+        列出来供参考——**但它们不构成结论**。
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<p class="lede"><strong>{{ comparison.headline }}</strong></p>
+
+{% if comparison.notes %}
+<ul class="note">
+  {% for n in comparison.notes %}<li>{{ n }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+{% if comparison.changed_sections %}
+<p class="note">
+  变化的分节：
+  {% for s in comparison.changed_sections %}
+    <code>{{ section_labels.get(s, s) }}</code>{{ "、" if not loop.last }}
+  {% endfor %}
+</p>
+{% endif %}
+
+{# --- 第二件事：差在哪 ------------------------------------------------------ #}
+<h2>差异清单</h2>
+{% if comparison.differences %}
+<table class="grid">
+  <thead>
+    <tr><th>分类</th><th>对象</th><th>基线</th><th>本次</th></tr>
+  </thead>
+  <tbody>
+  {% for kind, items in comparison.grouped() %}
+    {% for d in items %}
+    <tr>
+      <td>{% if loop.first %}{{ kinds.KIND_LABELS.get(kind, kind) }}{% endif %}</td>
+      <td><code>{{ d.subject }}</code></td>
+      <td>{{ d.before }}</td>
+      <td>{{ d.after }}</td>
+    </tr>
+    {% endfor %}
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  <strong>只比四态结论，不比结论文案。</strong>
+  把改措辞报成行为差异，这份清单很快就会没人看——而没人看的清单等于没有清单。
+  代价是"同一个 fail、但细节分量不同"看不出来，那件事由「目标系统（地面真值）」
+  那一行补上：钱扣了几次是数字，不是文案。
+</p>
+<p class="note">
+  <strong>成本差异不参与判定。</strong>
+  花了多少钱是事实陈述，不是"行为有没有缺陷"的结论。算进去的话，一个完全正常
+  的运行会因为多调了一次模型而变红。
+</p>
+{% else %}
+<p class="dim">
+  两次运行的结论完全一致，一处差异都没有。
+  {% if not comparison.counts %}
+  （配置不同而结论相同，说明这次改动没有改变可见行为——但这依然不是
+  "行为没变"的证明，因为两次比的不是同一个东西。）
+  {% endif %}
+</p>
+{% endif %}
+
+{% endif %}{# /comparison is not none #}
+
+{% endblock %}

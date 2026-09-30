@@ -36,6 +36,19 @@ from sandbox.scenario.spec import Scenario
 #: 分节的名字与顺序。顺序固定，于是差异报告里各节的出现顺序也是固定的。
 SECTIONS: tuple[str, ...] = ("prompt", "tools", "script", "agent", "expect")
 
+#: 分节给人看的名字。界面上不能直接印 `prompt` —— 用户改的东西叫"任务描述"，
+#: 不叫"prompt 节"。
+SECTION_LABELS: dict[str, str] = {
+    "prompt": "任务描述与模型",
+    "tools": "工具声明",
+    "script": "会话脚本",
+    "agent": "Agent 构建",
+    "expect": "期望与判卷标准",
+}
+
+#: 改动这几节意味着**测试本身**变了，而不是被测对象变了。见模块 docstring。
+TEST_SECTIONS: frozenset[str] = frozenset({"script", "expect"})
+
 
 def sections(scenario: Scenario) -> dict[str, Any]:
     """把场景切成"用户会改的那几块"。

@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}回归集{% endblock %}
+{% block body %}
+
+<h1>回归集</h1>
+<p class="lede">
+  回归用例把某次运行的结论**钉成基线**，以后改完东西重跑，就能说清
+  "结论变了没有、变的是不是配置"。用例在「运行记录」里点"存为回归用例"建。
+</p>
+
+{% if cases %}
+<table class="grid">
+  <thead>
+    <tr>
+      <th>用例</th><th>场景</th><th>基线结论</th><th>基线取自</th><th>建立时间</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for c in cases %}
+    <tr>
+      <td>
+        <a href="/regression/{{ c.id }}">{{ c.name }}</a>
+        {% if c.note %}<div class="note">{{ c.note }}</div>{% endif %}
+      </td>
+      <td><code>{{ c.scenario_id }}</code></td>
+      <td>{{ m.verdict_badge(c.baseline_verdict_ok) }}</td>
+      <td class="nowrap">
+        {% if c.baseline_started_at %}
+          {{ c.baseline_started_at | localdt }}
+        {% else %}
+          <span class="dim" title="基线本身是完整的，只是那次运行已经不在了">运行已清理</span>
+        {% endif %}
+        <div class="note"><code>{{ c.baseline_run_id[:8] }}</code></div>
+      </td>
+      <td class="nowrap">{{ c.created_at | localdt }}</td>
+      <td><a href="/regression/{{ c.id }}">查看对比 →</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<p class="note">
+  <strong>基线是冻结的，不是"指向某次运行"。</strong>
+  用例记的是有人在某个时刻认定"这个结论是对的"——那是一个断言，断言必须自足。
+  只存运行 id 的话，运行记录一旦被清理，用例就静默退化成"没有基线"，而它在
+  这个列表里看起来仍然正常。<strong>静默退化比报错难查得多。</strong>
+  "运行已清理"那一栏是这么来的：出处的运行不在了，但基线本身没丢。
+</p>
+{% else %}
+<p class="dim">
+  还没有回归用例。去<a href="/runs">运行记录</a>里打开一次跑得对的运行，
+  点"存为回归用例"。
+</p>
+{% endif %}
+
+{% endblock %}

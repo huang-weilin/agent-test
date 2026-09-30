@@ -128,6 +128,47 @@ class TestRun(Base):
     findings: Mapped[list[DetectorFinding]] = relationship(back_populates="test_run")
 
 
+class RegressionCase(Base):
+    """一条回归用例：把某次运行的结论钉成基线，以后拿它比对。
+
+    **基线是冻结的，不是"指向某次运行"。** 这一点值得解释，因为它看起来像
+    冗余：把运行的列抄一份到用例里，为什么不直接存 `baseline_run_id`？
+
+    因为用例记的是**有人在某个时刻认定"这个结论是对的"**。那是一个断言，
+    断言必须自足。只存 id 的话，运行记录一旦被清理（保留期策略、手工删库），
+    用例就静默退化成"没有基线"——而它在列表里看起来仍然是一条正常的用例，
+    点进去才发现什么都没得比。**静默退化比报错难查得多。**
+
+    `baseline_run_id` 因此降级为**出处**：它告诉你这个基线是哪次运行来的，
+    好让人点回去看当时的调用明细。它不参与比较。
+
+    抄过来的列与 `TestRun` 同名同义（加 `baseline_` 前缀），这不是巧合：
+    两侧用同一套字段名，比较逻辑才能只写一遍。
+    """
+
+    __tablename__ = "regression_case"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    scenario_id: Mapped[str] = mapped_column(String(128), index=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+
+    #: 出处的运行 id。**不参与比较**，只在界面上给一个"回看当时的明细"的入口。
+    #: 那次运行被清掉之后这一列会指向一个不存在的运行——这是可接受的，因为
+    #: 基线本身没丢。见类 docstring。
+    baseline_run_id: Mapped[str] = mapped_column(String(36), index=True)
+
+    # --- 冻结的基线（与 TestRun 的对应列同义） ---------------------------
+    baseline_verdict_ok: Mapped[bool | None] = mapped_column(Boolean)
+    baseline_report_json: Mapped[str | None] = mapped_column(Text)
+    baseline_config_scheme: Mapped[str | None] = mapped_column(String(16))
+    baseline_config_hash: Mapped[str | None] = mapped_column(String(64))
+    baseline_config_parts_json: Mapped[str | None] = mapped_column(Text)
+    baseline_env_json: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Session(Base):
     """一次会话。跨会话检测的最小单元。"""
 
