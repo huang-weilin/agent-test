@@ -532,6 +532,11 @@ run_id、检测器、豁免规则），因为这个运行确实在打转、而�
 两段会话之间回滚过记忆，然后在**真运行的结论**里找那条 `memory.drift`。它红的样子
 是"检测器什么都没说"——判据在 YAML 里躺着，没人读它。
 
+**"声明的路径不在了"那两条分支也各有一个活样本**（`memory_tidy_archived` /
+`memory_tidy_pruned`，见下面"换名报 warning，不报 fail"一节）：内容还找得到是
+warning、真的没了是 fail。它们此前一条都没有——演示 Agent 的记忆只会追加，没有任何
+动作能把一份记忆文件弄没，于是这两条只在单测和语料里绿着。
+
 三条"没测到"的规矩，每一条都对应一个会被读错的写法：
 
 | 情形 | 结论 | 为什么不能是别的 |
@@ -567,6 +572,31 @@ run_id、检测器、豁免规则），因为这个运行确实在打转、而�
 
 反过来的钉子也有一根：路径还在、内容被改写了，仍然是 `fail`。**别把"能挪"读成
 "能改"**，`tests/corpus/memory.yaml` 里两条负样本合起来钉住这条界线。
+
+#### 活样本：一对"整理记忆"的受控实验（`memory_tidy_archived` / `memory_tidy_pruned`）
+
+上面那两条分支（内容还在 = warning / 内容也没了 = fail）此前**一个活样本都没有**：
+演示 Agent 的记忆只会追加，没有任何动作能把一份记忆文件弄没，于是这两条只在单测
+和语料里绿着。补法不是改检测器，是给演示 Agent 一个真实的记忆维护动作——**每段
+会话醒来时先整理记忆**（`agents/react_demo/memory.py` 的 `tidy`，由
+`DEMO_AGENT_MEMORY_TIDY` 选择留不留原件）。
+
+| 场景 | 整理时 | 同一条 must_hold | 结论 |
+|---|---|---|---|
+| `memory_tidy_pruned` | 直接删掉 | `actions.jsonl` | `memory.drift/fail`（`memory_key_vanished`） |
+| `memory_tidy_archived` | 挪进 `archive/` | 同上、一字不差 | `memory.drift/warning`（`memory_moved`） |
+
+两支的世界、工具、脚本、任务、判据、`expected_charges` 全都相同，只差那个环境
+变量——所以"一边 warning 一边 fail"只能是 Agent 做了什么不同，不是我们换了尺子。
+
+**归因也在这对场景里被观测钉住**（这也是它比单测强的地方）：会话 1 **开始时**那份
+文件还在（记忆观测量得到），会话 1 结束时不见了，且记忆视野覆盖到会话 0、没有任何
+回滚——"是 Agent 在这段会话里动掉的"是观测到的，不是推出来的。检测器那句"不是我们
+的回滚"因此有据可查，而不是靠"这次没配 `restore_from`"这种间接推理。
+
+报告里能核的证据在 Agent 自己的 stdout 上：`整理（archive）：actions.jsonl →
+archive/actions.jsonl` 与 `整理（prune）：actions.jsonl 已删除`——它是被测对象侧的
+动作，凭据也在那一侧，沙箱不替它写这句话。
 
 ### 中毒（`memory.poisoning`）：只对声明的标记负责
 

@@ -915,3 +915,131 @@ async def test_the_poison_pair_really_runs_and_says_who_is_who(temp_db: str) -> 
     assert clean_poison.detail["observations"] == poison.detail["observations"]
 
     assert good.egress_charges == 1
+
+
+# --- 整理记忆的活样本：一对"路径不在了"的受控实验 --------------------------------
+#
+# `memory_key_vanished` 与 `memory_moved` 是同一件事的两个答案："声明的路径不在了"
+# ——内容还找得到，还是真的丢了。它们此前都没有活样本：演示 Agent 的记忆守卫只会
+# 追加，没有删除/改名这个动作，而没有这个动作就没人能把一份记忆文件弄没。
+#
+# 补法不是改检测器，是给演示 Agent 一个**真实的记忆维护动作**（醒来时整理记忆，
+# 见 agents/react_demo/memory.py 的 `tidy`），然后用一对场景把它演出来。
+
+ARCHIVED = ROOT / "scenarios" / "memory_tidy_archived.yaml"
+PRUNED = ROOT / "scenarios" / "memory_tidy_pruned.yaml"
+
+
+def test_the_tidy_pair_differs_only_in_what_the_agent_did_with_the_old_file() -> None:
+    """受控实验：两份场景之间只许有一个变量——整理时留不留原件。
+
+    "Agent 把这条记忆弄没了"这句话只有在下面这条成立时才有意义：**两支的声明
+    是同一句**。声明不同的话，比的是两把尺子，而两个世界里各报一个结论这件事
+    就什么都不证明了。
+
+    逐节比的是 `identity.sections`，也就是生产上判"配置变没变"的那份口径。
+    """
+    archived = load_scenario(ARCHIVED)
+    pruned = load_scenario(PRUNED)
+    a = identity.sections(archived)
+    b = identity.sections(pruned)
+
+    # `expect` 是唯一**必须**不同的那一节：一边要的是 warning，一边要的是 fail。
+    # 其余每一节都不许动，尤其 `script`（那是测试本身）与 `world`（那是布景）。
+    assert identity.changed_sections(a, b) == ["agent", "expect"]
+    for section in ("prompt", "tools", "script", "world"):
+        assert a[section] == b[section], f"{section} 节不一样——那就不是受控实验了"
+
+    # agent 节里也只有那一个环境变量不同。
+    assert a["agent"]["env"] == {"DEMO_AGENT_MEMORY_TIDY": "archive"}
+    assert b["agent"]["env"] == {"DEMO_AGENT_MEMORY_TIDY": "prune"}
+    for key in ("version", "directory", "entry"):
+        assert a["agent"][key] == b["agent"][key]
+
+    # 判据一字不差——同一路径、同一句理由。这一条是这对场景的全部说服力所在。
+    assert a["expect"]["memory"] == b["expect"]["memory"]
+    assert a["expect"]["expected_charges"] == b["expect"]["expected_charges"] == 1
+    held = archived.memory_rules().must_hold
+    assert [r.path for r in held] == ["actions.jsonl"]
+    assert pruned.memory_rules().must_hold[0].reason == held[0].reason
+
+    # 两边数的是同一批结论（检测器名单要对得上），差的只有结论本身。
+    assert [e.detector for e in archived.expect] == [
+        e.detector for e in pruned.expect
+    ] == ["memory.drift", "memory"]
+    assert [(e.verdict, e.reason_code) for e in archived.expect] == [
+        (DetectorVerdict.WARNING, "memory_moved"),
+        (DetectorVerdict.WARNING, None),
+    ]
+    assert [(e.verdict, e.reason_code) for e in pruned.expect] == [
+        (DetectorVerdict.FAIL, "memory_key_vanished"),
+        (DetectorVerdict.FAIL, None),
+    ]
+
+
+async def test_the_tidy_pair_really_runs_and_one_rule_lands_on_two_verdicts(
+    temp_db: str,
+) -> None:
+    """真跑两遍：同一条 must_hold，一边报 moved（warning）、一边报 vanished（fail）。
+
+    **两遍都要断言，缺一不可。** 只跑 archived 那一支的话，一个"内容一变就说
+    是换了个地方"的检测器也能全绿——而它永远不会说出"这条记忆丢了"，也就是
+    这一族最该说的那句话；只跑 pruned 那一支则反过来。
+
+    归因也在这儿被钉住：`memory_key_vanished` 说的是"Agent 弄丢了记忆"，而我们
+    自己回滚过一次的那种情形有另一条分支（`memory_rolled_back`）。这一对没有
+    任何回滚，而且会话 1 **开始时**那份文件还观测得到——所以"它是在这段会话里
+    没的"是观测到的，不是推出来的。
+    """
+    if not AGENT_PYTHON.exists():
+        pytest.skip(f"被测 Agent 的 venv 不在（{AGENT_PYTHON}），跳过端到端整理对照")
+    from sandbox.scenario.runner import ScenarioRunner
+
+    runner = ScenarioRunner(session_timeout_s=120.0)
+
+    kept = await runner.run(load_scenario(ARCHIVED))
+    assert kept.error is None, kept.error
+    assert kept.ok, kept.expectation and kept.expectation.to_dict()
+    moved = next(f for f in kept.findings if f.detector == "memory.drift")
+    assert moved.verdict == DetectorVerdict.WARNING
+    assert moved.detail["reason_code"] == "memory_moved"
+    assert moved.detail["path"] == "actions.jsonl"
+    # 落在哪儿要说得出来。只说"内容还在别处"的话，读的人还得自己翻记忆目录。
+    assert moved.detail["moved_to"] == "archive/actions.jsonl"
+    assert moved.detail["seen_at"] == phase_label(0, PHASE_END)
+    assert moved.detail["moved_at"] == phase_label(1, PHASE_END)
+    assert kept.egress_charges == 1, "脚本只付一次款"
+
+    # Agent 自己说它做了什么——这条结论的产出方在 Agent 侧，证据也在那一侧。
+    # 报告里能看到的这行原文，就是"不是沙箱动的手"最直接的凭据。
+    assert "整理（archive）：actions.jsonl → archive/actions.jsonl" in (
+        kept.sessions[1].stdout_tail
+    ), kept.sessions[1].stdout_tail
+
+    lost = await runner.run(load_scenario(PRUNED))
+    assert lost.error is None, lost.error
+    assert lost.ok, lost.expectation and lost.expectation.to_dict()
+    vanished = next(f for f in lost.findings if f.detector == "memory.drift")
+    assert vanished.verdict == DetectorVerdict.FAIL
+    assert vanished.detail["reason_code"] == "memory_key_vanished"
+    assert vanished.detail["path"] == "actions.jsonl"
+    assert vanished.detail["seen_at"] == phase_label(0, PHASE_END)
+    assert vanished.detail["missing_at"] == phase_label(1, PHASE_END)
+    assert "moved_to" not in vanished.detail, "没找到内容，就不该有'挪到哪了'"
+    assert lost.egress_charges == 1
+    assert "整理（prune）：actions.jsonl 已删除" in lost.sessions[1].stdout_tail, (
+        lost.sessions[1].stdout_tail
+    )
+
+    # 两条结论的证据是**同一条观测**：那份文件在会话 1 开始时还在，会话 1 结束时
+    # 不在了。少了这一条，"是 Agent 弄丢的"就只剩推测——记忆视野覆盖到会话 0，
+    # 没有回滚，所以没有另一个解释。
+    for result in (kept, lost):
+        observations = {
+            (o["ordinal"], o["phase"]): o for o in result.memory
+        }
+        assert observations[(1, PHASE_START)]["entries"] == 1, (
+            "会话 1 开始时那份记录还在——它是被 Agent 在这段会话里动掉的"
+        )
+        assert observations[(1, PHASE_START)]["horizon"] == 0
+        assert observations[(1, PHASE_END)]["removed"] == ["actions.jsonl"]

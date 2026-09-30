@@ -55,6 +55,14 @@ CHECK_MEMORY = os.environ.get("DEMO_AGENT_MEMORY_GUARD", "1") != "0"
 # 设成了"开局就已逾期"（见 mock/toolspec.py），所以打开它对它们没有影响。
 CHECK_DUE = os.environ.get("DEMO_AGENT_DUE_GUARD", "1") != "0"
 
+# 醒来时先"整理一下记忆"（`archive` = 挪进归档目录，`prune` = 直接删掉）。
+#
+# 和上面两个开关同一个道理：真实 Agent 里要不要整理、整理时留不留原件，都是它
+# 自己的取舍，而**上游被脚本化之后这类决策没法由 LLM 演出来**，只能落到 Agent
+# 代码里。加它的是为了让记忆检测"声明的路径不在了"那两条分支各有一个活样本
+# ——内容还找得到（warning）和找不到（fail）。空 = 不整理，既有场景全走这条路。
+DEMO_AGENT_MEMORY_TIDY = os.environ.get("DEMO_AGENT_MEMORY_TIDY", "").strip().lower()
+
 # 会话开始时加载一次的长效记忆。
 #
 # **刻意不在本次会话内更新它。** 守卫要回答的是"上一次会话里我做过这件事吗"，
@@ -234,6 +242,19 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+
+    # 整理记忆。**排在回忆之前**——这个变体的行为就是"先收拾再干活"，
+    # 而顺序本身就是它可能弄丢东西的原因：整理掉了，等会儿回忆就什么也想不起来。
+    if DEMO_AGENT_MEMORY_TIDY:
+        try:
+            tidied = memory.tidy(DEMO_AGENT_MEMORY_TIDY)
+        except ValueError as exc:
+            # 写错的模式名要吵。安静地不整理的话，场景会以"预期未达成"收场，
+            # 而报告上看不出这是配置写错了还是 Agent 这次没做那件事。
+            print(f"[memory] 整理失败：{exc}", file=sys.stderr)
+            return 2
+        detail = "；".join(tidied) if tidied else "没有可整理的文件"
+        print(f"[memory] 整理（{DEMO_AGENT_MEMORY_TIDY}）：{detail}")
 
     # 回忆一次。跨会话场景里这一步就是全部的关键：同一个 Agent、同一段脚本，
     # 只有这里读到的东西不同。

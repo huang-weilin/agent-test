@@ -184,3 +184,67 @@ def test_a_missing_key_field_is_not_a_match(memory: ModuleType, root: Path) -> N
     root.mkdir(parents=True)
     (root / memory.MEMORY_FILE).write_text('{"result": 1}\n', encoding="utf-8")
     assert not memory.already_done("anything", root)
+
+
+# --- 整理 ---------------------------------------------------------------------
+#
+# 这个动作是**被测对象侧**的，不是沙箱的：真实 Agent 整理记忆时留不留原件是它
+# 自己的取舍。演示 Agent 把两种取舍做成一个开关，为了让记忆检测里"声明的路径
+# 不在了"那两条分支有活样本——`memory_tidy_archived` / `memory_tidy_pruned`。
+
+
+def test_archive_moves_the_file_without_touching_a_byte(
+    memory: ModuleType, root: Path
+) -> None:
+    """`archive` 之后根目录空了，但内容一个字节都没变——只是换了文件名。
+
+    这一条是 `memory_moved` 那条分支的地基：检测器判"内容还在别处"判的就是
+    逐字节相等（`_moved_to` 比的是内容），所以整理必须原样搬运，不能顺手改写。
+    """
+    memory.record("create_payment:A1", {"charge_id": "ch_1"}, root)
+    before = (root / memory.MEMORY_FILE).read_bytes()
+
+    done = memory.tidy("archive", root)
+
+    assert done == [f"{memory.MEMORY_FILE} → archive/{memory.MEMORY_FILE}"]
+    assert not (root / memory.MEMORY_FILE).exists(), "原件该不在原位了"
+    assert (root / "archive" / memory.MEMORY_FILE).read_bytes() == before
+
+
+def test_prune_leaves_nothing_behind(memory: ModuleType, root: Path) -> None:
+    """`prune` 是把记忆真的丢掉——包括之前归档进去的那些。
+
+    只删根目录的话，"删干净"就名不副实：内容还躺在 archive/ 里，检测器会
+    把它找出来报成"内容换了地方"（warning），而这一支要演的恰恰是"找不到"。
+    """
+    memory.record("create_payment:A1", {"charge_id": "ch_1"}, root)
+    memory.tidy("archive", root)
+    memory.record("create_payment:A2", {"charge_id": "ch_2"}, root)
+    assert (root / "archive").exists()
+
+    done = memory.tidy("prune", root)
+
+    assert sorted(done) == ["actions.jsonl 已删除", "archive/actions.jsonl 已删除"]
+    assert list(root.rglob("*")) == [], "记忆目录该是空的"
+
+
+def test_tidying_an_empty_memory_is_a_no_op(memory: ModuleType, root: Path) -> None:
+    """第一次醒来就是这个状态：还没建过记忆目录。整理不该因此报错。
+
+    它不是"没事找事"——`memory_tidy_*` 场景的第一段会话就会走到这里（那时候
+    确实什么都还没有），Agent 崩在这儿的话整个场景跑不起来。
+    """
+    assert memory.tidy("archive", root) == []
+    assert memory.tidy("prune", root) == []
+
+
+def test_an_unknown_mode_is_refused_loudly(memory: ModuleType, root: Path) -> None:
+    """写错的模式名要吵。
+
+    安静地不整理的话，场景会以"预期未达成"收场，而报告上看不出这是配置写错了
+    还是 Agent 这次没做那件事——这正是这个项目反复要防的那类结论。
+    """
+    memory.record("a", 1, root)
+    with pytest.raises(ValueError, match="archive / prune"):
+        memory.tidy("archvie", root)  # 手滑
+    assert (root / memory.MEMORY_FILE).exists(), "报错了就不该已经动过文件"

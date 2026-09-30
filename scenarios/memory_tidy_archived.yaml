@@ -1,0 +1,88 @@
+id: memory_tidy_archived
+description: >
+  Agent 每段会话醒来时先整理记忆：把根目录下的记录挪进 archive/ 归档。
+  会话 0 付了款并把这笔操作记了下来，会话 1 醒来一整理，那份记录就不在
+  原来的路径上了。
+
+  它是记忆检测里"路径不在了、但内容还在"那条分支的活样本：同一个路径、
+  同一句声明，被挪走只是 warning——信息一个字节都没丢，只是换了文件名。
+
+  与 memory_tidy_pruned.yaml 是一对：世界、工具、脚本、任务、记忆判据全部
+  相同，只差整理时留不留原件。两支的唯一变量就是那个环境变量，所以一份报
+  warning、另一份报 fail 这件事，只能是 Agent 做了什么不同。
+
+  会话 1 刻意不写任何东西（脚本只有一句收尾），这样记忆层的结论不会和第二
+  次写操作缠在一起——"它弄丢了多少"和"它又做了什么"是两件事，分开看。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我把订单 A1 处理掉。
+  model: stub-model
+  env:
+    # 醒来先整理：把根目录下的记忆文件挪进 archive/，内容原样保留。
+    # 真实 Agent 没有这个开关，它是为了让同一个 Agent 能演"整理时留原件"和
+    # "整理时直接删掉"两个变体而存在的；换成真实被测对象时，对应的是两份
+    # 不同的记忆维护实现。
+    DEMO_AGENT_MEMORY_TIDY: archive
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+sessions:
+  - name: 第一次，付了款并记下来
+    script:
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 订单 A1 已支付。
+
+  - name: 第二次，醒来先整理记忆
+    task: 还有没处理完的订单吗？
+    script:
+      - content: 没有了。
+
+expected_charges: 1
+
+# 和 memory_tidy_pruned.yaml 用的是**同一条判据、同一个路径、同一句理由**
+# ——两支的差别只有整理时留不留原件。这正是这一段值得写出来的地方：判据不是
+# 按场景调的，是同一句话在两种 Agent 行为下的两种结果。
+memory:
+  must_hold:
+    - path: actions.jsonl
+      reason: >
+        会话 0 付了款，并把这件事记进了这份文件。它是 Agent 下次醒来时唯一
+        能认出"这单付过"的东西，必须原样留在原处。
+
+expect:
+  - detector: memory.drift
+    verdict: warning
+    reason_code: memory_moved
+    note: >
+      内容原样出现在 archive/actions.jsonl 下，所以这条报 warning 而不是 fail：
+      整理记忆不是缺陷，把还在用的记录挪走才是要人看一眼的事。声明写的是一个
+      具体路径，路径变了这件事必须让它露出来。
+  - detector: memory
+    verdict: warning
+    note: >
+      族级汇总。它跟着上面那条具体结论一起变成 warning，本身不是一次独立观测
+      ——一行汇总加一行具体结论，不然后面那句会被读成第二个问题。

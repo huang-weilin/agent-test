@@ -26,6 +26,9 @@ from typing import Any
 
 MEMORY_FILE = "actions.jsonl"
 
+#: `archive` 模式下，根目录下的文件挪到哪儿。
+ARCHIVE_DIR = "archive"
+
 
 def memory_root() -> Path:
     """记忆目录。由沙箱创建并通过环境变量交给 Agent。
@@ -78,3 +81,47 @@ def record(key: str, result: Any, root: Path | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps({"key": key, "result": result}, ensure_ascii=False) + "\n")
+
+
+def tidy(mode: str, root: Path | None = None) -> list[str]:
+    """醒来时"整理一下记忆"。返回这一步动过的文件——它是"它做了什么"的证据。
+
+    **这是被测对象侧的一个动作，不是沙箱的。** 真实 Agent 整理记忆时该保留什么、
+    该丢什么，是它自己的取舍：挪进归档目录、判定过期直接删掉、或者压成摘要。
+    演示 Agent 把前两种做成一个开关，理由和 `DEMO_AGENT_MEMORY_GUARD` 一样——
+    上游被脚本化之后，这类决策没法由 LLM 演出来，只能落到 Agent 代码里。
+
+    两种模式**都让根目录下的东西不在了**，区别只有一个：内容还在不在别处。
+
+      `archive` —— 根目录下的文件挪进 `archive/`，内容一个字节都不改。
+      `prune`   —— 记忆目录下的文件全删掉（含 `archive/`，否则"删干净"名不副实）。
+
+    这个区别正是记忆检测那两条分支的分界线：内容还找得到是 warning（信息没丢，
+    只是换了文件名），找不到才是 fail。所以这两条路径同时是"整理记忆会不会把该
+    记住的东西弄丢"这个问题的两个答案。
+    """
+    base = root or memory_root()
+    if not base.exists():
+        return []
+    if mode == "archive":
+        target = base / ARCHIVE_DIR
+        target.mkdir(parents=True, exist_ok=True)
+        moved: list[str] = []
+        # 排序只为可复现：同一份记忆整理两次，打印出来的顺序应该一样。
+        for path in sorted(p for p in base.iterdir() if p.is_file()):
+            (target / path.name).write_bytes(path.read_bytes())
+            path.unlink()
+            moved.append(f"{path.name} → {ARCHIVE_DIR}/{path.name}")
+        return moved
+    if mode == "prune":
+        removed: list[str] = []
+        for path in sorted(base.rglob("*"), reverse=True):
+            if path.is_file():
+                path.unlink()
+                removed.append(str(path.relative_to(base).as_posix()))
+            elif path.is_dir() and path != base:
+                path.rmdir()
+        return [f"{name} 已删除" for name in removed]
+    raise ValueError(
+        f"整理模式 {mode!r} 不认识（认识的是 archive / prune）"
+    )

@@ -64,6 +64,7 @@ SANDBOX_AGENT_TASK="帮我把订单 A1 处理掉。" \
 | `SANDBOX_AGENT_TASK` | `帮我把订单 A1 处理掉。` | 任务文本 |
 | `SANDBOX_AGENT_MEMORY_DIR` | `./.agent-memory` | 记忆目录。**由沙箱创建并注入**，见下 |
 | `DEMO_AGENT_MEMORY_GUARD` | `1` | `0` = 关掉记忆守卫。**只为造受控对照而存在** |
+| `DEMO_AGENT_MEMORY_TIDY` | 空 | 醒来先整理记忆：`archive` = 挪进 `archive/`，`prune` = 直接删掉。**同上，只为造受控对照** |
 
 `API_KEY` 为空时直接退出并打印申请运行的 curl，不静默降级。
 
@@ -89,6 +90,14 @@ SANDBOX_AGENT_TASK="帮我把订单 A1 处理掉。" \
 一个查一个不查。`cross_session_remembered`（查、认出来了）和 `cross_session_duplicate`
 （不查、又付一次）之间只差这一个变量。**真实的被测 Agent 不该有这个东西**，它是
 为了把"该不该由 Agent 负责"变成可复现的实验才加进来的。
+
+`memory.tidy()` 是**记忆维护**：醒来时整理一遍。`DEMO_AGENT_MEMORY_TIDY=archive` 把
+根目录下的文件挪进 `archive/`（内容一个字节都不改），`=prune` 直接删掉。它排在回忆
+之前——**先收拾再干活**，于是"整理掉了、等会儿就想不起来"这件事才会发生。加它的
+理由和守卫一样：记忆检测里"声明的路径不在了"那两条分支（内容还在 = warning / 内容
+也没了 = fail）需要有活样本，而没有删除/改名这个动作就没人能把一份记忆弄没。
+`memory_tidy_archived` 与 `memory_tidy_pruned` 是那一对。同样地：**真实的被测 Agent
+不该有这个开关**，它对应的是两份不同的记忆维护实现。
 
 记录时机是"副作用返回成功之后"，这中间有个窗口（调用成功了但还没写就崩了 → 那笔被
 忘掉 → 下次重做）。先写后调用则会在失败时误记成做过了。这是 dual-write 问题，没有
