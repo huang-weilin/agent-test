@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}记忆视图{% endblock %}
+{% block body %}
+
+<h1>记忆视图</h1>
+
+<p class="lede">
+  这里显示的不是"Agent 记住了什么"——那在 Agent 进程内，边界拦不到。
+  显示的是<strong>我们的操纵让它的视野从哪里开始</strong>：回滚到哪个快照，
+  决定了它<em>本可以知道</em>哪些历史。跨会话归因就靠这个，不需要猜。
+</p>
+
+{% if sequences %}
+<table class="grid">
+  <thead>
+    <tr>
+      <th>场景</th>
+      <th>时间</th>
+      <th>会话</th>
+      <th>快照</th>
+      <th>从快照恢复</th>
+      <th>视野缺口</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for s in sequences %}
+    <tr class="{{ 'failrow' if s.missing_ordinals else '' }}">
+      <td><code>{{ s.scenario_id }}</code></td>
+      <td class="nowrap">{{ s.started_at | localdt }}</td>
+      <td>{{ s.session_count }}</td>
+      <td>{{ s.snapshot_count }}</td>
+      <td>
+        {% if s.rolled_back_sessions %}
+          {{ s.rolled_back_sessions }} 个
+        {% else %}
+          <span class="dim">否</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if s.missing_ordinals %}
+          <span class="badge warn" title="有会话不可能知道的历史序号">{{ s.missing_ordinals }} 个序号</span>
+        {% else %}
+          <span class="dim">无</span>
+        {% endif %}
+      </td>
+      <td class="actions">
+        <a href="/memory/{{ s.session_sequence_id }}">查看</a>
+        ·
+        <a href="/runs/{{ s.run_id }}">报告</a>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  <strong>视野缺口</strong>不是缺陷，是实验设置。有缺口说明这个序列里有会话从旧快照
+  恢复了记忆——落在缺口那段里的历史调用，Agent <em>不可能知道</em>，重复的责任在
+  恢复机制而不在 Agent。归因规则见 <code>Session.memory_horizon_ordinal</code>。
+</p>
+{% else %}
+<p class="dim">还没有带记忆快照的运行。</p>
+{% endif %}
+
+{% endblock %}

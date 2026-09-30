@@ -158,10 +158,18 @@ button.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; font-w
 button.primary:hover:not(:disabled) { background: #1667d0; border-color: #1667d0; }
 
 form.inline { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
-form.inline input {
+/* 排除勾选框：`min-width: 22rem` 是给场景标识那种文本框的，套到复选框上
+   会把它撑成一整行的方框。 */
+form.inline input:not([type="checkbox"]):not([type="radio"]) {
   font: inherit; padding: 0.35rem 0.7rem; border: 1px solid var(--line);
   border-radius: 5px; background: var(--panel); color: var(--ink); min-width: 22rem;
 }
+form.inline select {
+  font: inherit; padding: 0.35rem 0.5rem; border: 1px solid var(--line);
+  border-radius: 5px; background: var(--panel); color: var(--ink);
+}
+form.inline label { display: inline-flex; gap: 0.3rem; align-items: center; font-size: 0.9em; }
+form.inline label.check { color: var(--dim); }
 td.actions form { display: inline; }
 
 dl { margin: 0.4rem 0; }

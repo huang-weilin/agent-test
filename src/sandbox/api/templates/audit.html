@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}审计日志{% endblock %}
+{% block body %}
+
+<h1>审计日志</h1>
+
+<p class="lede">
+  边界拦截下来的<strong>每一次</strong>工具调用，按时间倒序。<strong>跨运行的</strong>——
+  单次运行的那一份在运行详情页里。需求 3.2 要的是「拦截每一次调用并记录输入输出参数」
+  和「记录重试次数与重放路径」，横着看才问得出"这个工具是不是老被拒绝"。
+</p>
+
+<form method="get" action="/audit" class="inline">
+  <label>
+    场景
+    <select name="scenario_id">
+      <option value="">全部</option>
+      {% for s in scenarios %}
+        <option value="{{ s }}" {{ 'selected' if s == scenario_id else '' }}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    工具
+    <select name="tool_name">
+      <option value="">全部</option>
+      {% for t in tools %}
+        <option value="{{ t }}" {{ 'selected' if t == tool_name else '' }}>{{ t }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="check">
+    <input type="checkbox" name="writes_only" value="1" {{ 'checked' if writes_only else '' }}>
+    只看写操作
+  </label>
+  <label class="check">
+    <input type="checkbox" name="blocked_only" value="1" {{ 'checked' if blocked_only else '' }}>
+    只看被代理拒绝的
+  </label>
+  <button class="primary" type="submit">筛选</button>
+  {% if scenario_id or tool_name or writes_only or blocked_only %}
+    <a href="/audit">清除</a>
+  {% endif %}
+</form>
+
+{% if rows %}
+<p class="note">
+  显示 <strong>{{ rows | length }}</strong> 条，符合条件共 <strong>{{ total }}</strong> 条。
+  {% if total > rows | length %}
+    <span class="badge warn">下面还有 {{ total - rows | length }} 条没显示</span>
+    用上面的筛选条件缩小范围——<strong>不要拿这一页去下"从来没被拒绝过"这种结论</strong>。
+  {% endif %}
+</p>
+
+<table class="grid">
+  <thead>
+    <tr>
+      <th>时间</th><th>运行</th><th>会话</th><th>工具</th><th>参数</th>
+      <th>幂等键</th><th>状态</th><th>耗时</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for c in rows %}
+    <tr class="{{ 'blockedrow' if c.blocked_by_proxy else '' }}">
+      <td class="nowrap">{{ c.ts | localdt('%m-%d %H:%M:%S') }}</td>
+      <td>
+        <a href="/runs/{{ c.run_id }}"><code>{{ c.scenario_id }}</code></a>
+        <div class="dim">{{ c.agent_version }}</div>
+      </td>
+      <td>#{{ c.session_ordinal if c.session_ordinal >= 0 else '—' }}</td>
+      <td>
+        <code>{{ c.tool_name }}</code>
+        {% if c.is_write %}<span class="badge fail">写</span>{% endif %}
+        {% if c.blocked_by_proxy %}<span class="badge unknown">代理拦下</span>{% endif %}
+        {% if c.replay_reason %}<div class="note">{{ c.replay_reason }}</div>{% endif %}
+      </td>
+      <td><code class="args">{{ c.args_short }}</code></td>
+      <td>{% if c.idempotency_key %}<code>{{ c.idempotency_key }}</code>{% else %}<span class="dim">—</span>{% endif %}</td>
+      <td>
+        {{ c.status }}
+        {% if c.error %}<div class="bad">{{ c.error }}</div>{% endif %}
+      </td>
+      <td class="nowrap">{{ c.latency_ms }}ms</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<p class="note">
+  被出口代理拒绝的调用（<code>blocked_by_proxy</code>，整行标黄）<strong>不计入 Agent
+  异常行为</strong>——那是沙箱自己的策略（ADR 003 出口默认拒绝）在生效，不是被测对象
+  做错了事。混进检测结论会污染判定。但它们值得单独看：一次被拒的调用意味着 Agent
+  试图访问白名单之外的东西，那既是它的行为，也是这条策略真的在起作用的证据。
+</p>
+{% else %}
+<p class="dim">
+  {% if scenario_id or tool_name or writes_only or blocked_only %}
+    没有符合这些条件的调用。<a href="/audit">清除筛选</a>
+  {% else %}
+    还没有工具调用记录。
+  {% endif %}
+</p>
+{% endif %}
+
+{% endblock %}

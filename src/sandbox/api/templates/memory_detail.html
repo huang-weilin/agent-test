@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}{{ scenario_id }} 的记忆轨迹{% endblock %}
+{% block body %}
+
+<h1><code>{{ scenario_id }}</code> 的记忆轨迹</h1>
+
+<p class="lede">
+  一个会话序列 = 一次跨会话实验。下面按序号列出每个会话<strong>开始时</strong>
+  记忆覆盖到哪儿，以及我们在哪些边界取了快照。
+</p>
+
+<h2>会话</h2>
+{% if sessions %}
+<table class="grid">
+  <thead>
+    <tr>
+      <th>序号</th>
+      <th>记忆视野</th>
+      <th>不可能知道</th>
+      <th>从快照恢复</th>
+      <th>状态</th>
+      <th>开始</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for s in sessions %}
+    <tr class="{{ 'failrow' if s.missing_ordinals else '' }}">
+      <td>#{{ s.ordinal }}</td>
+      <td>
+        {% if s.memory_horizon_ordinal < 0 %}
+          <span class="dim">无（第一个会话）</span>
+        {% else %}
+          记得 #0 – #{{ s.memory_horizon_ordinal }}
+        {% endif %}
+      </td>
+      <td>
+        {% if s.missing_ordinals %}
+          <span class="badge warn">#{{ s.missing_ordinals | join('、#') }}</span>
+        {% else %}
+          <span class="dim">—</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if s.restored_from_snapshot_id %}
+          <code title="{{ s.restored_from_snapshot_id }}">{{ s.restored_from_snapshot_id[:8] }}</code>
+        {% else %}
+          <span class="dim">自然延续</span>
+        {% endif %}
+      </td>
+      <td>{{ s.status }}</td>
+      <td class="nowrap">{{ s.started_at | localdt }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% set gaps = sessions | selectattr('missing_ordinals') | list %}
+{% if gaps %}
+<div class="panel warn">
+  <strong>这个序列里有 {{ gaps | length }} 个会话的记忆被回滚过。</strong>
+  <p class="note">
+    落在「不可能知道」那一段里的历史调用，Agent 不可能记得。所以如果它重复做了
+    同一件事，<strong>那不是它的锅</strong>——是恢复机制的锅，要修的是记忆的
+    恢复与传递，不是 Prompt。反向的情形同样重要：视野内的重复<em>才</em>是
+    Agent 的问题。
+  </p>
+</div>
+{% endif %}
+{% else %}
+<p class="dim">这个序列下没有会话记录。</p>
+{% endif %}
+
+<h2>记忆快照</h2>
+{% if snapshots %}
+<table class="grid">
+  <thead>
+    <tr><th>位置</th><th>adapter</th><th>条目</th><th>大小</th><th>摘要</th><th>时间</th></tr>
+  </thead>
+  <tbody>
+  {% for s in snapshots %}
+    <tr>
+      <td>#{{ s.taken_at_ordinal }} / seq {{ s.taken_at_seq }}</td>
+      <td><code>{{ s.adapter }}</code></td>
+      <td>{{ s.entry_count }}</td>
+      <td class="nowrap">{{ s.size_bytes }} B</td>
+      <td>
+        <code title="{{ s.digest }}">{{ s.digest[:12] }}</code>
+        {% if not loop.first and s.digest == snapshots[loop.index0 - 1].digest %}
+          <span class="badge unknown" title="内容与上一个快照逐字节相同">与上一个相同</span>
+        {% endif %}
+      </td>
+      <td class="nowrap">{{ s.taken_at | localdt }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  快照是<strong>内容寻址</strong>的：摘要相同即内容相同。所以「与上一个相同」
+  是个确定的判断——它说明那个边界的记忆<strong>一个字节都没变</strong>，
+  拿它去恢复是个空操作，不该被当成故障注入。反过来，摘要不同也不代表内容有意义，
+  只是说字节确实不同。
+</p>
+<p class="note">
+  <strong>这里看不到记忆条目本身的内容</strong>，只能看到条数和大小。
+  内容是 adapter 私有的格式（Hermes 是 JSONL、LangGraph 是 checkpointer 的
+  序列化格式），由 <code>MemoryAdapter</code> 负责读写。在视图层解析它，
+  等于把界面绑死在一种记忆载体上——换一个适配器，这一页就得重写。
+</p>
+{% else %}
+<p class="dim">这个序列下没有记忆快照。</p>
+{% endif %}
+
+<p><a href="/memory">← 回到记忆视图</a></p>
+
+{% endblock %}

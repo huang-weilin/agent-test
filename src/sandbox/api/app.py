@@ -361,6 +361,80 @@ def create_app(
             },
         )
 
+    # --- 记忆视图（需求 3.4） ---------------------------------------------
+    #
+    # 这一页的难点不是查询，是**别把话说错**。它显示的是记忆的**视野边界**，
+    # 不是记忆的内容——内容在 Agent 进程内，边界拦不到（见
+    # `memory/snapshot.py` 的模块注释）。措辞上把"我们回滚了"和"Agent 忘了"
+    # 分开，是这一页存在的全部理由：说反了，用户会去改一个没问题的 Prompt。
+
+    @app.get("/memory", response_class=HTMLResponse)
+    async def memory_view(request: Request) -> Response:
+        return templates.TemplateResponse(
+            request,
+            "memory.html",
+            {
+                "sequences": await queries.recent_sequences(limit=50),
+                "active": app.state.jobs.active,
+            },
+        )
+
+    @app.get("/memory/{session_sequence_id}", response_class=HTMLResponse)
+    async def memory_detail(request: Request, session_sequence_id: str) -> Response:
+        scenario_id = await queries.scenario_for_sequence(session_sequence_id)
+        if scenario_id is None:
+            # 没有运行引用这个序列 = 这个 id 不存在。**不给一个空页面**，
+            # 空页面看起来和"这个序列还没有会话"一模一样，而那是两回事。
+            return _problem(
+                request, 404, "找不到这个会话序列", f"{session_sequence_id} 不在库里。"
+            )
+        return templates.TemplateResponse(
+            request,
+            "memory_detail.html",
+            {
+                "scenario_id": scenario_id,
+                "session_sequence_id": session_sequence_id,
+                "sessions": await queries.sessions_for_sequence(session_sequence_id),
+                "snapshots": await queries.snapshots_for_sequence(session_sequence_id),
+                "active": app.state.jobs.active,
+            },
+        )
+
+    # --- 审计日志（需求 3.2） ---------------------------------------------
+
+    @app.get("/audit", response_class=HTMLResponse)
+    async def audit_view(
+        request: Request,
+        scenario_id: str = "",
+        tool_name: str = "",
+        writes_only: str = "",
+        blocked_only: str = "",
+    ) -> Response:
+        # 复选框用**原始查询串**读（有值即为真），而不是 `bool` 类型参数：
+        # 未勾选时浏览器根本不发这个字段，`bool` 会把"没发"和"发了空值"
+        # 都当成 False——现在两者确实等价，但改天加一个三态筛选就会踩到。
+        rows, total = await queries.audit_log(
+            scenario_id=scenario_id or None,
+            tool_name=tool_name or None,
+            writes_only=bool(writes_only),
+            blocked_only=bool(blocked_only),
+        )
+        return templates.TemplateResponse(
+            request,
+            "audit.html",
+            {
+                "rows": rows,
+                "total": total,
+                "scenario_id": scenario_id,
+                "tool_name": tool_name,
+                "writes_only": bool(writes_only),
+                "blocked_only": bool(blocked_only),
+                "scenarios": await queries.scenarios_seen(),
+                "tools": await queries.tool_names_seen(),
+                "active": app.state.jobs.active,
+            },
+        )
+
     # --- JSON 接口 --------------------------------------------------------
     #
     # 只读的那几个 + 一个"发起运行"。**没有 JSON 写接口**：改场景文件的路径
@@ -457,6 +531,105 @@ def create_app(
                 "error": job.error,
             }
         )
+
+    @app.get("/api/memory")
+    async def api_memory() -> list[dict[str, Any]]:
+        return [
+            {
+                "session_sequence_id": s.session_sequence_id,
+                "scenario_id": s.scenario_id,
+                "run_id": s.run_id,
+                "started_at": s.started_at.isoformat(),
+                "sessions": s.session_count,
+                "snapshots": s.snapshot_count,
+                "rolled_back_sessions": s.rolled_back_sessions,
+                # >0 表示有会话不可能知道某些历史序号——那一段里的重复**不怪 Agent**。
+                "missing_ordinals": s.missing_ordinals,
+            }
+            for s in await queries.recent_sequences(limit=50)
+        ]
+
+    @app.get("/api/memory/{session_sequence_id}")
+    async def api_memory_detail(session_sequence_id: str) -> Response:
+        scenario_id = await queries.scenario_for_sequence(session_sequence_id)
+        if scenario_id is None:
+            return JSONResponse(
+                {"error": "找不到这个会话序列", "session_sequence_id": session_sequence_id},
+                status_code=404,
+            )
+        return JSONResponse(
+            {
+                "session_sequence_id": session_sequence_id,
+                "scenario_id": scenario_id,
+                "sessions": [
+                    {
+                        "ordinal": s.ordinal,
+                        "memory_horizon_ordinal": s.memory_horizon_ordinal,
+                        "expected_horizon": s.expected_horizon,
+                        # 空列表 = 自然延续；非空 = 这些序号 Agent 不可能知道。
+                        "missing_ordinals": s.missing_ordinals,
+                        "restored_from_snapshot_id": s.restored_from_snapshot_id,
+                        "status": s.status,
+                    }
+                    for s in await queries.sessions_for_sequence(session_sequence_id)
+                ],
+                # 只有元数据：内容按 adapter 私有格式存，视图层不解析它。
+                "snapshots": [
+                    {
+                        "snapshot_id": s.id,
+                        "position": [s.taken_at_ordinal, s.taken_at_seq],
+                        "adapter": s.adapter,
+                        "digest": s.digest,
+                        "entry_count": s.entry_count,
+                        "size_bytes": s.size_bytes,
+                    }
+                    for s in await queries.snapshots_for_sequence(session_sequence_id)
+                ],
+            }
+        )
+
+    @app.get("/api/audit")
+    async def api_audit(
+        scenario_id: str = "",
+        tool_name: str = "",
+        writes_only: str = "",
+        blocked_only: str = "",
+        limit: int = queries.AUDIT_PAGE,
+    ) -> dict[str, Any]:
+        rows, total = await queries.audit_log(
+            scenario_id=scenario_id or None,
+            tool_name=tool_name or None,
+            writes_only=bool(writes_only),
+            blocked_only=bool(blocked_only),
+            limit=limit,
+        )
+        return {
+            "count": len(rows),
+            # `total` 是符合筛选条件的**全部**行数。不返回它的话，调用方
+            # 会把"这一页只有 200 条"读成"一共就 200 条"。
+            "total": total,
+            "truncated": total > len(rows),
+            "calls": [
+                {
+                    "seq": r.seq,
+                    "run_id": r.run_id,
+                    "scenario_id": r.scenario_id,
+                    "agent_version": r.agent_version,
+                    "session_ordinal": r.session_ordinal,
+                    "tool_name": r.tool_name,
+                    "is_write": r.is_write,
+                    "idempotency_key": r.idempotency_key,
+                    "status": r.status,
+                    "blocked_by_proxy": r.blocked_by_proxy,
+                    "replay_reason": r.replay_reason,
+                    "args": r.args_json,
+                    "error": r.error,
+                    "latency_ms": r.latency_ms,
+                    "ts": r.ts.isoformat(),
+                }
+                for r in rows
+            ],
+        }
 
     return app
 

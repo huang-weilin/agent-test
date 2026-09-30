@@ -541,3 +541,350 @@ def test_report_json_round_trips_through_the_column() -> None:
     """报告快照必须能存能读。它是界面列历史运行的唯一来源。"""
     report = {"scenario_id": "clean", "ok": True, "sessions": [], "cost": {"cost_usd": 0.0}}
     assert json.loads(json.dumps(report, ensure_ascii=False, default=str)) == report
+
+
+# --- 记忆视图（需求 3.4） ------------------------------------------------------
+#
+# 这一节测的核心不是"页面打得开"，而是**归因有没有说反**。同一个重复扣款，
+# 视野够得着就是 Agent 的锅，够不着就是恢复机制的锅。说反了用户会去改一个
+# 没问题的 Prompt——这正是这一页存在的理由。
+
+
+def _session_row(ordinal: int, horizon: int, restored: str | None = None):
+    from datetime import UTC, datetime
+
+    from sandbox.api.queries import SessionRow
+
+    return SessionRow(
+        id=f"s{ordinal}",
+        ordinal=ordinal,
+        memory_horizon_ordinal=horizon,
+        restored_from_snapshot_id=restored,
+        status="ended",
+        started_at=datetime.now(UTC),
+        ended_at=None,
+    )
+
+
+def test_natural_continuation_has_no_gap() -> None:
+    """自然延续：记得此前一切，没有缺口。（会话 0 之前没有记忆，也不是缺口。）"""
+    assert _session_row(0, -1).missing_ordinals == []
+    assert _session_row(3, 2).missing_ordinals == []
+
+
+def test_rolled_back_session_reports_the_gap() -> None:
+    """从旧快照恢复：缺的那一段就是 Agent **不可能知道**的部分。"""
+    assert _session_row(1, -1).missing_ordinals == [0]
+    assert _session_row(3, 0).missing_ordinals == [1, 2]
+    assert _session_row(3, 0).was_rolled_back is False  # 没记恢复来源
+
+
+def test_horizon_ahead_of_expected_is_not_a_gap() -> None:
+    """视野比"应当"还靠前（比如记忆被前置注入过）不该报成负数缺口。
+
+    实现若写成先算长度，`expected - horizon` 在这里会得出负数。
+    """
+    row = _session_row(3, 9)
+    assert row.missing_ordinals == []
+    assert len(row.missing_ordinals) == 0
+
+
+def test_attribution_flips_on_the_gap_alone() -> None:
+    """**这一条是整个三方受控实验的 UI 版。**
+
+    `memory_loss` 与 `duplicate` 的场景、脚本、扣款次数全都一样，
+    唯一的差别是回滚到哪儿——于是"缺不缺序号 0"就是归因的全部依据。
+    """
+    memory_loss = _session_row(1, -1)  # 回滚到付款之前
+    duplicate = _session_row(1, 0)  # 回滚到付款之后
+    assert memory_loss.missing_ordinals == [0]  # Agent 不可能知道 → 不怪它
+    assert duplicate.missing_ordinals == []  # 它本可以知道 → 怪它
+
+
+@pytest_asyncio.fixture
+async def seeded(temp_db: str) -> dict:
+    """往临时库里塞一个跨两个会话、带快照和一次被拒调用的运行。"""
+    from datetime import UTC, datetime, timedelta
+
+    from sandbox.db.engine import session_scope
+    from sandbox.db.models import MemorySnapshot, Session, ToolCall
+
+    now = datetime.now(UTC)
+    run_id, seq_id = "run-1", "seq-1"
+
+    async with session_scope() as db:
+        db.add(
+            TestRun(
+                id=run_id,
+                scenario_id="cross_session_duplicate",
+                agent_version="react_demo@0.1",
+                config_hash="c" * 64,
+                session_sequence_id=seq_id,
+                status="completed",
+                started_at=now,
+                completed_at=now + timedelta(seconds=10),
+                verdict_ok=False,
+            )
+        )
+        db.add_all(
+            [
+                Session(
+                    id="sess-0",
+                    test_run_id=run_id,
+                    session_sequence_id=seq_id,
+                    ordinal=0,
+                    memory_horizon_ordinal=-1,
+                    status="ended",
+                ),
+                Session(
+                    id="sess-1",
+                    test_run_id=run_id,
+                    session_sequence_id=seq_id,
+                    ordinal=1,
+                    # 视野 0 = 记得序号 0 那笔付款 → 本可以知道 → 怪 Agent
+                    memory_horizon_ordinal=0,
+                    restored_from_snapshot_id="snap-1",
+                    status="ended",
+                ),
+            ]
+        )
+        db.add(
+            MemorySnapshot(
+                id="snap-1",
+                session_sequence_id=seq_id,
+                taken_at_ordinal=1,
+                taken_at_seq=0,
+                digest="d" * 64,
+                adapter="hermes_file",
+                payload_path="/tmp/nope.bin",
+                size_bytes=123,
+                entry_count=2,
+            )
+        )
+        for i, (sess, name, write, blocked) in enumerate(
+            [
+                ("sess-0", "create_payment", True, False),
+                ("sess-1", "create_payment", True, False),
+                ("sess-1", "get_order", False, False),
+                ("sess-1", "not_on_allowlist", False, True),
+            ]
+        ):
+            db.add(
+                ToolCall(
+                    id=f"call-{i}",
+                    test_run_id=run_id,
+                    session_id=sess,
+                    session_sequence_id=seq_id,
+                    seq=i,
+                    tool_name=name,
+                    args_json=json.dumps({"order_id": "A1", "n": i}),
+                    arg_hash=f"h{i}",
+                    fingerprint=f"fp{i}",
+                    status="denied" if blocked else "ok",
+                    is_write=write,
+                    blocked_by_proxy=blocked,
+                    latency_ms=10 * i,
+                    ts=now + timedelta(seconds=i),
+                )
+            )
+    return {"run_id": run_id, "sequence_id": seq_id}
+
+
+async def test_memory_page_lists_the_sequence(client: httpx.AsyncClient, seeded: dict) -> None:
+    r = await client.get("/memory")
+    assert r.status_code == 200
+    assert "cross_session_duplicate" in r.text
+
+    api = (await client.get("/api/memory")).json()
+    assert len(api) == 1
+    row = api[0]
+    assert row["scenario_id"] == "cross_session_duplicate"
+    assert row["sessions"] == 2
+    assert row["snapshots"] == 1
+    assert row["rolled_back_sessions"] == 1
+    assert row["missing_ordinals"] == 0  # 视野 0 够得着序号 0，没缺口
+
+
+async def test_memory_detail_renders_sessions_and_snapshots(
+    client: httpx.AsyncClient, seeded: dict
+) -> None:
+    seq = seeded["sequence_id"]
+    r = await client.get(f"/memory/{seq}")
+    assert r.status_code == 200
+    assert "cross_session_duplicate" in r.text
+    assert "hermes_file" in r.text
+
+    api = (await client.get(f"/api/memory/{seq}")).json()
+    order = [s["ordinal"] for s in api["sessions"]]
+    assert order == [0, 1]
+    assert api["sessions"][1]["restored_from_snapshot_id"] == "snap-1"
+    assert api["snapshots"][0]["position"] == [1, 0]
+    assert api["snapshots"][0]["entry_count"] == 2
+
+
+async def test_memory_detail_404s_rather_than_rendering_empty(
+    client: httpx.AsyncClient, seeded: dict
+) -> None:
+    """不存在的序列要 404。给一个空页面的话，它和一个"还没有会话的序列"
+    长得一模一样，而那是两回事。"""
+    r = await client.get("/memory/00000000-0000-0000-0000-000000000000")
+    assert r.status_code == 404
+    assert "找不到" in r.text
+
+    api = await client.get("/api/memory/00000000-0000-0000-0000-000000000000")
+    assert api.status_code == 404
+
+
+async def test_memory_view_never_shows_memory_contents(
+    client: httpx.AsyncClient, seeded: dict
+) -> None:
+    """只给元数据。内容按 adapter 私有格式存，视图层解析它等于把界面绑死
+    在一种记忆载体上。"""
+    api = (await client.get(f"/api/memory/{seeded['sequence_id']}")).json()
+    assert set(api["snapshots"][0]) == {
+        "snapshot_id",
+        "position",
+        "adapter",
+        "digest",
+        "entry_count",
+        "size_bytes",
+    }
+
+
+# --- 审计日志（需求 3.2） ------------------------------------------------------
+
+
+async def test_audit_page_renders_all_calls(client: httpx.AsyncClient, seeded: dict) -> None:
+    r = await client.get("/audit")
+    assert r.status_code == 200
+    assert "create_payment" in r.text
+    assert "get_order" in r.text
+
+    api = (await client.get("/api/audit")).json()
+    assert api["total"] == 4
+    assert api["truncated"] is False
+
+
+async def test_audit_blocked_call_is_marked_and_explained(
+    client: httpx.AsyncClient, seeded: dict
+) -> None:
+    """被出口代理拒绝的调用：整行标出来，并且**说清它不算 Agent 的异常行为**。"""
+    r = await client.get("/audit?blocked_only=1")
+    assert r.status_code == 200
+    # 断言只针对表格：筛选下拉里**本来就列着所有出现过的工具名**，
+    # 拿整页文本做 `in`/`not in` 会把这个正常的下拉误判成筛选没生效。
+    tbody = r.text.split("<tbody>")[1].split("</tbody>")[0]
+    assert "not_on_allowlist" in tbody
+    assert "create_payment" not in tbody  # 筛选真的在起作用
+    assert "blockedrow" in tbody
+    assert "ADR 003" in r.text  # 那段解释必须跟着出现
+
+    api = (await client.get("/api/audit?blocked_only=1")).json()
+    assert api["total"] == 1
+    assert api["calls"][0]["blocked_by_proxy"] is True
+
+
+async def test_audit_filters(client: httpx.AsyncClient, seeded: dict) -> None:
+    writes = (await client.get("/api/audit?writes_only=1")).json()
+    assert writes["total"] == 2
+    assert all(c["is_write"] for c in writes["calls"])
+
+    one = (await client.get("/api/audit?tool_name=get_order")).json()
+    assert one["total"] == 1
+    assert one["calls"][0]["tool_name"] == "get_order"
+
+    both = (await client.get("/api/audit?tool_name=create_payment&writes_only=1")).json()
+    assert both["total"] == 2
+
+    none = (await client.get("/api/audit?tool_name=create_payment&blocked_only=1")).json()
+    assert none["total"] == 0
+    assert none["calls"] == []
+
+
+async def test_audit_says_how_much_it_hid(client: httpx.AsyncClient, seeded: dict) -> None:
+    """截断必须自报。静默截断会让"这个工具从来没被拒绝过"变成一句基于残页的结论。"""
+    api = (await client.get("/api/audit?limit=2")).json()
+    assert api["count"] == 2
+    assert api["total"] == 4
+    assert api["truncated"] is True
+
+
+@pytest_asyncio.fixture
+async def many_calls(seeded: dict) -> dict:
+    """把调用数堆过 `AUDIT_PAGE`。
+
+    **不 monkeypatch 那个常量**：`audit_log` 的 `limit` 默认值在函数定义时
+    就绑定了，改模块属性对已定义的函数无效——那样测的是一条假路径。
+    堆过真实阈值才是真的在测默认行为。
+    """
+    import json as _json
+
+    from sandbox.api.queries import AUDIT_PAGE
+    from sandbox.db.engine import session_scope
+    from sandbox.db.models import ToolCall
+
+    async with session_scope() as db:
+        for i in range(AUDIT_PAGE + 5):
+            db.add(
+                ToolCall(
+                    id=f"bulk-{i}",
+                    test_run_id=seeded["run_id"],
+                    session_id="sess-0",
+                    session_sequence_id=seeded["sequence_id"],
+                    seq=1000 + i,
+                    tool_name="get_order",
+                    args_json=_json.dumps({"i": i}),
+                    arg_hash=f"bh{i}",
+                    fingerprint=f"bfp{i}",
+                    status="ok",
+                    is_write=False,
+                    latency_ms=1,
+                )
+            )
+    return seeded
+
+
+async def test_audit_page_reports_what_it_truncated(
+    client: httpx.AsyncClient, many_calls: dict
+) -> None:
+    """页面按 `AUDIT_PAGE` 截断，并且**必须在页面上说清藏了多少**。"""
+    from sandbox.api.queries import AUDIT_PAGE
+
+    seeded_count = 4  # seeded 夹具那四条
+    total = AUDIT_PAGE + 5 + seeded_count
+    hidden = total - AUDIT_PAGE
+
+    r = await client.get("/audit")
+    assert r.status_code == 200
+    assert f"还有 {hidden} 条没显示" in r.text
+    assert "不要拿这一页去下" in r.text
+
+    api = (await client.get("/api/audit")).json()
+    assert api["count"] == AUDIT_PAGE
+    assert api["total"] == total
+    assert api["truncated"] is True
+
+
+async def test_audit_filter_dropdowns_come_from_data(
+    client: httpx.AsyncClient, seeded: dict
+) -> None:
+    """下拉里的选项从实际记录里取——声明过但没调用过的工具不该出现在筛选里。"""
+    r = await client.get("/audit")
+    assert 'value="create_payment"' in r.text
+    assert 'value="get_order"' in r.text
+    # 被拒的那次也在，因为它确实产生了一条记录
+    assert 'value="not_on_allowlist"' in r.text
+
+
+def test_args_are_truncated_with_a_visible_marker() -> None:
+    """截断要带省略号。不带的话读者会以为参数本来就长这样，
+    而"参数少了一个字段"和"参数被截断显示"是两回事。"""
+    from sandbox.api.queries import _shorten_args
+
+    short = '{"a": 1}'
+    assert _shorten_args(short) == short
+
+    long_args = json.dumps({"k": "x" * 300})
+    cut = _shorten_args(long_args)
+    assert len(cut) == 141  # 140 + 省略号
+    assert cut.endswith("…")
