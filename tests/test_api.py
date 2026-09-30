@@ -843,6 +843,156 @@ async def test_a_legacy_report_does_not_claim_the_memory_was_fine(
     assert "没记录不是没问题" in resp.text
 
 
+def _diff_report(*, session_diff: dict | None) -> dict:
+    """一次带跨会话差异的报告快照。`session_diff=None` 显式写成没有可对照的对象。"""
+    report = _long_run_report()
+    report["session_diff"] = session_diff
+    return report
+
+
+def _diff_payload(*, omitted: int = 0) -> dict:
+    from sandbox.scenario.session_diff import SessionSide, compare_sessions
+
+    calls = [
+        _fake_call(1, "get_order", {"order_id": "B2"}, ordinal=0),
+        _fake_call(1, "get_order", {"order_id": "B2"}, ordinal=1),
+        _fake_call(2, "create_payment", {"order_id": "B2", "amount": 249.0}, ordinal=1),
+    ]
+    sides = [
+        SessionSide(ordinal=0, name="白天", memory_horizon_ordinal=-1),
+        SessionSide(
+            ordinal=1,
+            name="隔了一晚",
+            memory_horizon_ordinal=0,
+            after_gap_s=108000,
+            virtual_started_at="2026-10-01T10:18:11+00:00",
+        ),
+    ]
+    payload = compare_sessions(calls, sides).to_dict()
+    if omitted:
+        payload["pairs"][0]["omitted"] = omitted
+    return payload
+
+
+async def _seed_diff_run(db: AsyncSession, run_id: str, report: dict) -> None:
+    """塞一次带报告快照的运行，够运行页把这一节渲染出来。"""
+    from datetime import UTC, datetime
+
+    from sandbox.db.models import TestRun
+
+    db.add(
+        TestRun(
+            id=run_id,
+            scenario_id="long_run_overnight",
+            agent_version="react_demo@0.1",
+            config_hash="D" * 64,
+            session_sequence_id=f"seq-{run_id}",
+            status="completed",
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+            verdict_ok=True,
+            report_json=json.dumps(report),
+        )
+    )
+    await db.commit()
+
+
+def _fake_call(seq: int, tool: str, args: dict, *, ordinal: int):
+    """和 conftest 的 `make_call` 同构，但这里要的是**快照**，不是 fixture。"""
+    from sandbox.detectors.base import CallView
+    from sandbox.trace.normalize import normalize_args, structural_hash
+
+    normalized = normalize_args(args)
+    return CallView(
+        id=f"call-{ordinal}-{seq}",
+        seq=seq,
+        tool_name=tool,
+        args=normalized,
+        fingerprint=structural_hash(tool, normalized),
+        is_write=tool == "create_payment",
+        session_ordinal=ordinal,
+    )
+
+
+async def test_the_session_diff_panel_shows_what_differs_and_what_matched(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """跨会话差异面板要同时给出"哪条对不上"和"有几条是一样的"。
+
+    只列差异的话，读的人看不出它其实是把该做的都做了、只多了一条——
+    而那正是这个面板要回答的问题。
+    """
+    await _seed_diff_run(db, "run-diff", _diff_report(session_diff=_diff_payload(omitted=3)))
+
+    resp = await client.get("/runs/run-diff")
+    assert resp.status_code == 200
+    panel = resp.text.split("<h2>跨会话差异</h2>")[1].split("<h2>检测结论</h2>")[0]
+    # 差异本身：哪一段多做了、多做了什么。
+    assert "create_payment" in panel
+    assert "只在会话 #1 出现" in panel
+    # 一样的部分也要给：这是"没有对不上"的唯一证据。
+    assert "1 条调用两段一模一样" in panel
+    # 我们动过的东西单独列——"它的行为变了"和"我们让它不一样了"要分得开。
+    assert "世界往前走了" in panel
+    assert "记忆视野不同" in panel
+    # 没列出来的差异必须自报，别让人以为就这些。上限来自**这份报告记下的那个数**，
+    # 不是模板里写死的一个字面量——旧报告要说得清它当时被截到多少条。
+    assert "还有 3 条差异没列出来" in panel
+    assert "最多 12 条" in panel
+
+
+async def test_the_session_diff_panel_says_it_is_not_a_verdict(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    await _seed_diff_run(db, "run-diff-2", _diff_report(session_diff=_diff_payload()))
+
+    resp = await client.get("/runs/run-diff-2")
+    assert "陈述，不是判定" in resp.text
+    assert '它不进"检测结论"，也不影响这次运行通过与否' in resp.text
+    # 对齐口径要写在页面上：不写的话，"只在某一段出现"看起来像"配过对但配错了"。
+    assert "各只剩" in resp.text
+    assert "参数指纹" in resp.text
+
+
+async def test_a_legacy_report_does_not_claim_the_two_sessions_matched(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """旧格式报告没有这一栏，页面要说"没记录"，不能说"两段一样"。
+
+    `_long_run_report` 是两段会话、且没有 `session_diff` 键——那正是这一栏存在
+    之前的格式。少印这一句，读者会以为比对过了、什么都没发现。
+    """
+    report = _long_run_report()
+    assert len(report["sessions"]) > 1 and "session_diff" not in report
+    await _seed_diff_run(db, "run-diff-legacy", report)
+
+    resp = await client.get("/runs/run-diff-legacy")
+    # 断言的是**这一栏特有的那句话**：记忆那一栏也写着"没记录不是没问题"，
+    # 拿它当判据的话，这一条测试在这句话消失之后照样是绿的。
+    assert '这里不写"两段一样"' in resp.text
+    assert "<h2>跨会话差异</h2>" not in resp.text
+
+
+async def test_a_single_session_report_gets_no_diff_panel(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """只有一段会话时这一节整个不出现。
+
+    它和"没记录"是两回事：单会话场景本来就没有可对照的对象，印一句"没有差异"
+    会让人以为比对过了。
+    """
+    report = _long_run_report()
+    report["sessions"] = report["sessions"][:1]
+    report["session_diff"] = None
+    await _seed_diff_run(db, "run-diff-one", report)
+
+    resp = await client.get("/runs/run-diff-one")
+    assert "跨会话差异" not in resp.text
+    # 记忆那一栏的"没记录不是没问题"会出现（这个快照里也没有 `memory` 键），
+    # 所以只能断言**这一栏特有的**那句话不出现。
+    assert '这里不写"两段一样"' not in resp.text
+
+
 # --- JSON 接口 ----------------------------------------------------------------
 
 

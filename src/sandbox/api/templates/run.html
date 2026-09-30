@@ -264,6 +264,93 @@
   确实发生了。不豁免的话，一个完美触发的循环场景会被报成"没测到"。
 </p>
 
+{% if report and report.session_diff %}
+<h2>跨会话差异</h2>
+{% for note in report.session_diff.notes %}
+<p class="dim">{{ note }}</p>
+{% endfor %}
+{% for pair in report.session_diff.pairs %}
+<h3>会话 #{{ pair.base_ordinal }} ↔ 会话 #{{ pair.other_ordinal }}</h3>
+<p class="note">{{ pair.headline }}</p>
+{% if pair.background %}
+<ul class="note">
+  {% for line in pair.background %}<li>{{ line }}</li>{% endfor %}
+</ul>
+{% endif %}
+{% if pair.reasons %}
+<p class="bad">
+  这两段<strong>不能直接比</strong>——下面的差异可能只是"没跑到"：
+</p>
+<ul class="note">
+  {% for line in pair.reasons %}<li>{{ line }}</li>{% endfor %}
+</ul>
+{% endif %}
+{% if pair.differences %}
+<table class="grid">
+  <thead>
+    <tr>
+      <th>差异</th><th>工具</th>
+      <th>会话 #{{ pair.base_ordinal }}</th><th>会话 #{{ pair.other_ordinal }}</th>
+      <th>说明</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for item in pair.differences %}
+    <tr>
+      <td class="nowrap">{{ item.label }}</td>
+      <td><code>{{ item.tool }}</code></td>
+      <td><code>{{ item.base_text }}</code></td>
+      <td><code>{{ item.other_text }}</code></td>
+      <td>{{ item.sentence }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  上面只列<strong>对不上</strong>的：
+  {% if pair.identical_calls %}
+  另有 {{ pair.identical_calls }} 条调用两段一模一样（同工具、同参数指纹），没有列出来。
+  {% else %}
+  这两段没有一条调用能配上对。
+  {% endif %}
+  {% if pair.omitted %}
+  <br>
+  <strong>还有 {{ pair.omitted }} 条差异没列出来</strong>
+  ——这份报告是按每对最多 {{ report.session_diff.limit }} 条截的。
+  别把"列出来的这些"读成"全部差异"。
+  {% endif %}
+</p>
+{% elif pair.comparable and pair.base_calls and pair.other_calls %}
+<p class="dim">
+  逐项对齐后没有对不上的调用：{{ pair.base_calls }} 条与 {{ pair.other_calls }} 条一一对应。
+  <strong>这不等于"它在两段里的行为一样"</strong>——能比的只有边界上看得见的工具调用。
+</p>
+{% else %}
+<p class="dim">
+  这两段列不出差异（原因见上面的说明）。
+  <strong>"没列"不等于"一样"</strong>。
+</p>
+{% endif %}
+{% endfor %}
+<p class="note">
+  <strong>这一节是陈述，不是判定。</strong>它不进"检测结论"，也不影响这次运行通过与否
+  ——同一个场景的两段会话本来就允许不一样（长时运行的场景里，第二段看到的世界都不
+  一样了）。要判"该不该不一样"，看下面的检测结论。
+  <br>
+  <strong>对齐口径</strong>：同工具、同参数指纹的调用算"同一件事"，先配对；两边各只剩
+  一次的同名调用才敢说"同一次调用、参数不同"。剩下的都叫"只在某一段出现"——
+  硬凑成对的话，报告上会长出一句"参数从 X 变成了 Y"，而那个 Y 可能属于另一次调用。
+  <br>
+  上面那几条<strong>我们先动过的东西</strong>（记忆回滚、世界时间、无人值守）是<strong>我们</strong>
+  制造的差异。不单独列出来的话，"它的行为变了"和"我们让它不一样了"在报告上长得一模一样。
+</p>
+{% elif report.session_diff is undefined and (report.sessions | length) > 1 %}
+<p class="dim">
+  这份报告里没有跨会话差异这一栏——它是在这个面板存在之前跑的。
+  <strong>这里不写"两段一样"</strong>：没记录不是没问题，是没记录。
+</p>
+{% endif %}
+
 <h2>检测结论</h2>
 {% if report.findings %}
 <table class="grid">

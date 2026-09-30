@@ -68,7 +68,7 @@ from sandbox.memory.observe import (
     summarize_observations,
 )
 from sandbox.memory.snapshot import SnapshotRef, SnapshotStore
-from sandbox.scenario import identity
+from sandbox.scenario import identity, session_diff
 from sandbox.scenario.expect import ExpectResult, evaluate
 from sandbox.scenario.spec import Scenario
 from sandbox.trace.reader import load_session_sequence
@@ -271,6 +271,10 @@ class ScenarioResult:
     # 它是观测不是判定：判定在 `memory.*` 那几条结论里，而这里列的是"看见了什么"
     # ——包括场景没有声明判据时那些不会被判的改动。两者要分得开。
     memory: list[dict[str, Any]] = field(default_factory=list)
+    # 跨会话差异（需求 3.1 P1，见 scenario/session_diff.py）。None = 这个场景
+    # 只有一段会话，没有可对照的对象。**同样是陈述不是判定**：它不进 findings、
+    # 不影响 ok——同一个场景的两段会话本来就允许不一样。
+    session_diff: session_diff.SessionDiff | None = None
     error: str | None = None
 
     @property
@@ -318,6 +322,7 @@ class ScenarioResult:
             "clock": self.clock.to_dict() if self.clock else None,
             "autonomy": self.autonomy.to_dict() if self.autonomy else None,
             "memory": self.memory,
+            "session_diff": self.session_diff.to_dict() if self.session_diff else None,
             "cost": self.cost.to_dict() if self.cost else None,
             "session_costs": {str(k): v.to_dict() for k, v in sorted(self.session_costs.items())},
             "budget": [
@@ -717,6 +722,12 @@ class ScenarioRunner:
             outcome.tool_calls = per_ordinal.get(outcome.ordinal, 0)
 
         result.memory = summarize_observations(observations)
+        # 跨会话差异。放在这里而不是更早：它要的是**会话序列**上的全部调用，
+        # 以及每段会话的前提是否成立——两者到这一步才齐。它是陈述不是判定，
+        # 所以既不进 `findings` 也不进 `ok`。
+        result.session_diff = session_diff.compare_sessions(
+            calls, [session_diff.SessionSide.of(s) for s in result.sessions]
+        )
         result.findings = _run_detectors(scenario, calls, observations)
         result.expectation = evaluate(scenario, result.findings)
         result.summary = summarize_verdicts(result.findings)
@@ -960,6 +971,31 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
         "  观测点是会话边界：中途改了又改回来的看不见。这上面列的是「这个时点上\n"
         "     它是什么」，不是「它在会话里没变过」；「内容变了」也不是判定。"
     )
+
+    # 跨会话差异紧接着记忆观测：两节都是"看"的结果，判定在下面。
+    if result.session_diff is not None:
+        d = result.session_diff
+        add("\n--- 跨会话差异（同一场景的两段会话，逐项对齐）---")
+        for note in d.notes:
+            add(f"  {note}")
+        for pair in d.pairs:
+            add(f"  {pair.headline}")
+            for line in pair.background:
+                add(f"     · {line}")
+            for line in pair.reasons:
+                add(f"     !! {line}")
+            for item in pair.differences:
+                add(f"     ? [{item.label}] {item.sentence}")
+            if pair.omitted:
+                add(
+                    f"     还有 {pair.omitted} 条差异没列出来"
+                    f"（每对会话最多列 {d.limit} 条）。"
+                )
+        add(
+            "  这一节是陈述，不是判定：它不进检测结论，也不影响通过与否。同一个场景\n"
+            "     的两段会话本来就允许不一样（长时运行的场景里，第二段看到的世界都不一样\n"
+            "     了）。要判「该不该不一样」，看上面那几条结论。"
+        )
 
     add("\n--- 检测结论 ---")
     if not result.findings:
