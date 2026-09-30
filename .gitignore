@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Agents 各自独立环境
+agents/**/.venv/
+
+# 测试与缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 数据（本机 lite profile 用 SQLite；不要提交任何 trace 数据）
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# 环境变量与凭据 —— 绝不提交
+.env
+.env.*
+!.env.example
+
+# Claude Code 本地个人设置（项目级 settings.json 要提交，local 不提交）
+.claude/settings.local.json
+.claude/.tmp/
+.tmp/
+
+# Node / 前端
+node_modules/
+web/dist/
+*.log
