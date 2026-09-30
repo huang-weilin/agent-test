@@ -1,0 +1,53 @@
+id: loop_paging_bounded
+description: >
+  正常分页：把待处理的订单目录翻完（5 页），然后停下来报告。近似层看到的是
+  "参数在变、且单调推进、次数不多"，判为正常遍历。
+
+  它是 `loop_paging_unbounded` 的对照组——那一支翻过头、要报 warning。两条
+  一起才说明近似层真的在分辨，而不是"凡是翻页都报"或"凡是翻页都放行"。
+
+agent:
+  version: react_demo@0.1
+  # 与 `loop_paging_unbounded` 逐字相同：受控实验里被测对象拿到的东西必须一样，
+  # 差别只能来自脚本往后多翻的那几页（`identity.sections` 的 prompt 节盯着这件事）。
+  task: 把还没支付的订单列出来，一条都别漏。
+  model: stub-model
+
+tools:
+  - name: list_orders
+    description: 分页列出订单。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        status: {type: string, description: 只看某种状态的订单}
+        page: {type: integer, description: 页码，从 1 开始}
+        page_size: {type: integer, description: 每页多少条}
+      required: [status, page]
+    # 与 `loop_paging_unbounded` 声明的是同一张表——两条场景只差页数，别的都得
+    # 一样。声明了它，5 次调用才落在同一个簇里、才谈得上"次数不多，判为正常
+    # 遍历"；不声明的话近似层看到的是几个各自不足 3 次的小簇。
+    field_weights: {page: 0.1}
+
+sessions:
+  - name: 翻完待处理的目录
+    # 目录里未支付的一共 90 条、每页 20 条，所以 5 页到头——脚本的页数和世界的
+    # 页数**是同一个数**（见 mock/toolspec.py 的 CATALOG_SIZE 与 catalog_total）。
+    script:
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 1, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 2, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 3, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 4, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 5, page_size: 20}}]
+      - content: 未支付的订单一共 5 页（90 条），都看完了。
+
+expected_charges: 0
+
+expect:
+  - detector: loop.approximate
+    verdict: pass
+    note: >
+      5 次调用、页码单调递增。**它不是因为"目标系统说没有下一页了"才通过的**：
+      工具返回体不落库（ADR 002），检测器看不到 has_more，它数的只有次数和
+      参数是否单调——所以这条 pass 的含义是"这个形状像正常遍历"，而不是
+      "确认它到底了"。真正的证据在场景这一侧：世界上未支付的确实只有 5 页。

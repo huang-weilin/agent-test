@@ -125,6 +125,21 @@ def get_order(order_id: str) -> str:
 
 
 @tool
+def list_orders(status: str, page: int, page_size: int = 20) -> str:
+    """分页列出订单。只读，无副作用。
+
+    **翻到第几页由调用方决定，包括"翻过头"这件事。** 目标系统的回答里带着
+    `has_more`，读不读它是 Agent 自己的判断——那正是被测的东西，所以这里
+    原样把回答交回去，不替它停。
+    """
+    return _as_text(
+        *_call_tool_raw(
+            "list_orders", {"status": status, "page": page, "page_size": page_size}
+        )
+    )
+
+
+@tool
 def create_payment(order_id: str, amount: float, idempotency_key: str | None = None) -> str:
     """对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。"""
     # 这个 Agent 对"重复"的定义是"同一张订单被付了两次"，所以键按订单取。
@@ -205,7 +220,7 @@ def build_agent():
         # 沙箱网关尚未实现流式（见 gateway/app.py）。用真实上游时把它去掉即可。
         streaming=False,
     )
-    return create_agent(model, [get_order, create_payment])
+    return create_agent(model, [get_order, list_orders, create_payment])
 
 
 def main() -> int:

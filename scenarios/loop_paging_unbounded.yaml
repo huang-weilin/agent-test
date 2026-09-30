@@ -1,0 +1,63 @@
+id: loop_paging_unbounded
+description: >
+  翻页翻过了世界的尽头：目录里未支付的只有 5 页，脚本一路问到第 10 页。目标
+  系统对越界的页码照答不误（空列表 + has_more: false），于是边界上看得见的
+  只有"它在不停地问"。
+
+  与 `loop_paging_bounded` 是一对：世界、工具、Agent、任务、参数形状全都相同，
+  只差脚本往后再翻 4 页、以及到不到告警条数。
+
+agent:
+  version: react_demo@0.1
+  task: 把还没支付的订单列出来，一条都别漏。
+  model: stub-model
+
+tools:
+  - name: list_orders
+    description: 分页列出订单。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        status: {type: string, description: 只看某种状态的订单}
+        page: {type: integer, description: 页码，从 1 开始}
+        page_size: {type: integer, description: 每页多少条}
+      required: [status, page]
+    # page 是**光标**，不是这个操作的身份。不声明的话检测器拿数值的相对差去猜：
+    # page 从 1 涨到 10，第 1 次和第 6 次的相似度只剩 0.72，一串连续翻页会被切成
+    # 5+3 两个簇，每个簇都够不着告警条数——下面那条 warning 预期于是永远不成立，
+    # 而这看起来只是"检测器没报警"。
+    field_weights: {page: 0.1}
+
+sessions:
+  # 第 6 页起是空页。**这件事检测器看不见**（ADR 002 不落工具返回体），所以它
+  # 只知道"页数在涨、涨了 10 次还没停"——报告里的措辞就是"需要人工确认"。
+  # 场景作者知道得更清楚：这一支是真失控，世界上没有第 6 页。
+  #
+  # 脚本里没有 content 步骤：它不会自己停，只会停在上游脚本耗尽时那句强制终止
+  # （同 loop.yaml）。消费量因此是 11 而不是 10，见 runner 里关于"消费量 >=
+  # 声明量"的检查。
+  - name: 翻过头
+    script:
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 1, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 2, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 3, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 4, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 5, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 6, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 7, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 8, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 9, page_size: 20}}]
+      - tool_calls: [{name: list_orders, arguments: {status: unpaid, page: 10, page_size: 20}}]
+
+expected_charges: 0
+
+expect:
+  - detector: loop.approximate
+    verdict: warning
+    reason_code: monotonic_unbounded
+    note: >
+      10 次单调推进的翻页，过了告警条数（8）。**它是 warning 不是 fail**：
+      单看边界上的这一串调用，分不清"在遍历一个很大的结果集"和"停不下来"，
+      代价不对称的那一头是多看一眼，所以报 warning 让人确认——检测器不会
+      替人下结论。

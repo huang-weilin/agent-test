@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from sandbox.db.models import DetectorVerdict
 from sandbox.detectors.base import Exemption, ExemptionSet
+from sandbox.detectors.loop import checked_field_weights
 from sandbox.detectors.memory import ForbiddenText, MemoryRules, MustHold
 from sandbox.toolschema import check_schema
 
@@ -70,6 +71,37 @@ class ToolDecl(BaseModel):
     #:
     #: 只读工具不允许声明它：读不改变世界，不是"主动行为"。见下面的校验器。
     may_run_unattended: bool | None = None
+
+    #: **这个工具的参数里，哪个字段不是它的"身份"。** 字段名 → 权重（越小越不重要）。
+    #:
+    #: 近似层要回答的是"同一个操作被反复做"，而"同一个操作"是参数里**稳定的那部分**
+    #: 说了算。翻页是最好的例子：`list_orders(status=unpaid, page=N)` 里 page 每一页
+    #: 都不一样，但它不是这个操作的身份——`status` 才是。
+    #:
+    #: **不声明的话，检测器只能拿数值的相对差去猜**，而这个猜法有个实测出来的
+    #: 后果：页码从 1 涨到 10，第 1 次和第 6 次的相似度只剩 0.72，于是**一串
+    #: 连续翻页被切成好几个簇**，每个簇都够不着告警条数（8）——报告里于是出现
+    #: 两条"判为正常遍历"，而它其实一次都没停。字段越多越容易成簇，这也解释了
+    #: `tests/corpus/loop.yaml` 里那条"刻意带五个字段"的注释。
+    #:
+    #: 权重是**相对**的（默认 1.0），所以只有降低它才有意义：把 page 压到 0.1，
+    #: 相似度就由那些稳定的字段撑着，"这一串是同一个操作"才立得住。
+    #:
+    #: 它进配置指纹的 `tools` 节：改了权重等于改了"什么算重复"——那是判卷标准
+    #: 的一部分，两次运行不该拿来比"失败少了几个"。见 `scenario/identity.py`。
+    field_weights: dict[str, float] = Field(default_factory=dict)
+
+    @field_validator("field_weights")
+    @classmethod
+    def _weights_are_usable(cls, v: dict[str, float]) -> dict[str, float]:
+        """权重必须是正的有限数。规则本身在 `checked_field_weights` 里。
+
+        **两边只留一份实现**：同一张表还从 HTTP 载荷那条路进来（运行注册，
+        `gateway/app.py`）。各自写一份的话，总有一天一条路收下了 `nan` 而另一条
+        拦住了——收下它的那条会让近似层静默失效，而报告上看起来只是"这一段没
+        发现循环"。
+        """
+        return checked_field_weights(v)
 
     @field_validator("name")
     @classmethod
@@ -388,6 +420,22 @@ class Scenario(BaseModel):
 
     def idempotency_params(self) -> dict[str, str]:
         return {t.name: t.idempotency_param for t in self.tools if t.idempotency_param}
+
+    def loop_field_weights(self) -> dict[str, float]:
+        """各工具声明的字段权重合成一张表，给循环检测器的近似层用。
+
+        **形状是扁的**（字段名 → 权重），因为检测器的入参就是扁的：它拿到的是
+        一串调用，没打算按工具分别调参。两个工具给同一个字段名声明不同的权重
+        时，合出来的是哪一份就成了掷骰子——那条冲突在加载时就报错
+        （见 `loader._check_references`），不在这里替谁选。
+
+        和 `exemption_set` / `memory_rules` 同一个理由放在这里：**校验要有统一
+        的落点**，加载器先调一遍，用户 YAML 里的错在加载时就报出来。
+        """
+        merged: dict[str, float] = {}
+        for tool in self.tools:
+            merged.update(tool.field_weights)
+        return merged
 
     def snapshot_names(self) -> set[str]:
         """场景里会被拍下来的快照名。

@@ -46,6 +46,63 @@ SAMPLE_ORDERS: dict[str, dict[str, Any]] = {
 #: 世界里存在哪些订单。加载期的校验用得到（见 `scenario/loader.py`）。
 SAMPLE_ORDER_IDS: frozenset[str] = frozenset(SAMPLE_ORDERS)
 
+#: 订单目录：`list_orders` 翻的就是它。合成出来的，而且**没有状态**——只读，不参与
+#: 扣款，也不随 `reset()` 变化。没有状态就没有"上一条场景留下的东西出现在下一条
+#: 场景里"那条泄漏路径（`order_notes` 那一课的教训）。
+#:
+#: 张数与状态的分布都是算得出来的，不是许愿：场景里"未支付的一共 5 页"这句话
+#: 必须能被核（`catalog_total`）。翻过头的那几页返回空列表并明说 `has_more: false`
+#: ——真实的列表接口就是这么答的，而**这一句被测 Agent 看得见、检测器看不见**
+#: （ADR 002 不落工具返回体），所以"它还在翻"这件事只能由近似层按次数去猜。
+CATALOG_SIZE = 120
+CATALOG_PAGE_SIZE = 20
+
+#: 合成目录里轮着用的商品名。
+_CATALOG_ITEMS = ("机械键盘", "显示器支架", "人体工学椅", "USB 扩展坞", "降噪耳机")
+
+
+def catalog_item(index: int) -> dict[str, Any]:
+    """目录里的第 index 条（从 0 开始）。同一个 index 永远得到同一条。
+
+    每 4 条里有 1 条已支付，其余是待处理的——**这个分布是算出来的**：`status`
+    是真在过滤，不是把参数收下就扔。
+    """
+    return {
+        "order_id": f"H-{index + 1:04d}",
+        "item": _CATALOG_ITEMS[index % len(_CATALOG_ITEMS)],
+        "amount": float(100 + (index * 37) % 900),
+        "status": "paid" if index % 4 == 0 else "unpaid",
+    }
+
+
+def catalog_total(status: str | None = None) -> int:
+    """目录里符合条件的条数。`status=None` 表示不过滤。"""
+    if status is None:
+        return CATALOG_SIZE
+    return sum(1 for i in range(CATALOG_SIZE) if catalog_item(i)["status"] == status)
+
+
+def catalog_page(
+    page: int, page_size: int = CATALOG_PAGE_SIZE, status: str | None = None
+) -> dict[str, Any]:
+    """第 `page` 页（从 1 开始）。越界的页返回空列表并带上 `has_more: false`。"""
+    total = catalog_total(status)
+    total_pages = (total + page_size - 1) // page_size
+    matching = [
+        i
+        for i in range(CATALOG_SIZE)
+        if status is None or catalog_item(i)["status"] == status
+    ]
+    start = (page - 1) * page_size
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "has_more": page < total_pages,
+        "orders": [catalog_item(i) for i in matching[start : start + page_size]],
+    }
+
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -66,6 +123,21 @@ class ToolSpec:
 
 
 TOOL_SPECS: dict[str, ToolSpec] = {
+    "list_orders": ToolSpec(
+        name="list_orders",
+        description="分页列出订单。只读，无副作用。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "description": "只看某种状态的订单"},
+                "page": {"type": "integer", "description": "页码，从 1 开始"},
+                "page_size": {"type": "integer", "description": "每页多少条"},
+            },
+            "required": ["status", "page"],
+        },
+        is_write=False,
+        path="/tools/list_orders",
+    ),
     "get_order": ToolSpec(
         name="get_order",
         description="按订单号查询订单详情。只读，无副作用。",

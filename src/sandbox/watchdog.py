@@ -21,7 +21,7 @@ import structlog
 from sandbox.db.models import DetectorVerdict
 from sandbox.detectors.base import ExemptionSet, Finding
 from sandbox.detectors.loop import LoopDetector
-from sandbox.runtime import runs
+from sandbox.runtime import ActiveRun, runs
 from sandbox.trace.reader import load_call_views
 from sandbox.trace.recorder import record_finding
 
@@ -33,13 +33,28 @@ log = structlog.get_logger(__name__)
 # 循环和预算失控不一样：它们会一直烧钱，多跑一秒都是净损失。
 KILL_ON_DETECTORS: frozenset[str] = frozenset({"loop.strict", "loop.ping_pong"})
 
-_default_detector = LoopDetector()
+def detector_for(active: ActiveRun | None) -> LoopDetector:
+    """按这次运行声明的字段权重造一个检测器。
+
+    **不能用模块级的单例。** 权重来自场景，而一个进程里会跑好几个场景：单例的
+    话第二个场景要么沿用第一个场景的权重，要么得有人去改它——而"改它"在多进程
+    与并发下就是串味，症状是同一段轨迹在不同运行里被判成不同的东西。现造一个
+    的代价只是几个字典。
+
+    运行不在（比如进程重启后扫一条旧轨迹）时用空表。这与"这份场景没声明权重"
+    是同一条路：检测器照旧按参数形状猜，**这里不替它猜**。
+    """
+    return LoopDetector(key_weights=dict(active.loop_field_weights) if active else {})
 
 
 async def inspect_run(
     run_id: str, detector: LoopDetector | None = None
 ) -> list[Finding]:
-    """扫一遍该运行的轨迹并落库结论。返回本轮产生的 findings。"""
+    """扫一遍该运行的轨迹并落库结论。返回本轮产生的 findings。
+
+    `detector` 是给测试用的注入点（验"某种阈值下会怎样"）；生产路径不传，
+    由 `detector_for(active)` 从这次运行的声明里现造一个。
+    """
     calls = await load_call_views(run_id)
     if not calls:
         return []
@@ -49,7 +64,11 @@ async def inspect_run(
     # 并留下 `exempted_by`，所以这里只要把场景声明的那一套传进去，"一条被豁免的
     # 循环不算缺陷"这句话就同时在熔断和事后报告两边成立。传空集合的话，两边会
     # 给出相反结论：进程被杀，报告却说"已豁免、通过"。
-    findings = (detector or _default_detector).run(
+    #
+    # 字段权重同理、而且是同一个理由的另一面：**熔断与事后报告必须用同一套判卷
+    # 标准**。报告那边拿的是场景声明的那张权重表（runner 直接读 scenario），
+    # 看门狗这边只能从注册表里读——它的声明是过线来的，见 gateway/app.py。
+    findings = (detector or detector_for(active)).run(
         calls, active.exemptions if active else ExemptionSet()
     )
 
@@ -132,4 +151,4 @@ def summarize_verdicts(findings: list[Finding]) -> dict[str, float]:
     }
 
 
-__all__ = ["enforce", "inspect_run", "summarize_verdicts"]
+__all__ = ["detector_for", "enforce", "inspect_run", "summarize_verdicts"]

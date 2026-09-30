@@ -19,6 +19,7 @@ import yaml
 
 from sandbox.db.models import Confidence, DetectorVerdict
 from sandbox.detectors.base import Finding
+from sandbox.scenario import identity
 from sandbox.scenario.expect import ExpectResult, evaluate
 from sandbox.scenario.loader import ScenarioError, load_all, load_scenario
 from sandbox.scenario.runner import ScenarioResult, SessionOutcome
@@ -231,6 +232,138 @@ def test_a_note_on_a_real_order_passes_the_front_door(tmp_path: Path) -> None:
     data = _scenario_dict(world={"order_notes": {"A1": "客户备注：工作日送达。"}})
     scenario = load_scenario(_write(tmp_path, data))
     assert scenario.world.order_notes == {"A1": "客户备注：工作日送达。"}
+
+
+def _paging_tool(name: str, **kw: Any) -> dict[str, Any]:
+    """一个只有 `page` 一个参数的工具。字段权重那一组测试都用它。"""
+    tool = _tool(name, is_write=False)
+    tool["parameters"] = {
+        "type": "object",
+        "properties": {"page": {"type": "integer", "description": "页码"}},
+    }
+    tool.update(kw)
+    return tool
+
+
+def _paging_scenario(*tools: dict[str, Any]) -> dict[str, Any]:
+    """一份只调用**第一个**工具的场景，脚本一步不多。"""
+    return _scenario_dict(
+        tools=list(tools),
+        sessions=[
+            {
+                "name": "翻页",
+                "script": [
+                    {
+                        "tool_calls": [
+                            {
+                                "name": tools[0]["name"],
+                                "arguments": {"page": 1},
+                            }
+                        ]
+                    }
+                ],
+            }
+        ],
+    )
+
+
+def test_a_weight_on_a_field_that_does_not_exist_is_rejected(tmp_path: Path) -> None:
+    """权重挂在不存在的字段上：声明看着在，实际什么都没改。
+
+    检测器拿到 `{"pge": 0.1}` 之后，`pge` 一次都不会出现在参数里，而 `page`
+    照旧权重 1.0——一串翻页于是照样被切成好几个簇，够不着告警条数。
+    **报告上完全看不出来**：它只是"没报警"。
+    """
+    data = _paging_scenario(_paging_tool("list_orders", field_weights={"pge": 0.1}))
+    with pytest.raises(ScenarioError, match="没有这个字段"):
+        load_scenario(_write(tmp_path, data))
+
+
+def test_two_tools_disagreeing_on_one_weight_is_rejected(tmp_path: Path) -> None:
+    """两个工具给同一个字段名写了不同的权重：合不出来，谁赢看书写顺序。
+
+    检测器拿到的是一张扁表（字段名 → 权重），没有"按工具分别调参"这回事。
+    静默地让后写的赢，等于**同一份场景挪一下工具顺序就换一种判法**。
+    """
+    data = _paging_scenario(
+        _paging_tool("list_orders", field_weights={"page": 0.1}),
+        _paging_tool("list_tickets", field_weights={"page": 0.5}),
+    )
+    with pytest.raises(ScenarioError, match="不同的权重"):
+        load_scenario(_write(tmp_path, data))
+
+
+def test_two_tools_agreeing_on_one_weight_is_fine(tmp_path: Path) -> None:
+    """反向那一半：两边说的一样时没有歧义，合成一张表就是对的。
+
+    只有上面那条的话，一个"见到 field_weights 就报错"的校验也能全绿。
+    """
+    data = _paging_scenario(
+        _paging_tool("list_orders", field_weights={"page": 0.1}),
+        _paging_tool("list_tickets", field_weights={"page": 0.1}),
+    )
+    scenario = load_scenario(_write(tmp_path, data))
+
+    assert scenario.loop_field_weights() == {"page": 0.1}
+
+
+@pytest.mark.parametrize("weight", [float("nan"), float("inf"), 0, -1])
+def test_a_weight_no_similarity_can_use_is_rejected(
+    tmp_path: Path, weight: float
+) -> None:
+    """`nan` 最坏：`nan >= 阈值` 恒为假，于是**所有簇都不成立、近似层整体静默**。
+
+    报告上看起来只是"这一段没发现循环"。`inf` 与"删掉那个字段"等价，`0` 与负数
+    没有意义——都在加载时报错，不留给运行期。
+    """
+    data = _paging_scenario(_paging_tool("list_orders", field_weights={"page": weight}))
+    with pytest.raises(ScenarioError, match="正的有限数"):
+        load_scenario(_write(tmp_path, data))
+
+
+def test_a_numeric_string_weight_is_coerced_by_the_model(tmp_path: Path) -> None:
+    """`page: "0.1"` 在场景文件里等价于 `page: 0.1`——**这是 pydantic 的宽松模式**，
+    不是这里的选择，所以把它写成一条测试而不是一句注释。
+
+    真正危险的那个输入（`"abc"` 这种换不出数字的）在同一个地方被挡住，不用单测。
+    字符串要在这里被认出来的话，得对这一个字段开严格模式，而严格模式会连
+    `page: 1` 这种**整数写法**一起拒掉——那个写法是自然的，不该为了这个被拒。
+    所以"权重必须是数字"那一条只对**不过模型的那条路**（运行注册的 JSON 载荷）
+    生效，见 tests/test_loop_paging.py。
+    """
+    data = _paging_scenario(_paging_tool("list_orders", field_weights={"page": "0.1"}))
+    scenario = load_scenario(_write(tmp_path, data))
+
+    assert scenario.loop_field_weights() == {"page": 0.1}
+
+
+def test_a_weight_that_is_not_a_number_at_all_is_rejected(tmp_path: Path) -> None:
+    """反向：`"abc"` 换不出数字，模型这一层就报错——它不会是静默的。"""
+    data = _paging_scenario(_paging_tool("list_orders", field_weights={"page": "abc"}))
+    with pytest.raises(ScenarioError, match="场景定义不合法"):
+        load_scenario(_write(tmp_path, data))
+
+
+def test_the_weights_are_part_of_the_grading_standard(tmp_path: Path) -> None:
+    """权重进配置指纹的 `tools` 节：改了它等于换了"什么算重复"。
+
+    不进指纹的话，一次"把 page 压到 0.1"的改动会被读成"这一版失败少了几个"——
+    而实际上是判卷标准变了。
+    """
+    with_weight = load_scenario(
+        _write(
+            tmp_path,
+            _paging_scenario(_paging_tool("list_orders", field_weights={"page": 0.1})),
+            "w.yaml",
+        )
+    )
+    without = load_scenario(
+        _write(tmp_path, _paging_scenario(_paging_tool("list_orders")), "n.yaml")
+    )
+
+    assert identity.changed_sections(
+        identity.sections(without), identity.sections(with_weight)
+    ) == ["tools"]
 
 
 def test_load_all_sorts_by_filename(tmp_path: Path) -> None:

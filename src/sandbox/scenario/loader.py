@@ -1,7 +1,7 @@
 """场景文件的加载与校验。
 
-校验里有五条是**跨字段**的，单看任何一个字段都发现不了，但它们出错的方式都很安静
-（完整清单是六条，见 `docs/scenarios.md`；第五条——无人值守会话里的写操作必须交代
+校验里有几条是**跨字段**的，单看任何一个字段都发现不了，但它们出错的方式都很安静
+（完整清单是七条，见 `docs/scenarios.md`；第五条——无人值守会话里的写操作必须交代
 `may_run_unattended`——在 `spec.py` 的模型校验里，不在这里）：
 
 1. `restore_from` 引用了一张**后面**才拍的快照。这意味着"回到未来"，
@@ -157,6 +157,38 @@ def _check_references(scenario: Scenario, source: str) -> None:
         scenario.exemption_set()
     except ValueError as exc:
         raise ScenarioError(f"{source}: {exc}") from exc
+
+    # --- 字段权重必须真的用得上 ---
+    #
+    # 与上面几条同一类：写错了不会报错，只会安静地不生效。两种写法都在这里挡掉：
+    #
+    #   * 权重挂在一个不存在的字段上。检测器会拿着它去算相似度，而那个字段
+    #     一次都没出现过——于是这个工具的参数看起来还是"每个字段都是身份"，
+    #     翻页那一串照样被切成好几个簇（见 `ToolDecl.field_weights`）。
+    #   * 两个工具给**同一个字段名**声明了不同的权重。检测器拿到的是一张扁表
+    #     （字段名 → 权重），谁赢取决于工具在场景里的书写顺序——同一份场景挪
+    #     一下工具顺序就换一种判法，而报告上完全看不出来。
+    seen_weights: dict[str, tuple[str, float]] = {}
+    for tool in scenario.tools:
+        properties = (tool.parameters or {}).get("properties") or {}
+        for field, weight in tool.field_weights.items():
+            if field not in properties:
+                raise ScenarioError(
+                    f"{source}: 工具 {tool.name!r} 的 field_weights 里有 {field!r}，"
+                    f"而它的参数里没有这个字段。\n"
+                    f"这个工具声明的字段：{sorted(properties) or '（无）'}\n"
+                    f"写错的权重不会报错，它只会让这个工具的参数看起来还是"
+                    f"「每个字段都是它的身份」——这一条声明于是什么都没改。"
+                )
+            previous = seen_weights.get(field)
+            if previous is not None and previous[1] != weight:
+                raise ScenarioError(
+                    f"{source}: 字段 {field!r} 被两个工具声明成了不同的权重："
+                    f"{previous[0]} 说 {previous[1]}，{tool.name} 说 {weight}。\n"
+                    f"检测器拿到的是一张扁的权重表（字段名 → 权重），两份声明"
+                    f"合不出来——哪一份赢取决于工具在场景里的书写顺序。"
+                )
+            seen_weights[field] = (tool.name, weight)
 
     # --- 记忆判据必须真的在判东西 ---
     #

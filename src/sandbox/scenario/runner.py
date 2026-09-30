@@ -447,6 +447,46 @@ def _bind(port: int = 0) -> tuple[socket.socket, int]:
     return sock, sock.getsockname()[1]
 
 
+def registration_payload(scenario: Scenario) -> dict[str, Any]:
+    """开一个运行时要交给网关的那份声明。
+
+    **单独成函数，因为它是一份要过线的契约。** 网关按**键名**读这张表，读不到
+    就当没声明——不报错（也报不了：手工 curl 起运行的那条路本来就允许只给一半）。
+    于是场景侧把键名改一个字母，症状是"声明写了、运行当中却没生效"，而这条链上
+    没有任何一处会红。把这份载荷提出来，测试就能拿它去过一遍真的网关
+    （见 `tests/test_loop_paging.py` 与 `tests/test_watchdog.py`）。
+
+    每条声明的理由写在原处不搬——它们说的是"为什么这个东西必须过线"，
+    而不是"这个函数怎么用"。
+    """
+    return {
+        "scenario_id": scenario.id,
+        "agent_version": scenario.agent.version,
+        # 分节的配置指纹 + 环境事实。**别退回成
+        # `{"scenario": id, "model": model}`**：那个口径下改了脚本
+        # 或 Prompt，哈希都不变，于是"配置没变但结果变了"这个最该
+        # 被抓到的信号，恰恰是唯一抓不到的。见 scenario/identity.py。
+        "config": identity.sections(scenario),
+        "env": identity.environment(scenario),
+        "declared_writes": sorted(scenario.declared_writes()),
+        "idempotency_key_params": scenario.idempotency_params(),
+        "tools": {t.name: f"/tools/{t.name}" for t in scenario.tools},
+        # 参数 schema 交给边界。**这是它唯一的去处**——在此之前
+        # 场景里那份声明只被列给 Agent 看过，从来没人拿它核对过
+        # 一次真实调用，于是沙箱里的目标系统比真实的那一个宽松。
+        "tool_schemas": {t.name: t.parameters for t in scenario.tools},
+        # 豁免规则也要过线。**看门狗在运行当中读的就是它**——不传的
+        # 话，一条"这个重复是我允许的"在事后把结论降级成 pass，而
+        # 进程早在第 3 次调用时就被杀了。见 runtime.ActiveRun.exemptions。
+        "exemptions": scenario.exemption_set().to_dicts(),
+        # 字段权重也要过线，理由和豁免一模一样：看门狗在运行当中
+        # 拿它判"这串调用是不是在原地打转"。不过线的话，事后报告
+        # 用的是场景声明的那张表，看门狗用的是空的——同一段轨迹，
+        # 一边判成正常遍历、一边判成循环，而两边看起来都对。
+        "loop_field_weights": scenario.loop_field_weights(),
+    }
+
+
 class ScenarioRunner:
     """跑场景。一个实例可以被复用跑多个场景（每个场景内部自建服务）。"""
 
@@ -640,27 +680,7 @@ class ScenarioRunner:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"http://127.0.0.1:{gw_port}/_sandbox/runs",
-                json={
-                    "scenario_id": scenario.id,
-                    "agent_version": scenario.agent.version,
-                    # 分节的配置指纹 + 环境事实。**别退回成
-                    # `{"scenario": id, "model": model}`**：那个口径下改了脚本
-                    # 或 Prompt，哈希都不变，于是"配置没变但结果变了"这个最该
-                    # 被抓到的信号，恰恰是唯一抓不到的。见 scenario/identity.py。
-                    "config": identity.sections(scenario),
-                    "env": identity.environment(scenario),
-                    "declared_writes": sorted(scenario.declared_writes()),
-                    "idempotency_key_params": scenario.idempotency_params(),
-                    "tools": {t.name: f"/tools/{t.name}" for t in scenario.tools},
-                    # 参数 schema 交给边界。**这是它唯一的去处**——在此之前
-                    # 场景里那份声明只被列给 Agent 看过，从来没人拿它核对过
-                    # 一次真实调用，于是沙箱里的目标系统比真实的那一个宽松。
-                    "tool_schemas": {t.name: t.parameters for t in scenario.tools},
-                    # 豁免规则也要过线。**看门狗在运行当中读的就是它**——不传的
-                    # 话，一条"这个重复是我允许的"在事后把结论降级成 pass，而
-                    # 进程早在第 3 次调用时就被杀了。见 runtime.ActiveRun.exemptions。
-                    "exemptions": scenario.exemption_set().to_dicts(),
-                },
+                json=registration_payload(scenario),
             )
             resp.raise_for_status()
             run = resp.json()
@@ -933,9 +953,9 @@ def _run_detectors(
     装配在 `detectors.run_all` 里，**和 `tests/corpus/` 共用同一份**：语料算出来的
     精度只有在"语料跑的就是线上跑的那一套"时才有意义。
 
-    五份声明全部从场景进来（工具事实、无人值守白名单、自主会话、豁免规则、
-    记忆判据）——观测分两条通道进来：边界上的 `calls` 和会话边界上的 `memories`。
-    这条分工是全项目的判据，不是这里的实现细节。
+    六份声明全部从场景进来（工具事实、无人值守白名单、自主会话、豁免规则、
+    记忆判据、字段权重）——观测分两条通道进来：边界上的 `calls` 和会话边界上的
+    `memories`。这条分工是全项目的判据，不是这里的实现细节。
 
     `memories` 有默认值，是为了让只想验边界检测的调用方（比如豁免那一批测试）
     照旧只传两个参数——**不是**"记忆可以不看"：真跑一次场景时 runner 一定传。
@@ -951,6 +971,7 @@ def _run_detectors(
         exemptions=scenario.exemption_set(),
         memories=memories,
         memory_rules=scenario.memory_rules(),
+        loop_field_weights=scenario.loop_field_weights(),
     )
 
 

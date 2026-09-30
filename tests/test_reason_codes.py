@@ -43,13 +43,8 @@ NO_LIVE_SAMPLE: dict[str, str] = {
         "也就是两条声明自相矛盾时。这一族要留一支真的不声明判据的场景"
         "（cross_session_memory_loss），声明了就自相矛盾——没有活样本正是对的"
     ),
-    "monotonic_unbounded": (
-        "要一个**数值**字段在重复调用之间单调推进（page 1..8 那种），"
-        "而 mock 的工具表里没有这样的参数：get_order 只有字符串 order_id，"
-        "非数值字段一律保守判为不单调（loop.py 的 _all_monotonic）。要造得先加一个分页读工具"
-    ),
     "unauthorized_attempt_blocked": (
-        "要有一次带着 blocked_by_proxy 的调用，而今天 17 个场景一次都没有："
+        "要有一次带着 blocked_by_proxy 的调用，而今天 19 个场景一次都没有："
         "场景路径不配出口策略（runner 把它重置成默认策略），"
         "而未声明的工具调用走的是 tool_scope 那条路，不算写操作。"
         "要造得先想清楚这道拦截该由谁下、以及在报告里归给谁"

@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
@@ -41,6 +42,46 @@ SNAPSHOT_REPLAY = "snapshot_restore"
 
 # 允许的重试次数上界。超过它就不是"重试"，是"卡住了"。
 MAX_LEGITIMATE_RETRIES = 3
+
+
+def checked_field_weights(weights: Any) -> dict[str, float]:
+    """把一张字段权重表验成能用的形状，验不过就抛 `ValueError`。
+
+    **这份检查只写一遍**，因为权重有两个入口：场景 YAML（`scenario/spec.py`）和
+    运行注册的 HTTP 载荷（`gateway/app.py`，手工 curl 或别的驱动方走的那条）。
+    两处各写一份的话，总有一天一条路径收下了 `nan`，而另一条拦下了它——
+    收下它的那条会让近似层**静默失效**：`nan >= 阈值` 恒为假，于是所有簇都不
+    成立、所有近似层结论一起消失，而报告上看起来只是"这一段没发现循环"。
+
+    规则：权重必须是正的有限数。`nan` 见上；`inf` 会把别的字段的贡献压成 0，
+    与"删掉那个字段"等价——想删就明说，别用一个算不出来的数表达；`0` 或负数
+    没有意义（那个字段一会算进均值一会算不进去，取决于实现细节）。
+
+    字符串要报错：这里不做 `float("0.1")` 那种强转。它挡的**不是**场景文件那条路
+    ——pydantic 在模型那层就把数字字符串转掉了（`page: "0.1"` 与 `page: 0.1` 等价，
+    见 `tests/test_scenario_dsl.py` 里那条测试），而是**不过模型的那条路**：运行注册
+    的 JSON 载荷直接进这个函数，`"0.1"` 到了这里就是文本。不拦的话 `isfinite`
+    会抛 `TypeError`——那是 500，而不是 400 里一句看得懂的话。
+    """
+    if not isinstance(weights, dict):
+        raise ValueError(
+            f"字段权重必须是一张映射（字段名 → 权重），实际是 {type(weights).__name__}"
+        )
+    for field, weight in weights.items():
+        if not isinstance(field, str) or not field.strip():
+            raise ValueError(f"字段权重里有空的字段名：{field!r}")
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            raise ValueError(
+                f"字段权重 [{field!r}] = {weight!r}：权重必须是数字，"
+                f"字符串要写成数字（引号里的 0.1 是文本，不是 0.1）"
+            )
+        if not math.isfinite(weight) or weight <= 0:
+            raise ValueError(
+                f"字段权重 [{field!r}] = {weight!r}：权重必须是正的有限数。"
+                f"nan 会让所有相似度判定恒为假（近似层静默失效），"
+                f"0 或负数没有意义。"
+            )
+    return {str(field): float(weight) for field, weight in weights.items()}
 
 
 def split_by_occasion(calls: list[CallView]) -> list[list[CallView]]:

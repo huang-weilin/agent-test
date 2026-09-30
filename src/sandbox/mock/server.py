@@ -26,7 +26,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from sandbox.clock import clock
-from sandbox.mock.toolspec import TOOL_SPECS, MockState
+from sandbox.mock.toolspec import CATALOG_PAGE_SIZE, TOOL_SPECS, MockState, catalog_page
 
 app = FastAPI(title="sandbox mock target system", version="0.0.1")
 
@@ -81,6 +81,36 @@ async def reset(enforce_idempotency: bool | None = None) -> dict[str, Any]:
 async def list_charges() -> dict[str, Any]:
     """扣款流水。检测器与验收脚本的证据来源。"""
     return {"charges": _state.charges, "count": len(_state.charges)}
+
+
+@app.post("/tools/list_orders")
+async def list_orders(payload: dict[str, Any]) -> Any:
+    """分页列出订单目录。
+
+    **翻过头不是错误**：真实的列表接口对越界的页码回一个空列表（顶多带一句
+    `has_more: false`），回 404 才是异常。这里照真实接口来——Agent 一直翻下
+    去的话，边界上看到的是"它在不停地问"，而不是"它一直在失败"。
+    """
+    page = payload.get("page")
+    # `bool` 要先于 `int` 挡掉：Python 里 True 是 int 的实例（同参数校验那条）。
+    if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"page 必须是从 1 开始的整数，收到 {page!r}"},
+        )
+    page_size = payload.get("page_size")
+    if page_size is None:
+        page_size = CATALOG_PAGE_SIZE
+    elif not isinstance(page_size, int) or isinstance(page_size, bool) or page_size < 1:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"page_size 必须是正整数，收到 {page_size!r}"},
+        )
+    status = payload.get("status")
+    return {
+        "ok": True,
+        **catalog_page(page, page_size, None if status is None else str(status)),
+    }
 
 
 @app.post("/tools/get_order")

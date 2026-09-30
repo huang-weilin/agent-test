@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from sandbox.config import settings
 from sandbox.db.models import Confidence, DetectorVerdict
 from sandbox.detectors.base import ExemptionSet
+from sandbox.detectors.loop import checked_field_weights
 from sandbox.gateway.budget import BudgetExceededError
 from sandbox.gateway.stub import scripted_upstream
 from sandbox.runtime import runs
@@ -214,6 +215,19 @@ async def create_run(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
     except ValueError as exc:
         return _error(400, f"豁免规则有问题：{exc}", err_type="bad_exemptions")
 
+    # 字段权重同理，也走看门狗（它决定"这串调用算不算在原地打转"）。同一条规则
+    # 在场景加载那边也走一遍，实现是同一个函数——两处各写一份的话，一条路径
+    # 会收下 `nan` 而另一条拦住，收下它的那条让近似层静默失效。
+    raw_weights = payload.get("loop_field_weights")
+    try:
+        loop_field_weights = (
+            {} if raw_weights is None else checked_field_weights(raw_weights)
+        )
+    except ValueError as exc:
+        return _error(
+            400, f"字段权重有问题：{exc}", err_type="bad_loop_field_weights"
+        )
+
     active = runs.register(
         ctx,
         scenario_id=payload.get("scenario_id", "adhoc"),
@@ -224,6 +238,7 @@ async def create_run(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
         # 参数 schema，出口代理拿它核对每一次调用。与上面那张表同源同命，见上。
         tool_schemas=schema_table,
         exemptions=exemptions,
+        loop_field_weights=loop_field_weights,
     )
     return {
         "run_id": ctx.run_id,

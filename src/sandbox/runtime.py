@@ -83,6 +83,15 @@ class ActiveRun:
     # 而那种场景里最需要它生效的时刻恰恰是熔断那一刻。
     exemptions: ExemptionSet = field(default_factory=ExemptionSet)
 
+    # 场景声明的字段权重（字段名 → 权重）。和上面那张豁免表同一个理由挂在这里：
+    # 它来自场景，而**看门狗在运行当中要用它**判"这串调用算不算在原地打转"。
+    #
+    # 不过线的话，两边会用不同的判卷标准算出不同的结论：事后报告拿场景声明的那张
+    # 表判成"正常遍历"，看门狗拿空表把同一串调用切成好几个簇——它未必会因此误杀，
+    # 但"两处结论必须一致"是看门狗存在的全部前提。空表是合法的：它说的是"这份
+    # 场景没有声明权重"，那时检测器照旧按参数形状猜（见 LoopDetector.key_weights）。
+    loop_field_weights: dict[str, float] = field(default_factory=dict)
+
     # 已经就哪几条豁免警告过一次了。**只是日志去重**，不参与判定。
     #
     # 看门狗每次工具调用后重扫一遍，一条持续 100 次调用的被豁免循环会刷 100 行
@@ -126,6 +135,7 @@ class RunRegistry:
         tools: dict[str, str] | None = None,
         tool_schemas: dict[str, dict[str, Any]] | None = None,
         exemptions: ExemptionSet | None = None,
+        loop_field_weights: dict[str, float] | None = None,
     ) -> ActiveRun:
         active = ActiveRun(
             ctx=ctx,
@@ -134,6 +144,7 @@ class RunRegistry:
             tools=dict(tools or {}),
             tool_schemas=dict(tool_schemas or {}),
             exemptions=exemptions or ExemptionSet(),
+            loop_field_weights=dict(loop_field_weights or {}),
         )
         self._runs[ctx.run_id] = active
         return active
