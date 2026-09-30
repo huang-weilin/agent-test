@@ -47,6 +47,7 @@ import httpx
 import structlog
 import uvicorn
 
+from sandbox.clock import clock
 from sandbox.config import REPO_ROOT, settings
 from sandbox.cost import aggregator as cost
 from sandbox.db.engine import init_db
@@ -54,6 +55,7 @@ from sandbox.detectors.base import ExemptionSet, Finding
 from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
 from sandbox.detectors.loop import LoopDetector
 from sandbox.formatting import money as _money
+from sandbox.formatting import span_human
 from sandbox.formatting import tokens as _tokens
 from sandbox.gateway.stub import scripted_upstream
 from sandbox.memory.adapters.file_memory import FileMemoryAdapter
@@ -98,6 +100,31 @@ class SessionOutcome:
     kill_reason: str = ""
     stdout_tail: str = ""
 
+    # --- 长时运行（功能需求 3.6 / 场景 6）-----------------------------------
+    # 一段会话开始时的世界时刻。**不是** `started_at` 那种墙上时间——那个是
+    # 记账用的，这个描述的是被模拟的那个世界。
+    virtual_started_at: str | None = None
+    #: 场景声明的"距上一段过去了多久"。
+    after_gap_s: int = 0
+    #: 场景声明：本会话开始时世界一共应该走了多少秒。
+    declared_offset_s: int = 0
+    #: 时钟实际观察值。与上一项不等 = 加速器没按场景说的做。
+    observed_offset_s: int = 0
+
+    @property
+    def clock_matched(self) -> bool:
+        """世界真的按场景声明的那样往前走了吗。
+
+        这是**加速器自己的自检**，不是对被测对象的判断。它挡的是一种特别难查的
+        失效：场景写着"隔了一天再看"，而引擎根本没拨时钟——于是第二段会话看到的
+        世界和第一段一模一样，检测器照样给出一份看起来正常的报告，读的人以为
+        "Agent 隔了一天还是这么干"，实际上什么都没测到。
+
+        非长时运行的场景两边都是 0，天然成立。**上个场景残留的偏移也会在这里
+        暴露**（声明 0、观察到非 0），这正是要的。
+        """
+        return self.observed_offset_s == self.declared_offset_s
+
     @property
     def premise_held(self) -> bool:
         """这次测试的前提成立吗。
@@ -106,15 +133,17 @@ class SessionOutcome:
         这两者的报告会把空结果读成全绿——这正是本工具最严重的失效方式，
         所以它是一个独立于检测结论的字段。
 
-        两个成立条件，第二个容易被漏掉：
+        三个成立条件，后两个容易被漏掉：
 
         1. 脚本被消费完了 —— Agent 确实做完了场景写的那些动作。
         2. **本会话自己把运行跑到了熔断。** 被熔断时脚本必然没消费完，但那
            恰恰是循环类场景的预期结果：检测器判出来了、看门狗动手了，说明
            场景想制造的行为确实发生了。按条件 1 判的话，一个完美触发的循环
            场景会被报成"没测到"——判据把成功的信号读成了失败。
+        3. **世界的时间真的走了。** 见 `clock_matched`。
         """
-        return self.script_steps_consumed >= self.script_steps_declared or self.killed
+        ran_out = self.script_steps_consumed >= self.script_steps_declared or self.killed
+        return ran_out and self.clock_matched
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -131,6 +160,44 @@ class SessionOutcome:
             "tool_calls": self.tool_calls,
             "killed": self.killed,
             "kill_reason": self.kill_reason,
+            "virtual_started_at": self.virtual_started_at,
+            "after_gap_s": self.after_gap_s,
+            "declared_offset_s": self.declared_offset_s,
+            "observed_offset_s": self.observed_offset_s,
+            "clock_matched": self.clock_matched,
+        }
+
+
+@dataclass
+class ClockReport:
+    """这次运行里的"世界时间"是什么样。
+
+    和 `ScenarioResult` 里那些真实耗时并列给出，**两个数都要有**：只给虚拟时间，
+    读的人会以为跑一次要三天；只给真实耗时，就看不出这次模拟了多久。这也是
+    "速度倍率"唯一诚实的算法——它是两个已知量的比值，不是我们许下的承诺。
+    """
+
+    virtual: bool
+    started_at: str
+    ended_at: str
+    virtual_elapsed_s: int
+    real_elapsed_s: float
+
+    @property
+    def speed(self) -> float:
+        """虚拟时间比真实时间快多少倍。真实耗时按十分之一秒算，避免除零。"""
+        if not self.virtual_elapsed_s:
+            return 1.0
+        return self.virtual_elapsed_s / max(self.real_elapsed_s, 0.1)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "virtual": self.virtual,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "virtual_elapsed_s": self.virtual_elapsed_s,
+            "real_elapsed_s": round(self.real_elapsed_s, 2),
+            "speed": round(self.speed, 1),
         }
 
 
@@ -151,6 +218,8 @@ class ScenarioResult:
     cost: cost.CostRollup | None = None
     session_costs: dict[int, cost.CostRollup] = field(default_factory=dict)
     budget: list[cost.BudgetStatus] = field(default_factory=list)
+    # 长时运行的世界时间。None = 没跑到那一步，或者这不是一次长时运行。
+    clock: ClockReport | None = None
     error: str | None = None
 
     @property
@@ -195,6 +264,7 @@ class ScenarioResult:
             "summary": self.summary,
             "egress_charges": self.egress_charges,
             "expected_charges": self.expected_charges,
+            "clock": self.clock.to_dict() if self.clock else None,
             "cost": self.cost.to_dict() if self.cost else None,
             "session_costs": {str(k): v.to_dict() for k, v in sorted(self.session_costs.items())},
             "budget": [
@@ -308,7 +378,18 @@ class ScenarioRunner:
 
         await init_db()
         state = mock_server.get_state()
+        # 长时运行才进虚拟模式。不进的话 `clock.now()` 就是真实时间，整条既有
+        # 路径一行都不用改——这是刻意的：没在模拟时间的运行，报告里就不该出现
+        # 任何"虚拟"字样。
+        if scenario.is_long_run():
+            clock.start()
+        # **锚点必须在时钟就位之后再钉，而且要和会话读的是同一个对象。**
+        # 订单的到期时间是相对"世界起点"算出来的，起点来自这次调用；换成读
+        # `datetime.now()` 也能跑，但那意味着世界起点和世界当前时刻出自两个
+        # 口径——今天恰好相等，改天 `start()` 换了语义就不等了。
         state.reset()
+        world_started = clock.now()
+        real_started = clock.real_now()
         # mock 目标系统侧是否真的按幂等键去重。
         #
         # 场景是按**工具**声明这个属性的，而 mock 只有一个全局开关——因为
@@ -347,6 +428,18 @@ class ScenarioRunner:
             await self._run_sessions(scenario, result, gw_port, px_port, mk_port, runs)
         finally:
             settings.tool_upstream_base_url = original_upstream
+            # 世界时间也在这里收尾。**必须恢复**：它是进程级状态，泄漏给下一个
+            # 场景的话，下一次运行会带着上一次的时间偏移开局，而它的报告里每一
+            # 处都显示"世界已经是三天后了"——全都正常，全都错。
+            if scenario.is_long_run():
+                result.clock = ClockReport(
+                    virtual=True,
+                    started_at=world_started.isoformat(),
+                    ended_at=clock.now().isoformat(),
+                    virtual_elapsed_s=clock.offset_s(),
+                    real_elapsed_s=(clock.real_now() - real_started).total_seconds(),
+                )
+                clock.reset()
             if not self.keep_servers:
                 for server, _ in servers:
                     server.should_exit = True
@@ -437,6 +530,21 @@ class ScenarioRunner:
 
             for index, spec in enumerate(scenario.sessions):
                 ordinal = index  # 会话 0 由 start_run 建出，从会话 1 起要显式开
+
+                # **把世界往前拨，然后什么也不等。** 这就是时间加速的全部：一段
+                # 声明的间隔立刻过去，目标系统上该变的都变了，真实耗时是零。
+                # 被测 Agent 这段时间本来就不在跑——云端常驻 Agent 也是被定时器
+                # 叫醒的，这一点没有被跳过，是如实的。
+                if spec.after_gap_s:
+                    clock.advance(spec.after_gap_s)
+                observed_offset = clock.offset_s()
+                declared_offset = scenario.offset_before(index)
+                # 会话**开始时**的世界时刻，不是结束时的——结束时要再取一次，
+                # 取错的话报告里每一段会话都会显示成"和下一段同一时刻"。
+                # 不在虚拟模式里就是 None：没在模拟时间的运行，不该出现任何
+                # 一个叫"virtual"的字段带着一个真实时间。
+                world_at_start = clock.now().isoformat() if clock.is_virtual else None
+
                 restored: SnapshotRef | None = None
                 if spec.restore_from is not None:
                     restored = named[spec.restore_from]
@@ -457,7 +565,14 @@ class ScenarioRunner:
                 # 后者才是"循环场景如期触发"。
                 killed_before = active.killed
                 exit_code, timed_out, stdout, elapsed = await self._launch_agent(
-                    scenario, run["api_key"], gw_port, px_port, memory_root, current
+                    scenario,
+                    run["api_key"],
+                    gw_port,
+                    px_port,
+                    memory_root,
+                    current,
+                    # 这一段用户说的是什么。没写就沿用场景级的 task。
+                    spec.task or scenario.agent.task,
                 )
                 cursor_after = scripted_upstream.calls_made(run_id)
 
@@ -481,6 +596,10 @@ class ScenarioRunner:
                         killed=active.killed and not killed_before,
                         kill_reason=active.kill_reason,
                         stdout_tail=stdout[-2000:],
+                        virtual_started_at=world_at_start,
+                        after_gap_s=spec.after_gap_s,
+                        declared_offset_s=declared_offset,
+                        observed_offset_s=observed_offset,
                     )
                 )
 
@@ -538,8 +657,12 @@ class ScenarioRunner:
         px_port: int,
         memory_root: Path,
         current: dict[str, subprocess.Popen[str] | None],
+        task: str,
     ) -> tuple[int | None, bool, str, float]:
-        """拉起被测 Agent 进程，等它退出。返回 (退出码, 是否超时, 输出, 耗时)。"""
+        """拉起被测 Agent 进程，等它退出。返回 (退出码, 是否超时, 输出, 耗时)。
+
+        `task` 是**这一段**会话里用户说的话（见 `SessionSpec.task`）。
+        """
         agent_dir = self.repo_root / "agents" / scenario.agent.directory
         python = agent_dir / ".venv" / "Scripts" / "python.exe"
         if not python.exists():
@@ -562,7 +685,7 @@ class ScenarioRunner:
             "SANDBOX_AGENT_API_KEY": token,
             "SANDBOX_TOOL_BASE_URL": f"http://127.0.0.1:{px_port}",
             "SANDBOX_AGENT_MODEL": scenario.agent.model,
-            "SANDBOX_AGENT_TASK": scenario.agent.task,
+            "SANDBOX_AGENT_TASK": task,
             # 记忆目录由引擎创建并告知 Agent。Agent 不该自己猜路径，
             # 否则测试框架的回滚就回滚到了一处它不读的地方。
             "SANDBOX_AGENT_MEMORY_DIR": str(memory_root),
@@ -653,12 +776,35 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
             f"       记忆视野 ≤ 会话 {s.memory_horizon_ordinal}"
             f" / 工具调用 {s.tool_calls} 次"
         )
+        if s.virtual_started_at:
+            gap = f"，距上一段过了 {span_human(s.after_gap_s)}" if s.after_gap_s else ""
+            add(f"       世界时间 {s.virtual_started_at}{gap}")
+            if not s.clock_matched:
+                add(
+                    f"       ** 时钟对不上：场景声明世界走了 {span_human(s.declared_offset_s)}，"
+                    f"实际走了 {span_human(s.observed_offset_s)} **"
+                )
         consumed = f"       脚本消费 {s.script_steps_consumed}/{s.script_steps_declared}"
         if s.killed:
             consumed += f"（熔断所致，前提成立）\n       熔断原因：{s.kill_reason}"
         elif not s.premise_held:
             consumed += "  ** 这一段没跑完，前提未成立 **"
         add(consumed)
+
+    if result.clock is not None:
+        # 两个时间并列给。只给虚拟时间，读的人会以为跑一次要三天；只给真实
+        # 耗时，就看不出这次到底模拟了多久。
+        c = result.clock
+        add("\n--- 世界时间（长时运行，需求场景 6）---")
+        add(f"  世界从 {c.started_at} 走到 {c.ended_at}")
+        add(
+            f"  模拟跨度 {span_human(c.virtual_elapsed_s)}，"
+            f"真实耗时 {c.real_elapsed_s:.1f}s（约 {c.speed:.0f} 倍）"
+        )
+        add(
+            "  **这段时间不是等出来的**：引擎把目标系统的时钟往前拨，世界该变的都\n"
+            "     变了，而被测 Agent 在两次会话之间本来就不在跑。"
+        )
 
     add("\n--- 检测结论 ---")
     if not result.findings:

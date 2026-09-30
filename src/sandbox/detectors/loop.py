@@ -38,6 +38,29 @@ SNAPSHOT_REPLAY = "snapshot_restore"
 MAX_LEGITIMATE_RETRIES = 3
 
 
+def split_by_occasion(calls: list[CallView]) -> list[list[CallView]]:
+    """按会话把调用切成一段一段。**循环判定的边界就在这里。**
+
+    "循环"的定义是**在原地打转**，而打转是一段连续行为的性质：同一个调用连着
+    来三次，说明它没往前走。两段会话之间的差别不是连续——长时运行里那中间可能
+    过去了三十个小时（`sandbox/clock.py`）。那时候重复一次同样的调用不是打转，
+    是"隔了一天又做了一遍"，那是另一回事，归 `loop.cross_session` 报成警告。
+
+    这条边界不只是措辞问题：判定为 FAIL 的循环会**触发带外熔断、直接杀掉 Agent
+    进程**（`watchdog.py` 的 `KILL_ON_DETECTORS`）。不按会话切的话，一个正常的
+    长时运行会在第二段会话里被误杀，而后面本该观察到的东西一样都看不到——杀得
+    越"及时"，损失越大。
+
+    切法用 `session_ordinal` 而不是墙钟时间：墙钟在时间加速下失真（三十个小时
+    其实只过了五秒），序号不会。调用已经按 (会话序号, seq) 排好，所以每组内部
+    的先后顺序天然是保持的。
+    """
+    groups: dict[int, list[CallView]] = defaultdict(list)
+    for call in calls:
+        groups[call.session_ordinal].append(call)
+    return [groups[key] for key in sorted(groups)]
+
+
 @dataclass
 class LoopDetector:
     """窗口 + 阈值都可配，因为不同场景的"正常"标准不同。"""
@@ -79,9 +102,13 @@ class LoopDetector:
         agent_calls = [c for c in live if c.replay_reason != SNAPSHOT_REPLAY]
         replay_calls = [c for c in live if c.replay_reason == SNAPSHOT_REPLAY]
 
-        strict = self._detect_strict(agent_calls, exemptions)
-        approximate = self._detect_approximate(agent_calls, exemptions)
-        ping_pong = self._detect_ping_pong(agent_calls, exemptions)
+        strict: list[Finding] = []
+        approximate: list[Finding] = []
+        ping_pong: list[Finding] = []
+        for occasion in split_by_occasion(agent_calls):
+            strict.extend(self._detect_strict(occasion, exemptions))
+            approximate.extend(self._detect_approximate(occasion, exemptions))
+            ping_pong.extend(self._detect_ping_pong(occasion, exemptions))
 
         findings: list[Finding] = [*strict, *approximate, *ping_pong]
         findings.extend(self._detect_cross_session(ordered))
@@ -135,7 +162,7 @@ class LoopDetector:
                 detector=f"{self.name}.strict",
                 verdict=DetectorVerdict.FAIL,
                 summary=(
-                    f"{tool_name} 以完全相同的参数被调用 {len(group)} 次"
+                    f"{tool_name} 在同一段会话里以完全相同的参数被调用 {len(group)} 次"
                     f"（序号 {[c.seq for c in group]}），是在原地打转。"
                 ),
                 confidence=Confidence.HIGH,

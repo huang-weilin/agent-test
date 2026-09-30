@@ -242,4 +242,4 @@ def test_the_scheme_version_is_recorded() -> None:
     少了它，一次旧运行（按旧口径算的哈希）和一次新运行放一起比，会得出
     "配置变了"——那是一句基于不可比数据的结论。见 models.py 里那一列的注释。
     """
-    assert CONFIG_SCHEME == "2"
+    assert CONFIG_SCHEME == "3"

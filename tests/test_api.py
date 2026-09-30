@@ -26,9 +26,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sandbox.api import paths
 from sandbox.api.app import DEFAULT_HOST, create_app, serve
 from sandbox.api.jobs import JobRegistry
+from sandbox.cost.aggregator import CostRollup
 from sandbox.db.engine import init_db
 from sandbox.db.models import TestRun
 from sandbox.scenario.loader import ScenarioError, load_scenario
+
+#: 报告快照里 `cost` 那一格。**问运行器要形状，不手写字典。**
+#:
+#: 手写的话夹具和被测代码会用同一个错键，于是那段代码在真实数据上什么都不做、
+#: 而测试一直是绿的。这个坑在这里踩过一次：报告里的键是 `cost_usd`
+#: （`CostRollup.to_dict()`），而回归对比读的是 `total_usd`——直到有人拿
+#: 真实报告渲染这一页才发现。夹具照着真实形状造，是唯一能拦住下一次的办法。
+_COST = CostRollup(llm_calls=3, input_tokens=1200, output_tokens=300, cost_usd=0.01).to_dict()
 
 CLEAN_YAML = """
 id: clean
@@ -465,6 +474,175 @@ async def test_json_api_reports_null_ok_for_legacy_run(
     detail = (await client.get(f"/api/runs/{legacy_run}")).json()
     assert detail["report"] is None
     assert "不是失败" in detail["note"]
+
+
+# --- 长时运行：两个数必须并列出现 ----------------------------------------------
+
+
+def _long_run_report(
+    *,
+    virtual_elapsed_s: int = 108000,
+    real_elapsed_s: float = 17.3,
+    observed_offset_s: int | None = None,
+) -> dict:
+    """一次长时运行的报告快照，形状与 `ScenarioResult.to_dict()` 一致。
+
+    `observed_offset_s` 不传 = 时钟对得上；传一个别的数就是加速器坏了。
+    """
+    observed = virtual_elapsed_s if observed_offset_s is None else observed_offset_s
+    return {
+        "scenario_id": "long_run_overnight",
+        "ok": observed == virtual_elapsed_s,
+        "premises_held": observed == virtual_elapsed_s,
+        "charges_ok": True,
+        "error": None,
+        "sessions": [
+            {
+                "name": "白天·还没到期",
+                "ordinal": 0,
+                "memory_horizon_ordinal": -1,
+                "restored_from": None,
+                "exit_code": 0,
+                "elapsed_s": 8.1,
+                "timed_out": False,
+                "script_steps_declared": 2,
+                "script_steps_consumed": 2,
+                "tool_calls": 1,
+                "killed": False,
+                "kill_reason": "",
+                "virtual_started_at": "2026-09-30T04:18:11+00:00",
+                "after_gap_s": 0,
+                "declared_offset_s": 0,
+                "observed_offset_s": 0,
+                "clock_matched": True,
+                "premise_held": True,
+            },
+            {
+                "name": "隔了一晚·已逾期",
+                "ordinal": 1,
+                "memory_horizon_ordinal": 0,
+                "restored_from": None,
+                "exit_code": 0,
+                "elapsed_s": 9.1,
+                "timed_out": False,
+                "script_steps_declared": 3,
+                "script_steps_consumed": 3,
+                "tool_calls": 2,
+                "killed": False,
+                "kill_reason": "",
+                "virtual_started_at": "2026-10-01T10:18:11+00:00",
+                "after_gap_s": 108000,
+                "declared_offset_s": 108000,
+                "observed_offset_s": observed,
+                "clock_matched": observed == 108000,
+                "premise_held": observed == 108000,
+            },
+        ],
+        "findings": [{"detector": "idempotency", "verdict": "pass", "summary": "只付了一次"}],
+        "expectation": {"matched": [], "missing": [], "unexpected": [], "uncovered": []},
+        "egress_charges": 1,
+        "expected_charges": 1,
+        "cost": _COST,
+        "clock": {
+
+            "virtual": True,
+            "started_at": "2026-09-30T04:18:11+00:00",
+            "ended_at": "2026-10-01T10:18:28+00:00",
+            "virtual_elapsed_s": virtual_elapsed_s,
+            "real_elapsed_s": real_elapsed_s,
+            "speed": round(virtual_elapsed_s / max(real_elapsed_s, 0.1), 1),
+        },
+    }
+
+
+@pytest_asyncio.fixture
+async def long_run(db: AsyncSession) -> str:
+    from datetime import UTC, datetime
+
+    run_id = "run-long"
+    db.add(
+        TestRun(
+            id=run_id,
+            scenario_id="long_run_overnight",
+            agent_version="react_demo@0.1",
+            config_hash="L" * 64,
+            status="completed",
+            started_at=datetime.now(UTC),
+            verdict_ok=True,
+            report_json=json.dumps(_long_run_report()),
+        )
+    )
+    await db.commit()
+    return run_id
+
+
+async def test_a_long_run_shows_the_real_cost_next_to_the_virtual_span(
+    client: httpx.AsyncClient, long_run: str
+) -> None:
+    """**两个数必须同时出现**，这是这一整块界面的全部要点。
+
+    只印"模拟跨度 1.2 天"，读的人会以为跑一次要一天，于是不会去跑；只印
+    "耗时 17.3 秒"，就看不出这次到底模拟了多久。少任何一个，这块面板都在
+    误导。
+    """
+    resp = await client.get(f"/runs/{long_run}")
+    assert resp.status_code == 200
+    assert "1.2 天" in resp.text
+    assert "17.3" in resp.text
+    assert "世界时间" in resp.text
+
+
+async def test_a_long_run_shows_each_session_world_clock(
+    client: httpx.AsyncClient, long_run: str
+) -> None:
+    """每段会话旁边的"距上一段过了多久"——读的人要知道那 30 小时发生在哪儿。"""
+    resp = await client.get(f"/runs/{long_run}")
+    assert "距上一段过了" in resp.text
+    assert "1.2 天" in resp.text
+
+
+async def test_a_stalled_clock_is_shown_as_a_broken_premise(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """加速器坏了必须**看得见**：报告长得正常，而实际上什么都没测到。
+
+    把 `advance` 变成空操作之后，世界停在原地，第二段会话看到的东西和第一段
+    一模一样。页面上要是只显示"模拟跨度 0 秒"，读的人会把它当成"这次没模拟
+    时间"——而它其实是"这次该模拟而没模拟"。
+    """
+    from datetime import UTC, datetime
+
+    db.add(
+        TestRun(
+            id="run-stalled",
+            scenario_id="long_run_overnight",
+            agent_version="react_demo@0.1",
+            config_hash="S" * 64,
+            status="completed",
+            started_at=datetime.now(UTC),
+            verdict_ok=False,
+            report_json=json.dumps(_long_run_report(virtual_elapsed_s=0, observed_offset_s=0)),
+        )
+    )
+    await db.commit()
+
+    resp = await client.get("/runs/run-stalled")
+    assert resp.status_code == 200
+    assert "时钟对不上" in resp.text
+    assert "加速器" in resp.text
+
+
+async def test_a_run_without_a_clock_shows_no_world_time_section(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """**没模拟时间和模拟了 0 秒必须长得不一样。**
+
+    普通运行也印一句"世界时间：0 秒"的话，读的人就分不出"这次没做时间加速"
+    和"这次做了但没动"——前者正常，后者是故障。
+    """
+    resp = await client.get(f"/runs/{baseline_run}")
+    assert resp.status_code == 200
+    assert "世界时间" not in resp.text
 
 
 # --- JSON 接口 ----------------------------------------------------------------
@@ -914,12 +1092,29 @@ def _regression_report(
         "premises_held": True,
         "charges_ok": True,
         "error": None,
+        # 会话这一格要**整套字段**都在。少一个 `elapsed_s` 之类看着不要紧的键，
+        # 运行详情页会直接 500——而回归页不渲染会话表，所以只有把同一份报告
+        # 拿去渲染运行详情页时才会发现。夹具比真实报告瘦一圈，就等于让一整类
+        # 只有真数据才走得到的路径永远没被走过。
         "sessions": [
             {
                 "name": "第一次",
                 "ordinal": 0,
                 "memory_horizon_ordinal": horizon,
                 "restored_from": None,
+                "exit_code": 0,
+                "elapsed_s": 8.0,
+                "timed_out": False,
+                "script_steps_declared": 2,
+                "script_steps_consumed": 2,
+                "tool_calls": 1,
+                "killed": False,
+                "kill_reason": "",
+                "virtual_started_at": None,
+                "after_gap_s": 0,
+                "declared_offset_s": 0,
+                "observed_offset_s": 0,
+                "clock_matched": True,
                 "premise_held": True,
             }
         ],
@@ -927,7 +1122,7 @@ def _regression_report(
         "expectation": {"matched": [], "missing": [], "unexpected": [], "uncovered": []},
         "egress_charges": egress,
         "expected_charges": 1,
-        "cost": {"total_usd": 0.01, "llm_calls": 3},
+        "cost": _COST,
     }
 
 

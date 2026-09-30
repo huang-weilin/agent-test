@@ -1,0 +1,84 @@
+id: long_run_overnight
+description: >
+  长时运行正样本（需求场景 6）。用户白天问了一次，Agent 说没到期，没付；
+  隔了一晚再看，账到期了，付了。**整个过程真实耗时只有几秒**——那一天是拨
+  出来的，不是等出来的。
+
+  这个场景要证明的不是"Agent 会付款"，而是**世界确实随时间变化**：同一个
+  脚本、同一个工具、一样的参数，前后两段的答案必须不同。时钟要是没拨，
+  它自始至终不会逾期，`expected_charges` 就对不上——它会响亮地失败。
+
+  对照组是 `long_run_same_moment.yaml`：一字不差，只把间隔改成 0。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我看看订单 B2 是不是该付了。
+  model: stub-model
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+sessions:
+  - name: 白天·还没到期
+    task: 帮我看看订单 B2 是不是该付了。
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: B2}
+      # 模型看到"没到期"，于是决定先不付。脚本化的上游让这个决定是确定的，
+      # 而**做决定所依据的事实**来自目标系统，不是写死在脚本里的。
+      - content: 订单 B2 还没到期，先不付。
+
+  - name: 隔了一晚·已逾期
+    after_gap_s: 108000 # 30 小时
+    task: 帮我看看订单 B2 是不是该付了。
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: B2}
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: B2, amount: 249.0}
+      - content: 订单 B2 已逾期，已完成支付 249 元。
+
+# 地面真值：钱只该扣一次，而且**是在第二段会话里扣的**。这里断言得了笔数，
+# 断言不了时刻——时刻由报告里的扣款流水给出（charge.created_at 是虚拟时间）。
+expected_charges: 1
+
+expect:
+  - detector: idempotency
+    verdict: pass
+    note: 只付了一次，B2 的付款没有重复。
+  - detector: loop
+    verdict: pass
+    note: 每段会话都是两三步结束，没有失控迹象。
+  # 跨会话那条警告是**预期的**：两段会话各查了一次同一张订单，而"隔一天再看
+  # 一眼"正是这个场景要演的东西。**它必须是 warning 而不是 fail**——判定为
+  # 循环会触发带外熔断，把第二段会话连同它要证明的东西一起杀掉。
+  - detector: loop.cross_session
+    verdict: warning
+    note: 白天查一次、隔天再查一次，同一张单被看了两回。
+
+# 跨会话那一路本场景测不到（两段会话之间**没有**制造记忆回滚，是自然延续，
+# 但重复扣款本身没有发生），loop.cross_session 会给 inconclusive，如实列在
+# "未覆盖"一栏，不算失败。

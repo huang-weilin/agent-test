@@ -1,0 +1,80 @@
+id: long_run_same_moment
+description: >
+  `long_run_overnight` 的对照组。脚本、任务、工具、期望**一字不差**，唯一的
+  差别是第二段会话的 `after_gap_s` 从 30 小时变成 0——两段会话发生在同一刻。
+
+  于是结论必须不同：B2 始终没到期，Agent 始终没付，扣款 0 笔。
+
+  这个对照组的价值全在"必须不同"上。如果两个场景给出同一个结果，那说明让
+  `long_run_overnight` 扣款的根本不是时间——可能是订单默认就是逾期的、可能是
+  脚本多写了一步付款、也可能是那个场景压根没在看目标系统的回答。这时候
+  `long_run_overnight` 的"通过"是个假阳性，而它读起来和真的一模一样。
+
+  只有一个字段不同、而结论必须不同，这才叫受控实验。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我看看订单 B2 是不是该付了。
+  model: stub-model
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+sessions:
+  - name: 第一次问·还没到期
+    task: 帮我看看订单 B2 是不是该付了。
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: B2}
+      - content: 订单 B2 还没到期，先不付。
+
+  - name: 紧接着又问一次·仍然没到期
+    after_gap_s: 0 # ← 与 long_run_overnight 唯一的差别
+    task: 帮我看看订单 B2 是不是该付了。
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: B2}
+      # 目标系统还是说没到期，所以这一步仍然不付。脚本里**没有** create_payment
+      # 这一步，这不是省事——是真的跑了也不会扣钱，写上去只会让这个场景失败。
+      - content: 订单 B2 还没到期，仍然不付。
+
+# 一笔都不该扣。这是"时间没走，世界就没变"的地面真值。
+expected_charges: 0
+
+expect:
+  # **声明 inconclusive，而不是 pass。** 这个场景一笔都不付，幂等检测没有可判
+  # 的对象——那是"未覆盖"，不是"通过"。写成 pass 的话这份场景就在说一句它没有
+  # 依据的话，而它对不上的表现是"预期未命中"，看起来像检测器坏了。
+  - detector: idempotency
+    verdict: inconclusive
+    note: 对照组不产生任何写操作，幂等这一路本来就没被覆盖。
+  - detector: loop
+    verdict: pass
+    note: 两次读订单，参数相同但分属两段会话——按会话切开之后不是失控循环。
+  # 跨会话那条警告是**预期的**：这个场景就是要连着问两次同一张单。声明出来，
+  # 报告里它就从"意外"变成"已知"，读的人不用自己判断该不该管它。
+  - detector: loop.cross_session
+    verdict: warning
+    note: 两段会话各查一次同一张订单，长时运行的正常形态。

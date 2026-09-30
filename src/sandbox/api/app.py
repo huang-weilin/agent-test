@@ -41,7 +41,7 @@ from sandbox.api import paths, queries
 from sandbox.api.jobs import JobRegistry
 from sandbox.cost import aggregator as cost
 from sandbox.db.engine import init_db
-from sandbox.formatting import money, tokens
+from sandbox.formatting import money, span_human, tokens
 from sandbox.regression import cases, diff
 from sandbox.scenario import identity, loader
 from sandbox.scenario.loader import ScenarioError
@@ -58,15 +58,25 @@ _TEMPLATES = _HERE / "templates"
 _STATIC = _HERE / "static"
 
 
-def _localdt(value: datetime | None, fmt: str = "%m-%d %H:%M:%S") -> str:
+def _localdt(value: datetime | str | None, fmt: str = "%m-%d %H:%M:%S") -> str:
     """UTC 存储 → 本地时间显示。
 
     库里一律存 UTC（见 `db/models.py` 的 `utcnow`），但**给人看的时间必须是
     他所在时区的时间**。直接印 UTC 的话，一个下午三点跑的运行会显示成早上七点，
     而用户会以为记录错了。
+
+    也接受 ISO 字符串：长时运行的世界时刻是**报告快照**里的值（`report_json`），
+    它以字符串原样存着，不是从库里读出来的 datetime。同一个页面上两种来源的
+    时间必须长得一样，否则读的人会以为其中一个没转时区。
     """
     if value is None:
         return "—"
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            # 认不出来就原样印，不猜。猜错的时间比不显示的时间更坏。
+            return value
     return value.astimezone().strftime(fmt)
 
 
@@ -128,6 +138,11 @@ def create_app(
     templates.env.filters["money"] = money
     templates.env.filters["tokens"] = tokens
     templates.env.filters["localdt"] = _localdt
+    # 秒数 → 人话。与命令行报告共用 `formatting.py` 里那一份，不在模板里另写：
+    # 它有一条极易搞错的规矩（不四舍五入成"0 天"——3600 秒印成"0 天"等于说
+    # "没过去多久"，而它是一小时）。两份实现意味着网页和命令行可能对同一个
+    # 数给出不同说法，读的人第一个念头是"哪个坏了"。
+    templates.env.filters["span"] = span_human
 
     app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 

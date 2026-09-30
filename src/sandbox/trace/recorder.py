@@ -58,7 +58,11 @@ _IDEMPOTENCY_FIELD_ALIASES: tuple[str, ...] = (
 #:
 #: 1（隐式，未记录）：只覆盖场景 id 与模型名。改了脚本或 Prompt 它都不变。
 #: 2：覆盖 `scenario/identity.py` 分出的那五节，改动可定位到具体是哪一块。
-CONFIG_SCHEME = "2"
+#: 3：会话多了 `after_gap_s`，于是每一节的**内容**都变了（`script` 节直接
+#:    序列化整个 `SessionSpec`）。**这正是这个常量存在的场合**——口径改了、
+#:    哈希必然不相等，而它必须被读成"换算法了"而不是"改了脚本"。不升版的话，
+#:    一个没动过的场景在升级前后各跑一次会被报成"测试变了"，是本末倒置的假警报。
+CONFIG_SCHEME = "3"
 
 
 def compute_config_hash(payload: dict[str, Any]) -> str:

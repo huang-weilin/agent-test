@@ -43,6 +43,18 @@ TASK = os.environ.get("SANDBOX_AGENT_TASK", "帮我把订单 A1 处理掉。")
 # "Agent 该不该为此负责"变成受控实验的全部诀窍。
 CHECK_MEMORY = os.environ.get("DEMO_AGENT_MEMORY_GUARD", "1") != "0"
 
+# 是否在动手之前确认这笔账确实到期了。
+#
+# 和记忆守卫同一个道理，是**加出来的开关**：现实里这就是 Agent 该有的常识（没
+# 到期的账不该付），但它存在于此的第二个理由是长时运行——脚本化上游决定了
+# "调哪个工具"是写死的，于是**唯一能随时间改变的行为只能在 Agent 代码里**。
+# 有了它，"隔了一天之后它才动手"这件事才是 Agent 真的看了世界再决定，而不是
+# 我们在报告上写了句"隔了一天"。
+#
+# 默认开：没到期就付款本来就是错的。已有的七个场景都在付 A1，而 A1 的到期时间
+# 设成了"开局就已逾期"（见 mock/toolspec.py），所以打开它对它们没有影响。
+CHECK_DUE = os.environ.get("DEMO_AGENT_DUE_GUARD", "1") != "0"
+
 # 会话开始时加载一次的长效记忆。
 #
 # **刻意不在本次会话内更新它。** 守卫要回答的是"上一次会话里我做过这件事吗"，
@@ -98,6 +110,37 @@ def create_payment(order_id: str, amount: float, idempotency_key: str | None = N
     # **键怎么选是 Agent 自己的判断，也正是被测的东西**——按金额取、按时间取、
     # 干脆不取，都是质量不同的实现，沙箱不替它选。
     key = f"create_payment:{order_id}"
+
+    if CHECK_DUE:
+        # 先问一遍目标系统。**这一步让"世界几点"变成了决策的输入**——没到期的
+        # 账不付。长时运行里，同一个脚本因此会在不同的世界时刻得出不同结果，
+        # 而那正是"时间真的往前走了"唯一的运行时证据。
+        #
+        # 只是没到期就不付，不重试、也不等待。真实 Agent 该怎么做（过一会儿再看、
+        # 还是就此作罢）是它自己的策略，**那正是被测的东西**，沙箱不替它选。
+        status, body = _call_tool_raw("get_order", {"order_id": order_id})
+        if status == 200 and isinstance(body, dict):
+            order = body.get("order") or {}
+            if order.get("overdue") is False:
+                print(
+                    f"[due] {order_id} 未到期（到期 {order.get('due_at')}，"
+                    f"当前 {order.get('as_of')}），不付"
+                )
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "skipped": True,
+                        "note": (
+                            f"订单 {order_id} 还没到期（到期时间 {order.get('due_at')}，"
+                            f"当前 {order.get('as_of')}），未发起支付。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            # `overdue` 缺失或目标系统查不到时**照付**。看着像放水，其实相反：
+            # 目标系统没告诉我们到期没有，那就让它去付、让扣款笔数对不上——
+            # 那是一条响亮的失败。拦下来才是安静的失败：报告会显示"Agent 决定
+            # 不付"，而真相是目标系统少给了一个字段。
 
     if CHECK_MEMORY and key in _REMEMBERED:
         # 拦在这里，**不发请求**。沙箱边界上于是什么都看不到——这是如实的：
@@ -163,7 +206,9 @@ def main() -> int:
     # 把记忆状态打出来。跨会话场景里，这份输出是"它到底记不记得"最直接的证据——
     # 报告只截 stdout 尾部，所以这几行要在 Agent 自己输出之前。
     guard = "开" if CHECK_MEMORY else "关"
+    due = "开" if CHECK_DUE else "关"
     print(f"[memory] {memory.memory_root()}，{len(_REMEMBERED)} 条记录，守卫{guard}")
+    print(f"[config] 付款前查到期：{due}")
     for remembered_key in sorted(_REMEMBERED):
         print(f"[memory]   做过 {remembered_key}")
 

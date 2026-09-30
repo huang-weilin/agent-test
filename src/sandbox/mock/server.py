@@ -10,6 +10,11 @@
 "重复扣款"这个被测缺陷。场景要验证"工具有幂等保护时 Agent 是否正确使用"时，
 把它打开即可。这两种情况要的是**不同**的结论：前者是 Agent 的错，后者是 Agent
 用对了保护机制。
+
+**这个 mock 读虚拟时钟，不读墙上时间。** 长时运行里"世界过了三天"这件事，全部
+证据就是它的时间戳和它算出来的逾期标记（见 `sandbox/clock.py`）。这里的每一处
+取值都走 `clock.now()`，一处漏了就会让 Agent 看到一个自相矛盾的世界：流水说是
+三天后，工具说是刚才——而两份报告都看起来正常。
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from sandbox.clock import clock
 from sandbox.mock.toolspec import TOOL_SPECS, MockState
 
 app = FastAPI(title="sandbox mock target system", version="0.0.1")
@@ -38,6 +44,24 @@ async def healthz() -> dict[str, Any]:
         "orders": len(_state.orders),
         "charges": len(_state.charges),
         "enforce_idempotency": _state.enforce_idempotency,
+        "now": clock.now().isoformat(),
+        "virtual": clock.is_virtual,
+    }
+
+
+@app.get("/_mock/time")
+async def world_time() -> dict[str, Any]:
+    """目标系统认为现在是几点。
+
+    引擎在每段会话结束后拿它对账：世界真的往前走了吗、是不是走到了场景声明的
+    那一刻。**这个端点存在的理由是"报告里的时间必须可核对"**——没有它，长时
+    运行报告里的"三天后"就只能靠读的人相信我们。
+    """
+    return {
+        "now": clock.now().isoformat(),
+        "real_now": clock.real_now().isoformat(),
+        "offset_s": clock.offset_s(),
+        "virtual": clock.is_virtual,
     }
 
 
@@ -46,7 +70,11 @@ async def reset(enforce_idempotency: bool | None = None) -> dict[str, Any]:
     _state.reset()
     if enforce_idempotency is not None:
         _state.enforce_idempotency = enforce_idempotency
-    return {"ok": True, "enforce_idempotency": _state.enforce_idempotency}
+    return {
+        "ok": True,
+        "enforce_idempotency": _state.enforce_idempotency,
+        "now": clock.now().isoformat(),
+    }
 
 
 @app.get("/_mock/charges")
@@ -64,7 +92,8 @@ async def get_order(payload: dict[str, Any]) -> Any:
             status_code=404,
             content={"error": f"订单 {order_id!r} 不存在"},
         )
-    return {"ok": True, "order": order}
+    # 走视图而不是直接把内部字典发出去：`overdue` 是现算的派生字段。
+    return {"ok": True, "order": _state.view_of(order)}
 
 
 @app.post("/tools/create_payment")
@@ -97,6 +126,9 @@ async def create_payment(payload: dict[str, Any]) -> Any:
         "amount": amount,
         "idempotency_key": idem_key,
         "replayed": False,
+        # 虚拟时刻。长时运行的报告要能回答"这笔钱是第一天扣的还是第三天扣的"，
+        # 而那只有流水的时戳答得上来——检测结论里没有这一个维度。
+        "created_at": clock.now().isoformat(),
     }
     _state.charges.append(charge)
     if idem_key:

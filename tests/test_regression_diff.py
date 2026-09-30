@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from sandbox.cost.aggregator import CostRollup
 from sandbox.regression import diff
 
 #: 一份完整配置，五个节都在。改配置的用例在它上面改动。
@@ -57,7 +58,10 @@ def _report(
         else {"matched": [], "missing": [], "unexpected": [], "uncovered": []},
         "egress_charges": egress_charges,
         "expected_charges": expected_charges,
-        "cost": None if cost is None else {"total_usd": cost},
+        # **问运行器要形状，不手写字典。** 手写的话，夹具和被测代码会用同一个
+        # 错键，于是成本对比在真实数据上什么都不报、而测试一直是绿的——这个
+        # 坑已经踩过一次（代码读 `total_usd`，运行器写 `cost_usd`）。
+        "cost": None if cost is None else CostRollup(cost_usd=cost).to_dict(),
     }
 
 
@@ -486,6 +490,50 @@ def test_cost_differences_are_listed_but_do_not_drive_the_outcome() -> None:
     assert diff.KIND_COST in _kinds(result)
     assert result.outcome == diff.SAME
     assert result.counts
+
+
+def test_the_cost_comparison_reads_the_key_the_runner_actually_writes() -> None:
+    """**形状从生产者那里要，不手写。**
+
+    这一条是补的：原来的成本对比读的是 `total_usd`，而运行器写的是
+    `cost_usd`——真实数据上这个对比从来没报过任何东西。三条测试全是绿的，
+    因为夹具照着同一个错键造、代码照着同一个错键读，**两边一致地错**。
+
+    所以这里不问测试自己（那样只会再骗一次），而是问 `CostRollup.to_dict()`
+    ——运行器真正写进 `report_json` 的那个形状。它红了只可能是一个原因：
+    读的键和写的键又不是同一个了。
+    """
+    cheap = CostRollup(llm_calls=1, cost_usd=0.01).to_dict()
+    dear = CostRollup(llm_calls=3, cost_usd=0.02).to_dict()
+
+    before = _report()
+    before["cost"] = cheap
+    after = _report()
+    after["cost"] = dear
+
+    result = diff.compare(_snap(), _snap(run_id="run-b", report=after))
+    cost = _find(result, diff.KIND_COST)
+    assert cost, "运行器写的那个键读不到，成本对比就是一段不报数的死代码"
+    assert cost[0].before == "$0.0100"
+    assert cost[0].after == "$0.0200"
+
+
+def test_a_lower_bound_is_not_shown_as_a_precise_number() -> None:
+    """未定价的调用让金额少算了一部分，报告不能把它印成一个精确值。
+
+    这个项目对"下界被读成账单"的警惕写在 `docs/cost.md` 里；回归对比页是
+    成本出现的第四个地方，同样要守。
+    """
+    before = _report()
+    before["cost"] = CostRollup(llm_calls=1, cost_usd=0.01).to_dict()
+    after = _report()
+    after["cost"] = CostRollup(llm_calls=1, cost_usd=0.01, unpriced_calls=1).to_dict()
+    after["cost"] = {**after["cost"], "cost_usd": 0.02}
+
+    cost = _find(diff.compare(_snap(), _snap(run_id="run-b", report=after)), diff.KIND_COST)
+    assert cost
+    assert "下界" in cost[0].after
+    assert "下界" not in cost[0].before
 
 
 def test_a_run_that_crashed_shows_the_error_not_just_a_red_verdict() -> None:

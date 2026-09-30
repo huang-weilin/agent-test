@@ -93,6 +93,76 @@
   </div>
 </section>
 
+{% if report.clock %}
+{# 长时运行专属。**两个数必须并列**：只写"模拟跨度 1.2 天"的话，读的人会以为
+   跑一次要一天。这两行是这一整个特性的核心陈述。 #}
+<h2>世界时间</h2>
+<section class="panel">
+  <p>
+    这次是<strong>长时运行</strong>：两段会话之间，<strong>世界</strong>过去了一段时间，
+    而真实等待是零。被测 Agent 从头到尾没有被加速——它两次醒来时看到的
+    <em>世界</em>不同（订单逾期没有、上一次扣款是什么时候），那才是"过了多久"的
+    全部证据，而那些都在边界上。
+  </p>
+  <table class="grid">
+    <tbody>
+      <tr>
+        <th class="nowrap">模拟跨度</th>
+        <td>{{ report.clock.virtual_elapsed_s | span }}（世界自己的时间）</td>
+      </tr>
+      <tr>
+        <th class="nowrap">真实耗时</th>
+        <td>
+          {{ '%.1f' % report.clock.real_elapsed_s }} 秒
+          {% if report.clock.speed %}
+          <span class="dim">（约 {{ '%.0f' % report.clock.speed }} 倍）</span>
+          {% endif %}
+          <div class="note">这台机器上真正花掉的时间。**它和上面那个数不是一回事**，
+          所以两个都要印。</div>
+        </td>
+      </tr>
+      <tr>
+        <th class="nowrap">世界从</th>
+        <td class="nowrap">
+          <code>{{ report.clock.started_at | localdt }}</code>
+          →
+          <code>{{ report.clock.ended_at | localdt }}</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  {% set mismatched = report.sessions | rejectattr('clock_matched') | list %}
+  {% if mismatched %}
+  <div class="panel bad">
+    <strong>时钟对不上，这次长时运行的前提没成立。</strong>
+    场景声明世界走了一段，而引擎实际走的是另一个数——下面这些会话看到的世界
+    <em>不是</em>场景描述的那个世界。
+    <ul>
+      {% for s in mismatched %}
+      <li>
+        会话 {{ s.ordinal }} {{ s.name }}：
+        声明 {{ s.declared_offset_s | span }} · 实际 {{ s.observed_offset_s | span }}
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="note">
+      <strong>这是加速器的自检，不是对被测对象的判断。</strong>
+      加速器坏掉之后世界停在原地，检测器照样给出一份看起来正常的报告，读的人会以为
+      "Agent 隔了一天还是这么干"——实际上什么都没测到。
+    </p>
+  </div>
+  {% endif %}
+
+  <p class="note">
+    <strong>Agent 进程内的定时器不受这个时钟影响。</strong>
+    它自己的 sleep、cron 走的仍是真实时间，我们拦不到，也不假装拦得到——
+    云端常驻 Agent 的进程测试者拿不到（ADR 001）。所以一个内部按真实时间排程的
+    Agent，在这里的表现与它在生产上被定时器叫醒时并不相同。
+  </p>
+</section>
+{% endif %}
+
 <h2>会话</h2>
 <table class="grid">
   <thead>
@@ -107,6 +177,17 @@
       <td>{{ s.ordinal }}</td>
       <td>
         {{ s.name }}
+        {% if s.after_gap_s %}
+        <div class="note">
+          距上一段过了 <strong>{{ s.after_gap_s | span }}</strong>
+          {% if s.virtual_started_at %}
+          · 世界此时 <code>{{ s.virtual_started_at | localdt }}</code>
+          {% endif %}
+          {% if not s.clock_matched %}
+          <span class="bad">· 时钟对不上（实际 {{ s.observed_offset_s | span }}）</span>
+          {% endif %}
+        </div>
+        {% endif %}
         {% if s.restored_from %}<div class="note">恢复到 <code>{{ s.restored_from }}</code></div>{% endif %}
         {% if s.timed_out %}<div class="note bad">超时强杀</div>{% endif %}
         {% if s.killed %}<div class="note">已被熔断<div class="dim">{{ s.kill_reason }}</div></div>{% endif %}

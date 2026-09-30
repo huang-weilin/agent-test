@@ -1,6 +1,6 @@
 """给人看的数字格式。
 
-成本与 token 要出现在三个地方：场景报告（`scenario/runner.py`）、跨运行报告
+成本、token、时长要出现在三个地方：场景报告（`scenario/runner.py`）、跨运行报告
 （`scripts/cost_report.py`）、Web 界面（`api/`）。三处各写一份的后果不是难看，
 是**三份会慢慢不一致**——同一个 $0.0001，一处显示 `0.0001`、另一处显示 `0.00`，
 而用户分不清哪个是"真的花了这么多"、哪个是"显示精度不够"。在一个专门用来
@@ -30,3 +30,21 @@ def money(usd: float) -> str:
 def tokens(n: int) -> str:
     """千分位。`1234567` 和 `1,234,567` 读起来不是一回事。"""
     return f"{n:,}"
+
+
+def span_human(seconds: float) -> str:
+    """秒数 → 人读的时长。
+
+    **不四舍五入成"0 天"。** 90000 秒印成"1 天"没错，但 3600 秒印成"0 天"就是
+    在说"没过去多久"——而它是一小时。长时运行报告里最不能出的错就是这个：
+    数字没错，读出来的意思反了。
+
+    所以按量级换单位，而不是固定一个单位硬除。
+    """
+    if seconds < 60:
+        return f"{seconds:.0f} 秒"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f} 分钟"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f} 小时"
+    return f"{seconds / 86400:.1f} 天"

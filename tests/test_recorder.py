@@ -65,7 +65,7 @@ async def test_start_run_records_scheme_and_original_parts(temp_db: str) -> None
     ctx = await _make_run()
     async with session_scope() as db_:
         run = await db_.get(TestRun, ctx.run_id)
-        assert run.config_scheme == "2"
+        assert run.config_scheme == "3"
         # 存的是**原值**，不是"给值算个哈希"——差异报告要引用它说出改了什么。
         assert json.loads(run.config_parts_json) == {
             "prompt": "v1",

@@ -499,16 +499,32 @@ def _compare_cost(baseline: Snapshot, current: Snapshot) -> list[Difference]:
     花了多少钱是事实陈述。成本变了不构成"行为回归"——把它算进判定，会让
     一个完全正常的运行因为多调了一次模型而变红。
     """
-    b = (baseline.report or {}).get("cost") or {}
-    c = (current.report or {}).get("cost") or {}
-    b_usd, c_usd = b.get("total_usd"), c.get("total_usd")
-    if b_usd is None and c_usd is None:
+    b = _cost_cell((baseline.report or {}).get("cost") or {})
+    c = _cost_cell((current.report or {}).get("cost") or {})
+    if b is None and c is None:
         return []
-    if b_usd == c_usd:
+    if b == c:
         return []
-    return [
-        Difference(KIND_COST, "成本", f"${_money(b_usd)}", f"${_money(c_usd)}")
-    ]
+    return [Difference(KIND_COST, "成本", b or "未记录", c or "未记录")]
+
+
+def _cost_cell(cost: dict[str, Any]) -> str | None:
+    """报告里的一段成本 → 给人看的一格。**没有就是没有**，不补 0。
+
+    读的键是 `cost_usd`，因为那是 `CostRollup.to_dict()` 写出来的键。**这里
+    原来读的是 `total_usd`，而运行器从来不写那个键**——于是成本对比在真实
+    数据上永远返回"没有差异"，测试却是绿的：夹具照着同一个错键造，代码照着
+    同一个错键读，两边一致地错。所以这个函数现在只认运行器真正写的东西，
+    `tests/test_regression_diff.py` 里那条测试也改成问 `CostRollup` 要形状，
+    不再手写字典。
+
+    下界要标出来。未定价的调用让金额少算了一部分，"$0.0000 → $0.0100" 这样
+    一行读起来像是有两位有效精度，而左边那个其实什么也没说明。
+    """
+    if "cost_usd" not in cost:
+        return None
+    text = f"${_money(cost['cost_usd'])}"
+    return f"{text}（下界）" if cost.get("cost_is_lower_bound") else text
 
 
 def _money(value: Any) -> str:
