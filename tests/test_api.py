@@ -993,6 +993,127 @@ async def test_a_single_session_report_gets_no_diff_panel(
     assert '这里不写"两段一样"' not in resp.text
 
 
+def _chain_report(*, call_chain: dict | None) -> dict:
+    """一次带调用链的报告快照。`call_chain=None` 显式写成没有链可看。"""
+    report = _long_run_report()
+    report["call_chain"] = call_chain
+    return report
+
+
+def _chain_payload() -> dict:
+    """真跑一遍 `build_chain`，用它的输出当快照。
+
+    手写一份 dict 的话，模板读的字段名和真实报告里的字段名可以悄悄对不上，
+    而页面看起来照常渲染——只是某几列永远是空的。
+    """
+    from sandbox.scenario.call_chain import build_chain
+    from sandbox.scenario.session_diff import SessionSide
+
+    calls = [
+        _fake_call(1, "get_order", {"order_id": "NOPE"}, ordinal=0),
+        _fake_call(2, "get_order", {"order_id": "NOPE"}, ordinal=0),
+        _fake_call(3, "get_order", {"order_id": "A1"}, ordinal=0),
+        _fake_call(4, "create_payment", {"order_id": "A1", "amount": 599.0}, ordinal=0),
+    ]
+    # 前两次是目标系统的错，后一次是**我们**拦的——链上要分得开。
+    calls[0] = _replace_status(calls[0], status="error")
+    calls[1] = _replace_status(calls[1], status="error")
+    calls[3] = _replace_status(calls[3], blocked=True)
+    return build_chain(calls, [SessionSide(ordinal=0, name="目标系统报错之后")]).to_dict()
+
+
+def _replace_status(call, *, status: str = "ok", blocked: bool = False):
+    from dataclasses import replace
+
+    return replace(call, status=status, blocked_by_proxy=blocked)
+
+
+def _chain_panel(text: str) -> str:
+    """切出调用链那一节。切到下一个 `<h2>` 为止，免得断言命中别的栏目。"""
+    assert "<h2>调用链</h2>" in text
+    return text.split("<h2>调用链</h2>")[1].split("<h2>跨会话差异</h2>")[0]
+
+
+async def test_the_call_chain_panel_shows_the_order_and_what_followed(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """链要按发生顺序列出每一次调用，并说清失败之后**紧接着**是什么。
+
+    编号用的是"这一段的第几次调用"，不是运行序号——运行序号和 LLM 调用共用
+    同一个计数器，中间夹了别的就会跳号，而跳号会被读成"中间有几次没显示出来"。
+    """
+    await _seed_diff_run(db, "run-chain", _chain_report(call_chain=_chain_payload()))
+
+    resp = await client.get("/runs/run-chain")
+    assert resp.status_code == 200
+    panel = _chain_panel(resp.text)
+    assert "会话 #0 · 目标系统报错之后" in panel
+    assert "4 次工具调用" in panel and "2 次没成功" in panel
+    # 顺序是链的全部：位置、工具、边界上记下的那一项都要在。
+    assert "第 1 次" in panel and "第 4 次" in panel
+    assert "get_order(order_id=" in panel
+    assert "目标系统回了错" in panel
+    # 紧接着发生的事：先是一次原样的，然后换了参数。
+    assert "紧接着" in panel
+    assert "又是同一个调用" in panel
+    assert "还是 get_order，参数变了" in panel
+
+
+async def test_the_call_chain_panel_does_not_blame_the_agent_for_our_own_block(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """被沙箱拦下的那一次，链上要说成"我们动的手"，且不计进它失败的次数。
+
+    混在一起等于替被测对象背锅：它会读成"它有一次调用没成功"。
+    """
+    await _seed_diff_run(db, "run-chain-2", _chain_report(call_chain=_chain_payload()))
+
+    panel = _chain_panel((await client.get("/runs/run-chain-2")).text)
+    # 计数：4 次里只有 2 次算它没成功，被拦的那次不算。
+    assert "2 次没成功" in panel and "1 次是沙箱拦下或重放的" in panel
+    assert "被沙箱的出口策略拦下（这不是它的失败）" in panel
+
+
+async def test_the_call_chain_panel_says_it_is_not_a_verdict(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    await _seed_diff_run(db, "run-chain-3", _chain_report(call_chain=_chain_payload()))
+
+    text = (await client.get("/runs/run-chain-3")).text
+    assert "陈述，不是判定" in text
+    assert "目标系统回了个错不等于被测对象做错了事" in text
+    # **顺序不是因果**：这句话不写，链上那句"紧接着又是一次同样的调用"会被读成
+    # "它在重试"——那是我们替 Agent 下的结论，而且是错的那一半。
+    assert "写的是<strong>顺序</strong>，不是因果" in text
+
+
+async def test_a_legacy_report_does_not_claim_nothing_failed(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """旧格式报告没有这一栏，页面要说"没记录"，不能说"没有出错"。
+
+    `_long_run_report` 是这一栏存在之前的格式：它有会话、但没有 `call_chain` 键。
+    """
+    report = _long_run_report()
+    assert "call_chain" not in report
+    await _seed_diff_run(db, "run-chain-legacy", report)
+
+    text = (await client.get("/runs/run-chain-legacy")).text
+    assert '这里不写"没有出错"' in text
+    assert "<h2>调用链</h2>" not in text
+
+
+async def test_a_run_that_never_reached_a_session_gets_no_chain(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """一段会话都没走到时，链是 null——那是"没有链"，不是"链是干净的"。"""
+    await _seed_diff_run(db, "run-chain-none", _chain_report(call_chain=None))
+
+    text = (await client.get("/runs/run-chain-none")).text
+    assert "没有调用链可看" in text
+    assert "<h2>调用链</h2>" not in text
+
+
 # --- JSON 接口 ----------------------------------------------------------------
 
 

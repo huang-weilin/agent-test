@@ -68,7 +68,7 @@ from sandbox.memory.observe import (
     summarize_observations,
 )
 from sandbox.memory.snapshot import SnapshotRef, SnapshotStore
-from sandbox.scenario import identity, session_diff
+from sandbox.scenario import call_chain, identity, session_diff
 from sandbox.scenario.expect import ExpectResult, evaluate
 from sandbox.scenario.spec import Scenario
 from sandbox.trace.reader import load_session_sequence
@@ -275,6 +275,10 @@ class ScenarioResult:
     # 只有一段会话，没有可对照的对象。**同样是陈述不是判定**：它不进 findings、
     # 不影响 ok——同一个场景的两段会话本来就允许不一样。
     session_diff: session_diff.SessionDiff | None = None
+    # 调用链（需求 3.2 P1，见 scenario/call_chain.py）。None = 这次运行一段会话
+    # 都没有。同样是**陈述不是判定**：目标系统回了个错不等于被测对象做错了事，
+    # 所以它也不进 findings、不影响 ok。
+    call_chain: call_chain.CallChain | None = None
     error: str | None = None
 
     @property
@@ -323,6 +327,7 @@ class ScenarioResult:
             "autonomy": self.autonomy.to_dict() if self.autonomy else None,
             "memory": self.memory,
             "session_diff": self.session_diff.to_dict() if self.session_diff else None,
+            "call_chain": self.call_chain.to_dict() if self.call_chain else None,
             "cost": self.cost.to_dict() if self.cost else None,
             "session_costs": {str(k): v.to_dict() for k, v in sorted(self.session_costs.items())},
             "budget": [
@@ -722,12 +727,13 @@ class ScenarioRunner:
             outcome.tool_calls = per_ordinal.get(outcome.ordinal, 0)
 
         result.memory = summarize_observations(observations)
-        # 跨会话差异。放在这里而不是更早：它要的是**会话序列**上的全部调用，
-        # 以及每段会话的前提是否成立——两者到这一步才齐。它是陈述不是判定，
-        # 所以既不进 `findings` 也不进 `ok`。
-        result.session_diff = session_diff.compare_sessions(
-            calls, [session_diff.SessionSide.of(s) for s in result.sessions]
-        )
+        # 调用链与跨会话差异。放在这里而不是更早：两者要的都是**会话序列**上的
+        # 全部调用，以及每段会话的前提是否成立——到这一步才齐。两者都是陈述
+        # 不是判定，所以既不进 `findings` 也不进 `ok`。会话侧视图构造一次、
+        # 两个模块共用，免得同一段会话在两个地方被读成两套样子。
+        sides = [session_diff.SessionSide.of(s) for s in result.sessions]
+        result.call_chain = call_chain.build_chain(calls, sides)
+        result.session_diff = session_diff.compare_sessions(calls, sides)
         result.findings = _run_detectors(scenario, calls, observations)
         result.expectation = evaluate(scenario, result.findings)
         result.summary = summarize_verdicts(result.findings)
@@ -923,6 +929,33 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
         elif not s.premise_held:
             consumed += "   这一段没跑完，前提未成立 "
         add(consumed)
+
+    # 调用链紧跟在会话表后面：会话表说"这一段跑了多久、调了几次"，链说"那几次
+    # 是按什么顺序发生的、哪几次没成功"。两者都是**看**的结果，判定在下面。
+    if result.call_chain is not None:
+        ch = result.call_chain
+        add("\n--- 调用链（每段会话里，调用按发生顺序）---")
+        for chain in ch.chains:
+            add(f"  {chain.headline}")
+            for node in chain.nodes:
+                add(f"     {node.line()}")
+            if not chain.premise_held:
+                add(
+                    "     注意：这一段的前提没成立（理由见上面「会话」一节），"
+                    "下面这个顺序不指向被测对象的行为。"
+                )
+            for step in chain.steps:
+                add(f"     > {step.sentence()}")
+            if chain.omitted_steps:
+                add(
+                    f"     还有 {chain.omitted_steps} 种没成功的调用没列出来"
+                    f"（每段会话最多列 {ch.step_limit} 种）。"
+                )
+        add(
+            "  这一节是陈述，不是判定：目标系统回了个错不等于被测对象做错了事，所以\n"
+            "     它既不进检测结论，也不影响通过与否。写的是顺序、不是因果——「紧接着又\n"
+            "     是一次同样的调用」是边界上看见的，「它在重试」是读的人下的结论。"
+        )
 
     if result.clock is not None:
         # 两个时间并列给。只给虚拟时间，读的人会以为跑一次要三天；只给真实

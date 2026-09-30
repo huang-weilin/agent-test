@@ -1,13 +1,24 @@
-"""给人看的数字格式。
+"""给人看的数字与参数格式。
 
 成本、token、时长要出现在三个地方：场景报告（`scenario/runner.py`）、跨运行报告
 （`scripts/cost_report.py`）、Web 界面（`api/`）。三处各写一份的后果不是难看，
 是**三份会慢慢不一致**——同一个 $0.0001，一处显示 `0.0001`、另一处显示 `0.00`，
 而用户分不清哪个是"真的花了这么多"、哪个是"显示精度不够"。在一个专门用来
 抓"看起来正常但其实不对"的工具里，这种歧义不能留。
+
+调用参数的紧凑写法（`args_text` / `value_text`）同理：跨会话差异报告与调用链
+两处都要印参数，两处各截各的会让同一份报告里同一次调用看起来是两个样子。
 """
 
 from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from typing import Any
+
+#: 单个参数值印出来的上限。超过就截断并带上省略号——**截断必须自己说出来**，
+#: 否则"参数里少了个字段"和"参数太长没印全"在报告上是同一个样子。
+MAX_VALUE_CHARS = 40
 
 
 def money(usd: float) -> str:
@@ -48,3 +59,26 @@ def span_human(seconds: float) -> str:
     if seconds < 86400:
         return f"{seconds / 3600:.1f} 小时"
     return f"{seconds / 86400:.1f} 天"
+
+
+def value_text(value: Any) -> str:
+    """一个参数值的写法。超长就截断，并带上省略号。"""
+    text = json.dumps(value, ensure_ascii=False, default=str)
+    if len(text) <= MAX_VALUE_CHARS:
+        return text
+    return text[:MAX_VALUE_CHARS] + "…"
+
+
+def args_text(args: Mapping[str, Any]) -> str:
+    """参数的紧凑写法：字段名排序，最多印 4 个，多出来的报个数。
+
+    **排序**：参数在字典里的顺序取决于调用方怎么构造的，直接印会让同一次调用
+    在两条时间线上看起来不一样。**少印的要报个数**：只印 4 个而不说还有几个，
+    读者会把"没印"当成"没传"。
+    """
+    keys = sorted(args)
+    shown = keys[:4]
+    body = "，".join(f"{k}={value_text(args[k])}" for k in shown)
+    if len(keys) > len(shown):
+        body += f"，还有 {len(keys) - len(shown)} 个字段"
+    return body or "（无参数）"

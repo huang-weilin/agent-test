@@ -34,13 +34,12 @@
 """
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from sandbox.detectors.base import CallView
-from sandbox.formatting import span_human
+from sandbox.formatting import args_text, span_human, value_text
 
 #: 差异的种类。**都是差异**——"一模一样"的那些不在这里列，只在计数里体现。
 KIND_ONLY_BASE = "only_base"
@@ -73,9 +72,6 @@ MAX_ITEMS = 12
 
 #: 单条差异里最多展开几处字段变化。
 MAX_CHANGES = 4
-
-#: 参数值印多长。超了带省略号，免得一个长 base64 把整行撑爆。
-MAX_VALUE_CHARS = 40
 
 
 @dataclass(frozen=True)
@@ -453,8 +449,8 @@ def _items(
                     tool=tool,
                     base_ordinal=base.ordinal,
                     other_ordinal=other.ordinal,
-                    base_text=_args_text(mine[0]),
-                    other_text=_args_text(theirs[0]),
+                    base_text=args_text(mine[0].args),
+                    other_text=args_text(theirs[0].args),
                     changes=tuple(
                         _arg_changes(mine[0], theirs[0], base.ordinal, other.ordinal)
                     ),
@@ -468,7 +464,7 @@ def _items(
                     tool=tool,
                     base_ordinal=base.ordinal,
                     other_ordinal=other.ordinal,
-                    base_text=f"{_count_text([call])}，参数 {_args_text(call)}",
+                    base_text=f"{_count_text([call])}，参数 {args_text(call.args)}",
                     other_text="没有",
                 )
             )
@@ -480,7 +476,7 @@ def _items(
                     base_ordinal=base.ordinal,
                     other_ordinal=other.ordinal,
                     base_text="没有",
-                    other_text=f"{_count_text([call])}，参数 {_args_text(call)}",
+                    other_text=f"{_count_text([call])}，参数 {args_text(call.args)}",
                 )
             )
 
@@ -513,23 +509,6 @@ def _count_text(calls: list[CallView]) -> str:
     return f"{len(calls)} 次{extra}（{seqs}{more}）"
 
 
-def _args_text(call: CallView) -> str:
-    """参数的紧凑写法。字段多了就截断，并说出还有几个没印。"""
-    keys = sorted(call.args)
-    shown = keys[:4]
-    body = "，".join(f"{k}={_value_text(call.args[k])}" for k in shown)
-    if len(keys) > len(shown):
-        body += f"，还有 {len(keys) - len(shown)} 个字段"
-    return body or "（无参数）"
-
-
-def _value_text(value: Any) -> str:
-    text = json.dumps(value, ensure_ascii=False, default=str)
-    if len(text) <= MAX_VALUE_CHARS:
-        return text
-    return text[:MAX_VALUE_CHARS] + "…"
-
-
 def _arg_changes(
     mine: CallView, theirs: CallView, base_ordinal: int, other_ordinal: int
 ) -> list[str]:
@@ -539,15 +518,15 @@ def _arg_changes(
         in_mine, in_theirs = key in mine.args, key in theirs.args
         if in_mine and not in_theirs:
             out.append(
-                f"{key} 只有会话 #{base_ordinal} 传了（{_value_text(mine.args[key])}）"
+                f"{key} 只有会话 #{base_ordinal} 传了（{value_text(mine.args[key])}）"
             )
         elif in_theirs and not in_mine:
             out.append(
-                f"{key} 只有会话 #{other_ordinal} 传了（{_value_text(theirs.args[key])}）"
+                f"{key} 只有会话 #{other_ordinal} 传了（{value_text(theirs.args[key])}）"
             )
         elif mine.args[key] != theirs.args[key]:
             out.append(
-                f"{key}：{_value_text(mine.args[key])} 变 {_value_text(theirs.args[key])}"
+                f"{key}：{value_text(mine.args[key])} 变 {value_text(theirs.args[key])}"
             )
     if len(out) > MAX_CHANGES:
         extra = len(out) - MAX_CHANGES

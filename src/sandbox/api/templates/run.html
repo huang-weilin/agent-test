@@ -264,6 +264,73 @@
   确实发生了。不豁免的话，一个完美触发的循环场景会被报成"没测到"。
 </p>
 
+{# 调用链。三种情况分开：有链 → 渲染；键不存在（这份报告是在这个面板之前跑的）
+   → 明说没记录，而不是留白；键是 null（这次运行一段会话都没走到）→ 说清没有链。
+   留白最危险：它读起来和"跑过了，没有一次不成功"一模一样。 #}
+{% if report and report.call_chain %}
+<h2>调用链</h2>
+{% for chain in report.call_chain.chains %}
+<h3>会话 #{{ chain.ordinal }}{% if chain.name %} · {{ chain.name }}{% endif %}</h3>
+<p class="note">{{ chain.headline }}</p>
+{% if chain.nodes %}
+<table class="grid">
+  <thead>
+    <tr><th>#</th><th>调用</th><th>边界上记下的</th></tr>
+  </thead>
+  <tbody>
+  {% for node in chain.nodes %}
+    <tr>
+      <td class="nowrap {% if node.mark == 'target_error' or node.mark == 'invalid_args' or node.mark == 'undeclared_tool' %}bad{% else %}dim{% endif %}">
+        {{ node.glyph }} {{ node.position }}
+      </td>
+      <td>
+        <code>{{ node.tool }}({{ node.args_text }})</code>
+        {% if node.is_write %}<span class="badge fail">写</span>{% endif %}
+      </td>
+      <td>{% if node.mark_text %}{{ node.mark_text }}{% else %}<span class="dim">成功</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% if chain.steps %}
+<p class="note">没成功的那些，以及<strong>紧接着</strong>它们发生的事：</p>
+<ul class="note">
+  {% for step in chain.steps %}<li>{{ step.sentence }}</li>{% endfor %}
+</ul>
+{% endif %}
+{% if chain.omitted_steps %}
+<p class="dim">
+  还有 {{ chain.omitted_steps }} 种没成功的调用没列出来——这份报告是按每段会话最多
+  {{ report.call_chain.step_limit }} 种截的。
+</p>
+{% endif %}
+{% if not chain.premise_held %}
+<p class="bad">
+  这一段的前提没成立（理由见上面的「会话」一节），
+  所以上面的顺序<strong>不指向被测对象的行为</strong>。
+</p>
+{% endif %}
+{% endfor %}
+<p class="note">
+  <strong>这一节是陈述，不是判定。</strong>目标系统回了个错不等于被测对象做错了事，所以它
+  不进"检测结论"，也不影响这次运行通过与否。<strong>谁的错分开写</strong>：目标系统回的错、
+  参数不合规被拒、工具没声明，是它自己的；被沙箱出口策略拦下、快照恢复时的重放，
+  是<strong>我们</strong>动的手——混在一起等于替被测对象背锅。
+  <br>
+  写的是<strong>顺序</strong>，不是因果：「紧接着又是一次同样的调用」是边界上看见的，
+  「它在重试」是读的人下的结论。具体的 HTTP 状态码没有存下来（<code>CallView</code> 里
+  只有成功/失败），要查得去目标系统那一侧。
+</p>
+{% elif report.call_chain is undefined %}
+<p class="dim">
+  这份报告里没有调用链这一栏——它是在这个面板存在之前跑的。
+  <strong>这里不写"没有出错"</strong>：没记录不是没问题，是没记录。
+</p>
+{% elif report %}
+<p class="dim">这次运行一段会话都没走到，没有调用链可看。</p>
+{% endif %}
+
 {% if report and report.session_diff %}
 <h2>跨会话差异</h2>
 {% for note in report.session_diff.notes %}
