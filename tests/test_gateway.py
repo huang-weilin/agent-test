@@ -210,3 +210,80 @@ async def test_stub_returns_openai_compatible_shape(client) -> None:
     assert call["function"]["name"] == "create_payment"
     # OpenAI 的 arguments 是 JSON 字符串而不是对象，这点错了客户端会炸
     assert isinstance(call["function"]["arguments"], str)
+
+
+# --- 写工具的声明：空表和"没给"是两件事 ----------------------------------------
+
+
+async def test_an_empty_declaration_is_kept_as_an_empty_declaration(client) -> None:
+    """**空表说的是"这个场景没有写操作"，不是"我不知道"。**
+
+    折叠成"没给"之后，场景作者的一句声明被换成了一次按工具名的猜测——而写判定
+    直接决定幂等/重复扣款检测的触发范围，猜反的代价是漏报一整类缺陷。
+    """
+    created = await _register(client, declared_writes=[])
+    assert runs.get(created["run_id"]).ctx.declared_writes == set()
+
+
+async def test_no_declaration_at_all_stays_unknown(client) -> None:
+    """反面：字段不在（或为 null）= 真的不知道，这才轮到启发式兜底。"""
+    created = await _register(client, declared_writes=None)
+    assert runs.get(created["run_id"]).ctx.declared_writes is None
+
+    # 字段干脆不传，同一种意思
+    resp = await client.post(
+        "/_sandbox/runs", json={"scenario_id": "x", "agent_version": "v"}
+    )
+    assert runs.get(resp.json()["run_id"]).ctx.declared_writes is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "create_payment",  # 字符串：set() 会把它拆成一堆单字符，等于一条都没声明
+        {"create_payment": True},  # 字典
+        [1, 2],  # 元素不是字符串
+        [None],
+    ],
+)
+async def test_a_malformed_declaration_is_refused_not_silently_dropped(
+    client, bad
+) -> None:
+    """写错的声明**必须在开跑前退回**，不能静默降级成"没声明"。
+
+    静默降级的形态最坏：整张声明表看起来生效了、实际从没匹配上，报告上什么都不显示。
+    """
+    resp = await client.post(
+        "/_sandbox/runs",
+        json={"scenario_id": "x", "agent_version": "v", "declared_writes": bad},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "bad_declared_writes"
+    assert runs.active_ids() == [], "退回的运行不许留在注册表里"
+
+
+async def test_a_scenario_that_declares_no_tools_does_not_inherit_the_builtin_table(
+    client,
+) -> None:
+    """同一族的另一处：**空工具表也不能回落到内置那张。**
+
+    一个声明了"这个场景没有工具"的场景，如果拿到内置的 mock 工具表，Agent 调一个
+    它压根没被声明过的工具会被**转发出去**——本该报 `tool_scope` 失败并在边界上
+    拦下，实际是钱真的动了，而报告看起来正常。
+
+    没给这个字段（手工 curl 那条路）仍然回落，那是这张表存在的理由。
+    """
+    resp = await client.post(
+        "/_sandbox/runs",
+        json={"scenario_id": "x", "agent_version": "v", "tools": {}, "tool_schemas": {}},
+    )
+    active = runs.get(resp.json()["run_id"])
+
+    assert active.tools == {}, "空工具表被换成了内置那张——Agent 能调到没声明的工具"
+
+    # 反面：字段不在，才轮到内置兜底
+    resp = await client.post(
+        "/_sandbox/runs", json={"scenario_id": "x", "agent_version": "v"}
+    )
+    assert "create_payment" in runs.get(resp.json()["run_id"]).tools, "手工路径的兜底没了"

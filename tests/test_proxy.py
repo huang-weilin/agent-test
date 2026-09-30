@@ -482,3 +482,104 @@ async def test_redirects_are_not_followed(gw_client, px_client) -> None:
 async def test_tool_call_without_a_run_is_rejected(px_client) -> None:
     resp = await px_client.post("/tools/get_order", json={"order_id": "A1"})
     assert resp.status_code == 401
+
+
+# --- "这一次是不是写"：两个出口必须说同一句话 ----------------------------------
+#
+# 这个判定有两个出口：落库的 `ToolCall.is_write` 和回给 Agent 的
+# `X-Sandbox-Is-Write` 头。判据必须是**同一处**——两边各写各的，总有一天会不一致，
+# 而那时报告会显示"这是个读操作"却同时报出一条重复扣款。这条规矩写在
+# `proxy/app.py` 的注释里，下面这几条是把它变成会红的东西。
+
+
+async def test_a_run_that_declares_no_writes_still_answers(gw_client, px_client, db) -> None:
+    """**只读场景**（一个写工具都不声明）里的调用不能把代理打崩。
+
+    声明是空表时，落库那条路走的是启发式兜底，而回头那条路直接对着声明做
+    `in`——空表变成 `None` 之后那是一个 `TypeError`。它发生在**扣款之后、调用已经
+    被记成 ok 之后**：Agent 拿到 500，以为调用失败了，重试，于是真的重复扣款。
+    而报告上那两次调用都是"成功"的。
+
+    13 个场景每一个都至少声明了一个写工具，所以这条一直没被跑到。
+    """
+    created = await _register(gw_client, declared_writes=[])
+    charges: list[dict] = []
+    proxy_app.set_transport(_mock_backend(charges))
+
+    resp = await px_client.post(
+        "/tools/get_order",
+        json={"order_id": "A1"},
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+
+    assert resp.status_code == 200, f"只读场景里的调用把代理打崩了：{resp.text}"
+    assert len(charges) == 0, "查订单不该产生扣款"
+
+
+async def test_a_run_that_declares_nothing_still_answers(gw_client, px_client) -> None:
+    """反面：**根本没有声明**（手工 curl 那条明确支持的路）也要能跑。
+
+    这一条和上一条是两种不同的情况，只是它们的坏法一样。
+    """
+    created = await _register(gw_client, declared_writes=None)
+    proxy_app.set_transport(_mock_backend([]))
+
+    resp = await px_client.post(
+        "/tools/get_order",
+        json={"order_id": "A1"},
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+
+    assert resp.status_code == 200, f"没有声明写工具的运行把代理打崩了：{resp.text}"
+
+
+@pytest.mark.parametrize(
+    ("declared", "tool", "args"),
+    [
+        (["create_payment"], "create_payment", {"order_id": "A1", "amount": 1}),
+        (["create_payment"], "get_order", {"order_id": "A1"}),
+        ([], "get_order", {"order_id": "A1"}),  # 声明了"没有写工具"
+        ([], "create_payment", {"order_id": "A1", "amount": 1}),  # 声明没有，名字却像写
+        (None, "create_payment", {"order_id": "A1", "amount": 1}),  # 没声明，必须偏向写
+        (None, "get_order", {"order_id": "A1"}),  # 没声明，名字是读
+    ],
+)
+async def test_the_header_and_the_record_say_the_same_thing(
+    gw_client, px_client, db, declared, tool, args
+) -> None:
+    """两个出口对同一次调用必须给出同一个答案。
+
+    参数化是刻意的：`[]` 和 `None` 是**两件不同的事**，而它们此前被折叠成了同一件
+    ——空声明被当成"没声明"，于是场景作者写下"这里没有写操作"，沙箱转头拿名字去猜，
+    还可能猜反。判据是"两个出口一不一致"，所以六种组合一视同仁地拉进来比。
+
+    参数按工具各写各的：schema 默认拒绝多传的字段，一份通用参数会在校验那一关
+    就被拦下，测的就不是这一条了。
+    """
+    created = await _register(gw_client, declared_writes=declared)
+    proxy_app.set_transport(_mock_backend([]))
+
+    resp = await px_client.post(
+        f"/tools/{tool}",
+        json=args,
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    call = (await db.execute(select(ToolCall))).scalar_one()
+    assert resp.headers["X-Sandbox-Is-Write"] == ("1" if call.is_write else "0"), (
+        f"声明 {declared!r}、调用 {tool!r}：回给 Agent 的头说"
+        f"{resp.headers['X-Sandbox-Is-Write']}，落库说 {call.is_write}"
+    )
+
+
+def test_an_empty_declaration_is_not_the_same_as_no_declaration() -> None:
+    """把 `[]` 和 `None` 折叠成同一件事，是把一句**声明**换成了一次**猜测**。
+
+    场景作者写 `is_write: false`，意思是"这个工具我不认它写"；运行没声明，
+    意思是"我不知道，你看着办"。前者的答案在场景文件里，后者才需要猜。
+    """
+    from sandbox.trace.normalize import looks_like_write
+
+    assert looks_like_write("create_payment", set()) is False, "声明了没有写工具，就得听声明的"
+    assert looks_like_write("create_payment", None) is True, "没声明才轮到猜，而且必须偏向写"

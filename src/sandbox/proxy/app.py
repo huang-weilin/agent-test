@@ -36,6 +36,7 @@ from sandbox.db.models import Confidence, DetectorVerdict
 from sandbox.proxy.policy import EgressPolicy, host_of
 from sandbox.runtime import runs
 from sandbox.toolschema import describe, validate_arguments
+from sandbox.trace.normalize import looks_like_write
 from sandbox.trace.recorder import record_finding, record_tool_call
 
 log = structlog.get_logger(__name__)
@@ -243,10 +244,16 @@ async def call_tool(
     headers = {
         "X-Sandbox-Run-Id": ctx.run_id,
         "X-Sandbox-Tool-Call-Id": call_id,
-        # 写判定取自运行的 declared_writes，与 record_tool_call 落库时用的是同一处
-        # 依据。两边各判一次的话，总有一天会不一致，而那时报告会显示"这是个读操作"
-        # 却同时报出一条重复扣款。
-        "X-Sandbox-Is-Write": "1" if tool_name in ctx.declared_writes else "0",
+        # 写判定与 `record_tool_call` 落库时**调的是同一个函数**，不是照着它重写
+        # 一遍判据。两边各判一次的话，总有一天会不一致，而那时报告会显示"这是个
+        # 读操作"却同时报出一条重复扣款。
+        #
+        # 调函数而不是写 `tool_name in ctx.declared_writes`：后者在声明为 `None`
+        # 时是一句 `TypeError`，而它掉在**这次调用已经发生、已经记成 ok 之后**——
+        # Agent 拿到 500，以为失败了，重试，于是真的重复扣款。手工 curl 那条明确
+        # 支持的路径和只读场景都会走到这里。判定该不该是写、`None` 时怎么办，
+        # 都是 `looks_like_write` 一个人的事。
+        "X-Sandbox-Is-Write": "1" if looks_like_write(tool_name, ctx.declared_writes) else "0",
     }
     return JSONResponse(status_code=status_code, content=body, headers=headers)
 

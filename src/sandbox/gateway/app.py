@@ -164,21 +164,46 @@ async def create_run(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
     # 不传则回落到内置工具声明：手工 curl 起一个运行来排查时不该被迫先声明一遍
     # 工具和它们的参数。但只补其中一张是最坏的一种——同一个工具会被配上一份
     # 谁也不认识的声明，而报告上完全看不出来。
-    declared_tools = payload.get("tools")
-    declared_schemas = payload.get("tool_schemas")
-    if declared_tools or declared_schemas:
-        tool_table = declared_tools or {}
-        schema_table = declared_schemas or {}
+    #
+    # 判据是字段**在不在**，不是它**是不是空的**——与下面 `declared_writes` 同一条
+    # 规矩。空表和没给折叠成同一件事的话，一个声明了"这个场景没有工具"的场景会
+    # 悄悄拿到内置的那张表：Agent 调一个它没被声明过的工具，本该报 `tool_scope`
+    # 失败并被拦下，实际却被转发出去、**钱真的动了**。
+    if "tools" in payload or "tool_schemas" in payload:
+        tool_table = payload.get("tools") or {}
+        schema_table = payload.get("tool_schemas") or {}
     else:
         tool_table = _default_tools()
         schema_table = _default_tool_schemas()
+
+    # 写工具的声明有**三种**状态，少一种就是少一句话：
+    #
+    #   给了非空表 = 这些是写操作；给了空表 = **这个场景没有写操作**；没给 = 不知道。
+    #
+    # 空表和"没给"折叠成同一件事，是把一次**声明**换成一次**猜测**：场景作者写下
+    # "这里没有写操作"，沙箱转头拿工具名去猜，还可能猜反——而写判定直接决定幂等/
+    # 重复扣款检测的触发范围，猜错的代价是漏报或误报一整类缺陷。
+    # 没给（`null`、字段不在）才是真的不知道，那时才轮到启发式兜底。
+    raw_writes = payload.get("declared_writes")
+    if raw_writes is not None and not (
+        isinstance(raw_writes, list) and all(isinstance(n, str) for n in raw_writes)
+    ):
+        # 写错的声明不能静默降级成"没声明"：`set("create_payment")` 会拆成一堆
+        # 单字符，每个工具都不在里面，于是整张声明表**看起来**生效了、实际从没
+        # 匹配上——这一类"装上了但没接线"在报告上完全看不出来。
+        return _error(
+            400,
+            "declared_writes 必须是字符串数组。空数组是有意义的：它说的是"
+            "「这个场景没有写操作」；不传这个字段则等于「不知道」。",
+            err_type="bad_declared_writes",
+        )
 
     ctx = await start_run(
         scenario_id=payload.get("scenario_id", "adhoc"),
         agent_version=payload.get("agent_version", "unknown"),
         config=payload.get("config") or {},
         env=payload.get("env") or {},
-        declared_writes=set(payload["declared_writes"]) if payload.get("declared_writes") else None,
+        declared_writes=set(raw_writes) if raw_writes is not None else None,
         idempotency_key_params=payload.get("idempotency_key_params") or {},
     )
     # 豁免规则也要在场——**看门狗读的就是它**（见 `runtime.ActiveRun.exemptions`）。
