@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import ast
 import json
 
 from sqlalchemy import select
 
+from sandbox.config import REPO_ROOT
 from sandbox.db.engine import session_scope
 from sandbox.db.models import DetectorFinding, DetectorVerdict, LlmCall, Session, TestRun, ToolCall
+from sandbox.detectors.idempotency import SNAPSHOT_REPLAY
 from sandbox.trace.recorder import (
     CONFIG_SCHEME,
     RunContext,
@@ -255,3 +258,55 @@ async def test_replay_reason_separates_agent_retry_from_snapshot_restore(db) -> 
     assert calls[0].fingerprint == calls[1].fingerprint, "严格层应认出这是同一次调用"
     assert calls[0].replay_reason is None
     assert calls[1].replay_reason == "snapshot_restore"
+
+
+# --- 谁给"重放"打标记：今天没有生产调用方，这条是绊线不是断言 -------------------
+
+
+def test_no_live_caller_writes_a_replay_marker() -> None:
+    """绊线：`replay_reason` 今天没有任何生产调用方，谁接上第一个，这条就红。
+
+    `record_tool_call` 是工具调用唯一的写入口，所以"有没有人写下这个标记"在这
+    一个函数的调用点上就能问完。扫的是源码不是运行时数据：跑一遍场景只能证明
+    **这一次**没有标记，而这条声明说的是**生产路径上根本没有那个调用方**。
+
+    为什么要有这条线：`docs/detectors.md` 第三节第 3 条、`docs/longrun.md` 的
+    不支持清单、`call_chain.py` 的 `MARK_REPLAYED`、以及上面那条直接构造带标记
+    调用的单测，它们合起来在讲一句话——**"这一次是重放、不是它主动重发的"今天
+    报不出来，那个标记的位置是给将来的沙箱驱动重放源备的**。谁真接上了第
+    一个生产调用方，这句话就不成立了：报告会开始印"紧接着是一次快照重放"，而
+    文档还在说这行印不出来。绊线在这里拦住他，逼他回去把三处说法一起改掉。
+
+    反过来说，**不要为了让这条测试绿而把生产调用方挪到 `**kwargs` 里**——那只是
+    让绊线抓不到，标记本身照样进了库，读报告的人照样会以为一次恢复机制制造的
+    重复扣款是 Agent 自己干的。
+    """
+    offenders: list[str] = []
+    for path in sorted((REPO_ROOT / "src").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT)
+        text = path.read_text(encoding="utf-8")
+        # 一：显式关键字 `record_tool_call(..., replay_reason=...)`。
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, ast.Call):
+                func = node.func
+                called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+                if called == "record_tool_call" and any(
+                    kw.arg == "replay_reason" for kw in node.keywords
+                ):
+                    offenders.append(f"{rel}:{node.lineno}")
+            # 二：把标记的常量从检测器包里引出来——接生产调用方时最常见的写法。
+            elif isinstance(node, ast.ImportFrom) and "detectors" in (node.module or "").split("."):
+                if any(alias.name == "SNAPSHOT_REPLAY" for alias in node.names):
+                    offenders.append(f"{rel}:{node.lineno}（把重放标记的常量引了出来）")
+        # 三：把标记的值直接写进源码。前两条都走的是"认名字"，这一条认值，给
+        # 绕开名字的写法（比如塞进一个不叫 replay_reason 的字典）兜底。
+        if path.parent.name != "detectors" and SNAPSHOT_REPLAY in text:
+            offenders.append(f"{rel}（写下了 {SNAPSHOT_REPLAY!r}）")
+
+    assert not offenders, (
+        "src/ 里出现了写下重放标记的生产调用方：\n    "
+        + "\n    ".join(offenders)
+        + "\n先读 docs/detectors.md 第三节第 3 条：这条归因只在标记由我们打的时候"
+        "才成立，被测对象的自报不算证据。改了它，docs/longrun.md 的不支持清单和"
+        "call_chain.py 的 MARK_REPLAYED 那两处说法也要一起改。"
+    )
