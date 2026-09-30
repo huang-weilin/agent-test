@@ -8,22 +8,102 @@ Lite profile（本机开发）默认值：SQLite、无 Docker、mock 与网关�
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: `.env` 的位置。**只有一个来源**：`model_config` 和下面那个校验器读的是同一个
+#: 名字，各写各的就会有一天一个按绝对路径读、一个按当前目录读。
+#:
+#: 绝对路径是刻意的：相对路径按**当前工作目录**解析，从别处启动就读不到——
+#: key 配了、什么都没报、`upstream_ready` 却是 False。这种"换个目录就没了"
+#: 和写错变量名一样查不出来。
+ENV_FILE = REPO_ROOT / ".env"
+
+#: `SANDBOX_` 开头、但**不由本沙箱读**的环境变量：它们由沙箱注入给被测 Agent，
+#: 读它们的是 Agent 自己（见 `agents/react_demo/README.md`）。
+#: 这份名单是白名单，不是"认识的变量表"——沙箱自己的字段名由 `Settings` 现算。
+AGENT_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "SANDBOX_AGENT_API_KEY",
+        "SANDBOX_AGENT_MEMORY_DIR",
+        "SANDBOX_AGENT_MODEL",
+        "SANDBOX_AGENT_TASK",
+        "SANDBOX_GATEWAY_BASE_URL",
+        "SANDBOX_TOOL_BASE_URL",
+    }
+)
+
+
+def _known_names() -> set[str]:
+    """本沙箱会读的 `SANDBOX_*` 名字。从字段表现算，不手抄。"""
+    return {f"SANDBOX_{name}".upper() for name in Settings.model_fields} | set(AGENT_ENV_NAMES)
+
+
+def _names_in_env_file(path: Path) -> set[str]:
+    """`.env` 里的键名（不是值）。**这份文件里写错的键同样会被静默丢掉**，
+    而它正是绝大多数人配 key 的地方，所以它必须一起查。"""
+    if not path.is_file():
+        return set()
+    names = set()
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        names.add(line.removeprefix("export ").split("=", 1)[0].strip().upper())
+    return names
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SANDBOX_",
-        env_file=".env",
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
+        # **校验失败时的报错里不许带上字段值。** 默认行为是把整个输入原样印出来，
+        # 而 `upstream_api_key` 就在里面——一次配置写错（比如变量名拼错）会把
+        # 真实密钥打进日志和 traceback。ADR 003 的整条主张是凭据不出沙箱，
+        # 而从 stderr 漏出去和从网络漏出去没有区别。
+        hide_input_in_errors=True,
     )
+
+    @model_validator(mode="after")
+    def _no_unread_sandbox_vars(self) -> Settings:
+        """环境里那些**没有任何代码读**的 `SANDBOX_*` 变量，必须在启动时炸出来。
+
+        `extra="ignore"` 是这里的关键：一个写错名字的变量不会报错、不会进日志，
+        它会**静默消失**。表现是 key 明明配在 `.env` 里，`settings.upstream_api_key`
+        却是 `None`，于是 `upstream_mode=real` 说"没有配置 SANDBOX_UPSTREAM_API_KEY"
+        ——而那个人刚刚照着 `.env.example` 把它填了进去。整个真实上游那条路就此
+        不通，且没有任何一处说得清为什么。
+
+        （这不是假设：`.env.example` 里写的曾经就是 `SANDBOX_DEEPSEEK_API_KEY`，
+        而代码读的是 `SANDBOX_UPSTREAM_API_KEY`。）
+
+        只记一行日志是不够的——没人读的日志和静默是同一件事。
+        """
+        known = _known_names()
+        found = {k.upper() for k in os.environ if k.upper().startswith("SANDBOX_")}
+        found |= _names_in_env_file(ENV_FILE)
+        unknown = sorted(found - known)
+        if not unknown:
+            return self
+
+        raise ValueError(
+            "环境里有以 SANDBOX_ 开头、但没有任何代码读的变量：\n    "
+            + "\n    ".join(unknown)
+            + "\n\n本沙箱读的是这些：\n    "
+            + "\n    ".join(sorted(known))
+            + '\n\n这一类写错名字的变量不会报错也不会进日志——extra="ignore" 会让它'
+            "静默消失，于是那个值从来没生效过，而报告上完全看不出来。"
+            "\n如果某个变量确实是配给被测 Agent 的（不是配给沙箱的），把它加进"
+            " sandbox/config.py 的 AGENT_ENV_NAMES。"
+        )
 
     # --- 数据层 -------------------------------------------------------------
     # ADR 002：自研库是 system of record。开发期 SQLite，生产期 PostgreSQL。
