@@ -21,7 +21,7 @@
 | `tools` | 工具声明（含 `is_write`、幂等参数） | 改了它手里的工具 |
 | `script` | 每个会话的脚本、任务、快照点、记忆回滚位置、时间间隔 | 改了**测试本身** |
 | `agent` | 版本号、目录、入口、额外环境变量 | 换了被测对象的构建 |
-| `expect` | 期望列表、`expected_charges`、意外失败的口径 | 改了判卷标准 |
+| `expect` | 期望列表、豁免规则、记忆判据、`expected_charges`、意外失败的口径 | 改了判卷标准 |
 
 `script` 与 `expect` 变动尤其要认出来：它们是**测试定义**的一部分。测试改了
 而结论变了，什么都不说明——把这种情况报成"行为回归"是本工具最不该犯的错。
@@ -83,6 +83,10 @@ def sections(scenario: Scenario) -> dict[str, Any]:
         "expect": {
             "expect": [e.model_dump(mode="json") for e in scenario.expect],
             "exemptions": [e.model_dump(mode="json") for e in scenario.exemptions],
+            # 记忆判据也是判卷标准。**声明本身就是观测的过滤器**：去掉一条
+            # must_hold，原本报 fail 的那条会变成 inconclusive——差异报告里
+            # 看起来就像"失败少了"。放进这一节，两次运行才被判成不可比。
+            "memory": scenario.memory.model_dump(mode="json"),
             "unexpected_failures": scenario.unexpected_failures,
             "expected_charges": scenario.expected_charges,
         },

@@ -39,6 +39,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,13 @@ from sandbox.formatting import span_human
 from sandbox.formatting import tokens as _tokens
 from sandbox.gateway.stub import scripted_upstream
 from sandbox.memory.adapters.file_memory import FileMemoryAdapter
+from sandbox.memory.observe import (
+    PHASE_END,
+    PHASE_START,
+    MemoryObservation,
+    observe_memory,
+    summarize_observations,
+)
 from sandbox.memory.snapshot import SnapshotRef, SnapshotStore
 from sandbox.scenario import identity
 from sandbox.scenario.expect import ExpectResult, evaluate
@@ -257,6 +265,12 @@ class ScenarioResult:
     clock: ClockReport | None = None
     # 主动行为审计的授权对照。None = 这次运行没有无人值守的会话。
     autonomy: AutonomyReport | None = None
+    # 会话边界上的记忆观测摘要（见 memory/observe.py）。**只有摘要，没有内容**：
+    # 报告是长期保留的，而记忆里可能有用户真实数据。空列表 = 一个会话都没跑到。
+    #
+    # 它是观测不是判定：判定在 `memory.*` 那几条结论里，而这里列的是"看见了什么"
+    # ——包括场景没有声明判据时那些不会被判的改动。两者要分得开。
+    memory: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -303,6 +317,7 @@ class ScenarioResult:
             "expected_charges": self.expected_charges,
             "clock": self.clock.to_dict() if self.clock else None,
             "autonomy": self.autonomy.to_dict() if self.autonomy else None,
+            "memory": self.memory,
             "cost": self.cost.to_dict() if self.cost else None,
             "session_costs": {str(k): v.to_dict() for k, v in sorted(self.session_costs.items())},
             "budget": [
@@ -527,6 +542,10 @@ class ScenarioRunner:
         store = SnapshotStore()
         # 名字 → 快照引用。场景用名字引用快照，引擎记住这个名字对应哪一次。
         named: dict[str, SnapshotRef] = {}
+        # 会话边界上的记忆切面，按时间顺序。**不进快照库**：快照库里的东西都是
+        # 能恢复回去的时点，而观测不做恢复；混进去会让报告里那份"回滚到了哪儿"
+        # 的清单多出几条永远用不上的位置，归因线索就被稀释了。
+        observations: list[MemoryObservation] = []
 
         # 上游脚本按会话顺序拼接。单游标顺序读，所以每个会话的步骤必须
         # 紧跟在它前面那个会话的步骤之后——见下面消费量检查。
@@ -603,6 +622,26 @@ class ScenarioRunner:
                 if index > 0:
                     await start_session(active.ctx, restored_from=restored)
 
+                # 记忆切面：会话**开始时**是什么样。
+                #
+                # 位置在恢复之后——恢复改的就是记忆，在它之前看等于看上一个会话
+                # 的残留，而报告会说这是"这段会话开始时"的样子。这一条错了，
+                # 漂移判定的基准就错了，而报告看起来仍然是正常的。
+                #
+                # 观测一律做、不按声明开关：**声明只决定判不判，不决定看不看。**
+                # 让作者声明了才观测的话，"忘了声明"的表现就是这一族永远没有观测，
+                # 与"Agent 的记忆一直是空的"在报告上长得一样。
+                observations.append(
+                    observe_memory(
+                        adapter,
+                        ordinal=ordinal,
+                        phase=PHASE_START,
+                        # 这段会话的记忆视野。判定"键不见了"时用它分清算谁的账：
+                        # 视野比写下它的时刻还早，那就是我们自己回滚掉了。
+                        horizon=active.ctx.memory_horizon_ordinal,
+                    )
+                )
+
                 if spec.snapshot_before:
                     named[spec.snapshot_before] = await capture_snapshot(
                         active.ctx, adapter, store
@@ -624,6 +663,18 @@ class ScenarioRunner:
                     spec.task or scenario.agent.task,
                 )
                 cursor_after = scripted_upstream.calls_made(run_id)
+
+                # 记忆切面：Agent 退出时是什么样。它在下一段会话恢复**之前**——
+                # 顺序反了的话，"这段会话写了什么"会被下一段的回滚盖掉，
+                # 而那种报告看起来只是"这段会话什么都没写"。
+                observations.append(
+                    observe_memory(
+                        adapter,
+                        ordinal=ordinal,
+                        phase=PHASE_END,
+                        horizon=active.ctx.memory_horizon_ordinal,
+                    )
+                )
 
                 if spec.snapshot_after:
                     named[spec.snapshot_after] = await capture_snapshot(
@@ -665,7 +716,8 @@ class ScenarioRunner:
         for outcome in result.sessions:
             outcome.tool_calls = per_ordinal.get(outcome.ordinal, 0)
 
-        result.findings = _run_detectors(scenario, calls)
+        result.memory = summarize_observations(observations)
+        result.findings = _run_detectors(scenario, calls, observations)
         result.expectation = evaluate(scenario, result.findings)
         result.summary = summarize_verdicts(result.findings)
         result.egress_charges = await self._charges(mk_port)
@@ -784,14 +836,22 @@ def _name_of(ref: SnapshotRef, named: dict[str, SnapshotRef]) -> str | None:
     return next((k for k, v in named.items() if v.id == ref.id), None)
 
 
-def _run_detectors(scenario: Scenario, calls: list[Any]) -> list[Finding]:
+def _run_detectors(
+    scenario: Scenario,
+    calls: list[Any],
+    memories: Sequence[MemoryObservation] = (),
+) -> list[Finding]:
     """跑全套检测器。工具事实来自场景声明，是写/读属性的单一来源。
 
     装配在 `detectors.run_all` 里，**和 `tests/corpus/` 共用同一份**：语料算出来的
     精度只有在"语料跑的就是线上跑的那一套"时才有意义。
 
-    四份声明全部从场景进来（工具事实、无人值守白名单、自主会话、豁免规则）——
-    观测从 `calls` 进来。这条分工是全项目的判据，不是这里的实现细节。
+    五份声明全部从场景进来（工具事实、无人值守白名单、自主会话、豁免规则、
+    记忆判据）——观测分两条通道进来：边界上的 `calls` 和会话边界上的 `memories`。
+    这条分工是全项目的判据，不是这里的实现细节。
+
+    `memories` 有默认值，是为了让只想验边界检测的调用方（比如豁免那一批测试）
+    照旧只传两个参数——**不是**"记忆可以不看"：真跑一次场景时 runner 一定传。
     """
     facts = {
         t.name: ToolFacts(t.name, t.is_write, t.enforces_idempotency) for t in scenario.tools
@@ -802,6 +862,8 @@ def _run_detectors(scenario: Scenario, calls: list[Any]) -> list[Finding]:
         unattended_allowlist=frozenset(scenario.unattended_allowlist()),
         autonomous_ordinals=frozenset(scenario.autonomous_ordinals()),
         exemptions=scenario.exemption_set(),
+        memories=memories,
+        memory_rules=scenario.memory_rules(),
     )
 
 
@@ -879,6 +941,25 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
             "  声明不拦截：没被授权的工具被调用时照样会执行，扣款照样发生。\n"
             "     审计要回答的是「它到底干了什么」；要拦，用的是出口代理的放行名单。"
         )
+
+    # 记忆观测排在检测结论前面：先看"边界上看见的是什么"，再看"据此判了什么"。
+    # 两段分开写，是因为判定只发生在场景**声明**过的判据上，而观测是全部——
+    # 混在一起的话，"记忆里动过一个文件"会被读成"记忆出了问题"。
+    add("\n--- 记忆观测（会话边界上看到的，不是判定）---")
+    if result.memory:
+        for o in result.memory:
+            when = f"会话 {o['ordinal']}" + ("开始" if o["phase"] == "start" else "结束")
+            horizon = "不知道" if o["horizon"] is None else f"≤ 会话 {o['horizon']}"
+            add(f"  {when}时  记忆视野 {horizon}  条目 {o['entries']}")
+            for label, key in (("新出现", "added"), ("消失", "removed"), ("内容变了", "changed")):
+                if o[key]:
+                    add(f"       {label}：{'、'.join(o[key])}")
+    else:
+        add("  一次会话边界都没走到，没有观测。多半是执行失败提前退出了。")
+    add(
+        "  观测点是会话边界：中途改了又改回来的看不见。这上面列的是「这个时点上\n"
+        "     它是什么」，不是「它在会话里没变过」；「内容变了」也不是判定。"
+    )
 
     add("\n--- 检测结论 ---")
     if not result.findings:

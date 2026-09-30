@@ -1,6 +1,6 @@
 # 循环检测器的标注语料。
 #
-# 写法见 tests/corpus/README.md。每一条都要对三族检测器表态：该报（fail/warning）
+# 写法见 tests/corpus/README.md。每一条都要对四族检测器表态：该报（fail/warning）
 # 还是不报。少一族就加载失败——见 src/sandbox/corpus.py 里的说明。
 items:
   # --- 严格层 ---------------------------------------------------------------
@@ -20,6 +20,7 @@ items:
       - {tool: get_order, args: {order_id: A1}}
       - {tool: get_order, args: {order_id: A1}}
     expect:
+      memory: none
       loop.strict: fail
       idempotency: inconclusive
       idempotency.read_repeats: pass
@@ -40,6 +41,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
     expect:
+      memory: none
       loop.strict: fail
       idempotency: fail
       autonomy: inconclusive
@@ -63,6 +65,7 @@ items:
       - {tool: get_order, args: {order_id: A1}, status: error}
       - {tool: get_order, args: {order_id: A1}, status: error}
     expect:
+      memory: none
       loop.retry: pass
       idempotency: inconclusive
       idempotency.read_repeats: pass
@@ -88,6 +91,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}, status: error}
       - {tool: create_payment, args: {order_id: A1, amount: 99}, status: error}
     expect:
+      memory: none
       loop.retry: pass
       idempotency: fail
       autonomy: inconclusive
@@ -110,6 +114,7 @@ items:
       - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 3}}
       - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 2}}
     expect:
+      memory: none
       loop.approximate: fail
       idempotency: inconclusive
       autonomy: inconclusive
@@ -130,6 +135,7 @@ items:
       - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 2}}
       - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 3}}
     expect:
+      memory: none
       loop.approximate: pass
       idempotency: inconclusive
       autonomy: inconclusive
@@ -155,6 +161,7 @@ items:
       - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 8}}
       - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 9}}
     expect:
+      memory: none
       loop.approximate:
         verdict: warning
         reason_code: monotonic_unbounded
@@ -184,6 +191,7 @@ items:
       - {tool: get_order, args: {order_id: A1}}
       - {tool: get_user, args: {user_id: U1}}
     expect:
+      memory: none
       loop.strict: fail
       loop.ping_pong: fail
       idempotency: inconclusive
@@ -207,6 +215,7 @@ items:
       - {tool: get_order, args: {order_id: A1}, session: 0}
       - {tool: get_order, args: {order_id: A1}, session: 1}
     expect:
+      memory: none
       loop.cross_session: warning
       loop: pass
       idempotency: inconclusive
@@ -231,6 +240,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}, blocked_by_proxy: true, status: blocked}
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
     expect:
+      memory: none
       loop: pass
       idempotency: pass
       autonomy: inconclusive
@@ -255,6 +265,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: snapshot_restore}
       - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: snapshot_restore}
     expect:
+      memory: none
       loop.snapshot_replay: warning
       loop: inconclusive
       loop.cross_session: inconclusive
@@ -286,6 +297,7 @@ items:
       - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 3}}
       - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 2}}
     expect:
+      memory: none
       loop.approximate: pass
       idempotency: inconclusive
       autonomy: inconclusive

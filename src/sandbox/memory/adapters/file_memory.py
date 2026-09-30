@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sandbox.config import settings
+from sandbox.memory.observe import MemoryEntry
 
 FORMAT_VERSION = 1
 ADAPTER_NAME = "hermes_file"
@@ -109,6 +110,36 @@ class FileMemoryAdapter:
 
     def entry_count(self) -> int:
         return len(self._iter_files()) if self.root.exists() else 0
+
+    # --- 观测 ------------------------------------------------------------
+
+    def entries_of(self, payload: bytes) -> list[MemoryEntry]:
+        """把快照字节还原成条目列表（带内容）。**观测面用，`restore` 不用。**
+
+        两条路都从 `_parse` 出发，所以"报告里看到的"和"恢复出来的"永远是同一份
+        东西——各写一份解析的话，它们迟早会对不上，而那种对不上的症状是报告说
+        记忆里有某个条目、恢复出来却没有，读的人根本无从判断哪个是真的。
+
+        解码用 `errors="replace"`：记忆目录里可能有二进制文件（本地缓存、索引）。
+        观测不该因为读到一个非文本文件就整个失败——那会让**其它**文件的结论一起
+        丢掉。代价是那种文件的内容里搜不到标记，所以它只对文本有意义（见文档）。
+        """
+        doc = _parse(payload)
+        entries: list[MemoryEntry] = []
+        for raw in doc["entries"]:
+            if not isinstance(raw, dict):
+                raise RestoreRefused(f"快照条目不是对象：{raw!r}")
+            path = str(raw.get("path", ""))
+            digest = str(raw.get("sha256", ""))
+            blob = base64.b64decode(str(raw.get("content_b64", "")))
+            entries.append(
+                MemoryEntry(
+                    path=path,
+                    sha256=digest,
+                    text=blob.decode("utf-8", errors="replace"),
+                )
+            )
+        return entries
 
     # --- restore ---------------------------------------------------------
 

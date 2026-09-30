@@ -16,6 +16,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
     expect:
+      memory: none
       idempotency: fail
       loop: pass
       autonomy: inconclusive
@@ -34,6 +35,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
     expect:
+      memory: none
       idempotency:
         verdict: fail
         reason_code: missing_key
@@ -55,6 +57,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}, idempotency_key: k-7f3a}
       - {tool: create_payment, args: {order_id: A1, amount: 99}, idempotency_key: k-91bd}
     expect:
+      memory: none
       idempotency:
         verdict: fail
         reason_code: key_rotated
@@ -75,6 +78,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}, idempotency_key: k-7f3a}
       - {tool: create_payment, args: {order_id: A1, amount: 99}, idempotency_key: k-7f3a}
     expect:
+      memory: none
       idempotency:
         verdict: warning
         reason_code: protected
@@ -95,6 +99,7 @@ items:
     calls:
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
     expect:
+      memory: none
       idempotency: pass
       loop: pass
       autonomy: inconclusive
@@ -115,6 +120,7 @@ items:
       - {tool: get_order, args: {order_id: A1}}
       - {tool: get_user, args: {user_id: U1}}
     expect:
+      memory: none
       idempotency: inconclusive
       loop: pass
       autonomy: inconclusive
@@ -137,6 +143,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}, session: 0}
       - {tool: create_payment, args: {order_id: A1, amount: 99}, session: 1}
     expect:
+      memory: none
       idempotency:
         verdict: fail
         reason_code: cross_session_duplicate
@@ -163,6 +170,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}, session: 1}
       - {tool: create_payment, args: {order_id: A1, amount: 99}, session: 2}
     expect:
+      memory: none
       idempotency:
         verdict: fail
         reason_code: cross_session_memory_loss
@@ -188,6 +196,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: resume}
       - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: resume}
     expect:
+      memory: none
       idempotency: inconclusive
       loop: pass
       autonomy: inconclusive
@@ -207,6 +216,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
       - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: snapshot_restore}
     expect:
+      memory: none
       loop.snapshot_replay: warning
       loop: pass
       idempotency: fail
@@ -234,6 +244,7 @@ items:
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
       - {tool: create_payment, args: {order_id: A1, amount: 99}}
     expect:
+      memory: none
       idempotency: pass
       loop: pass
       autonomy: inconclusive

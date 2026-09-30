@@ -408,6 +408,65 @@
 <p class="dim">这次运行没有工具调用。</p>
 {% endif %}
 
+<h2>记忆观测</h2>
+{% if report and report.memory %}
+<table class="grid">
+  <thead>
+    <tr>
+      <th>时点</th><th>记忆视野</th><th>条目</th>
+      <th>新出现</th><th>消失</th><th>内容变了</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for o in report.memory %}
+    <tr>
+      <td class="nowrap">
+        会话 {{ o.ordinal }}{% if o.phase == "start" %}开始{% else %}结束{% endif %}时
+      </td>
+      <td class="nowrap">
+        {% if o.horizon is none %}不知道{% else %}≤ 序号 {{ o.horizon }}{% endif %}
+      </td>
+      <td>{{ o.entries }}</td>
+      <td>
+        {% if o.added %}<code>{{ o.added | join("、") }}</code>
+        {% else %}<span class="dim">—</span>{% endif %}
+      </td>
+      <td>
+        {% if o.removed %}<code>{{ o.removed | join("、") }}</code>
+        {% else %}<span class="dim">—</span>{% endif %}
+      </td>
+      <td>
+        {% if o.changed %}<code>{{ o.changed | join("、") }}</code>
+        {% else %}<span class="dim">—</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  观测点是<strong>会话边界</strong>——记忆活在 Agent 进程内，我们只在它每次进出时
+  看一眼。中途改了又改回来的看不见，所以这张表说的是"这个时点上它是什么"，
+  不是"它在会话里没变过"。
+  <br>
+  <strong>"内容变了"不是判定。</strong>Agent 往记忆里写东西是它的本职工作。
+  算不算漂移、算不算中毒，只由场景<strong>声明</strong>的判据决定（编辑器右侧
+  那张卡片上列的就是它们），结论在下面"检测结论"里。
+  <br>
+  这里只列<strong>路径与摘要</strong>，不带内容：报告是长期保留的，而记忆里可能
+  有真实数据。要看内容，按摘要去本地库里取快照。
+</p>
+{% elif report.memory is undefined %}
+<p class="dim">
+  这份报告里没有记忆这一栏——它是在会话边界观测存在之前跑的。
+  <strong>这里不写"没有异常"</strong>：没记录不是没问题，是没记录。
+</p>
+{% else %}
+<p class="dim">
+  这次运行一次会话边界都没走到，所以没有记忆观测。多半是执行失败提前退出了，
+  先看上面那条错误。
+</p>
+{% endif %}
+
 <h2>记忆快照</h2>
 {% if snapshots %}
 <table class="grid">

@@ -46,6 +46,15 @@ class MemoryAdapter(Protocol):
 
     def entry_count(self) -> int: ...
 
+    def entries_of(self, payload: bytes) -> list[Any]:
+        """把 `capture()` 产出的字节还原成条目列表，供观测用。
+
+        这是**协议的一部分而不是可选的**：一个说不出自己装了什么的适配器，
+        就没法参与记忆漂移与中毒检测，而"参与不了"必须表现成实现不出来，
+        不能表现成"观测到 0 个条目"——后者在报告里和"记忆是空的"长得一样。
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class SnapshotRef:

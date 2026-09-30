@@ -70,6 +70,14 @@ class Finding:
 #: 接线"的静音开关比没有规则更坏，所以在这里硬拦。
 KNOWN_MATCH_KEYS: frozenset[str] = frozenset({"arg_differs_on", "tool_has_idempotency"})
 
+#: **不吃豁免的检测器。** 记忆族的判据是场景里逐条声明的 `must_hold` / `forbidden`，
+#: 声明本身就是那个"例外机制"——再叠一层豁免，等于给同一件事开两个开关。
+#:
+#: 所以在这里硬拦而不是"接受了但不生效"。后者正是一个"装上了但没接线"的静音开关：
+#: 规则看起来在场景文件里，检测器也不会报错，只是那条 fail 照样出现在报告里——
+#: 用户以为自己已经处理过这个问题了。豁免机制自己最不能出的就是这个毛病。
+NOT_EXEMPTIBLE: frozenset[str] = frozenset({"memory", "memory.drift", "memory.poisoning"})
+
 
 def check_match(match: dict[str, Any]) -> None:
     """校验 `match` 的形状。不合法就抛 `ValueError`。
@@ -116,6 +124,12 @@ class Exemption:
             raise ValueError(
                 f"豁免规则 {self!r} 缺少 reason。"
                 f"没有理由的豁免在报告里无法复核，等于永久静音。"
+            )
+        if self.detector in NOT_EXEMPTIBLE:
+            raise ValueError(
+                f"豁免规则 {self!r} 指向 {self.detector}，而记忆族的结论不吃豁免。\n"
+                f"记忆族的判据就是场景里逐条声明的 must_hold / forbidden——"
+                f"不想让某条算失败，就把那条声明去掉，而不是再叠一层静音。"
             )
         try:
             check_match(self.match)

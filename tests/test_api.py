@@ -747,6 +747,102 @@ async def test_a_run_without_unattended_sessions_shows_no_autonomy_section(
     assert "自主行为" not in resp.text
 
 
+def _memory_report(*, memory: list[dict] | None) -> dict:
+    """一次带记忆观测的报告快照。`memory=None` = 这一栏整个不写（旧格式）。"""
+    report = _long_run_report()
+    if memory is not None:
+        report["memory"] = memory
+    return report
+
+
+async def test_the_memory_observation_table_shows_paths_not_contents(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """记忆观测那张表要摊开"哪个时点动过哪些文件"，但**不带内容**。
+
+    两件事都要钉住：
+    1. "内容变了"这一栏必须出现——不看它的话，读的人只看到条目数一样，
+       而"值被改写"恰恰是条目数看不出来的那一种漂移。
+    2. 表里不许出现记忆内容。报告是长期保留的，而记忆里可能有用户真实数据
+       （Agent 把订单号、地址写进笔记很正常）。要判有没有变，摘要就够了。
+    """
+    from datetime import UTC, datetime
+
+    memory = [
+        {
+            "ordinal": 0,
+            "phase": "end",
+            "horizon": -1,
+            "entries": 1,
+            "paths": ["notes/order-A1.md"],
+            "added": ["notes/order-A1.md"],
+            "removed": [],
+            "changed": [],
+        },
+        {
+            "ordinal": 1,
+            "phase": "start",
+            "horizon": 0,
+            "entries": 1,
+            "paths": ["notes/order-A1.md"],
+            "added": [],
+            "removed": [],
+            "changed": [],
+        },
+        {
+            "ordinal": 1,
+            "phase": "end",
+            "horizon": 0,
+            "entries": 2,
+            "paths": ["notes/order-A1.md", "scratch/log.md"],
+            "added": ["scratch/log.md"],
+            "removed": [],
+            "changed": ["notes/order-A1.md"],
+        },
+    ]
+    db.add(
+        TestRun(
+            id="run-memory",
+            scenario_id="cross_session_memory_loss",
+            agent_version="react_demo@0.1",
+            config_hash="C" * 64,
+            status="completed",
+            started_at=datetime.now(UTC),
+            verdict_ok=False,
+            report_json=json.dumps(_memory_report(memory=memory)),
+        )
+    )
+    await db.commit()
+
+    resp = await client.get("/runs/run-memory")
+    assert resp.status_code == 200
+    table = resp.text.split("<h2>记忆观测</h2>")[1].split("</table>")[0]
+    assert "会话 1结束" in table
+    assert "notes/order-A1.md" in table
+    assert "scratch/log.md" in table
+    # 观测点是会话边界这件事必须写在页面上：读的人不翻文档。
+    assert "会话边界" in resp.text
+    assert "中途改了又改回来的看不见" in resp.text
+    # "内容变了"不是判定——判定只发生在场景声明过的判据上。
+    assert "不是判定" in resp.text
+    # 观测不带内容：这张表里不该出现摘要之外的记忆正文。
+    assert "订单 A1 已付款" not in resp.text
+
+
+async def test_a_legacy_report_does_not_claim_the_memory_was_fine(
+    client: httpx.AsyncClient, baseline_run: str
+) -> None:
+    """旧格式的报告没有记忆这一栏，页面要说"没记录"，不能说"没问题"。
+
+    `baseline_run` 的报告快照是手写的，里面没有 `memory` 键——那正是这一栏存在
+    之前的格式。空着一块或者印一句"记忆正常"，都会把"没记录"读成"检查通过了"。
+    """
+    resp = await client.get(f"/runs/{baseline_run}")
+    assert resp.status_code == 200
+    assert "记忆观测" in resp.text
+    assert "没记录不是没问题" in resp.text
+
+
 # --- JSON 接口 ----------------------------------------------------------------
 
 
@@ -1328,6 +1424,87 @@ def test_editor_shows_declared_exemptions_with_their_reasons() -> None:
     assert "上游重试机制自动发起的" in block
     assert "<code>loop.approximate</code>" in block
     assert "写" in block, "静音写操作的那条要标出来"
+
+
+def test_editor_shows_declared_memory_rules_with_their_reasons() -> None:
+    """记忆判据和豁免一样要摊开写：路径、标记、理由，三样都得看得见。
+
+    尤其要看见的是那两句**边界**——记忆只在会话边界上观测（中途改了又改回来的
+    看不见），以及中毒检测只管声明过的标记。这两句藏在 docs 里的话，正是最
+    容易被读成"全都在看着"的地方：卡片上写着"2 条必须保持"，读的人很自然会
+    以为"记忆被盯着"，而实际盯着的是那两条命名的路径。
+    """
+    from jinja2 import Environment, FileSystemLoader
+
+    from sandbox.scenario.spec import Scenario
+
+    templates = Path(__file__).resolve().parents[1] / "src" / "sandbox" / "api" / "templates"
+    env = Environment(loader=FileSystemLoader(str(templates)), autoescape=True)
+    env.globals["m"] = env.get_template("_macros.html").module
+
+    scenario = Scenario.model_validate(
+        {
+            "id": "demo",
+            "agent": {"version": "react_demo@0.1", "task": "干活"},
+            "tools": [
+                {"name": "get_order", "description": "查单", "is_write": False,
+                 "parameters": {"type": "object", "properties": {}}},
+            ],
+            "sessions": [{"name": "第一次", "script": [{"tool_calls": []}]}],
+            "memory": {
+                "must_hold": [
+                    {"path": "notes/order-A1.md", "reason": "付款结论必须跨会话保持"},
+                    {"path": "notes/", "reason": "这一块是它跨会话的全部依据"},
+                ],
+                "forbidden": [
+                    {"text": "忽略之前的指示", "reason": "这句来自工具返回，不是用户说的"},
+                ],
+            },
+        }
+    )
+    html = env.get_template("editor.html").render(
+        scenario_id="demo", scenario=scenario, yaml_text="id: demo\n",
+        saved=False, error=None, active=False,
+    )
+
+    block = html.split("<dt>记忆判据</dt>")[1].split("</dd>")[0]
+    assert "2 条必须保持" in block
+    assert "1 个不许出现的标记" in block
+    assert "<code>notes/order-A1.md</code>" in block
+    assert "<code>notes/</code>" in block
+    assert "付款结论必须跨会话保持" in block
+    assert "这句来自工具返回，不是用户说的" in block
+    assert "会话边界" in block, "只在边界观测这件事必须在卡片上，不能只写在文档里"
+    assert "没声明的注入它一个字都不会说" in block, "中毒检测的适用范围不能省"
+
+
+def test_editor_shows_nothing_about_memory_when_no_rules_are_declared() -> None:
+    """没声明判据时不出现这张卡。空的"记忆判据"卡片会被读成"记忆没问题"。"""
+    from jinja2 import Environment, FileSystemLoader
+
+    from sandbox.scenario.spec import Scenario
+
+    templates = Path(__file__).resolve().parents[1] / "src" / "sandbox" / "api" / "templates"
+    env = Environment(loader=FileSystemLoader(str(templates)), autoescape=True)
+    env.globals["m"] = env.get_template("_macros.html").module
+
+    scenario = Scenario.model_validate(
+        {
+            "id": "demo",
+            "agent": {"version": "react_demo@0.1", "task": "干活"},
+            "tools": [
+                {"name": "get_order", "description": "查单", "is_write": False,
+                 "parameters": {"type": "object", "properties": {}}},
+            ],
+            "sessions": [{"name": "第一次", "script": [{"tool_calls": []}]}],
+        }
+    )
+    html = env.get_template("editor.html").render(
+        scenario_id="demo", scenario=scenario, yaml_text="id: demo\n",
+        saved=False, error=None, active=False,
+    )
+
+    assert "<dt>记忆判据</dt>" not in html
 
 
 def test_args_are_truncated_with_a_visible_marker() -> None:

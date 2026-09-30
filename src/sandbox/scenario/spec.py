@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from sandbox.db.models import DetectorVerdict
 from sandbox.detectors.base import Exemption, ExemptionSet
+from sandbox.detectors.memory import ForbiddenText, MemoryRules, MustHold
 from sandbox.toolschema import check_schema
 
 
@@ -230,6 +231,46 @@ class ExemptionDecl(BaseModel):
     allow_write: bool = False
 
 
+class MustHoldDecl(BaseModel):
+    """一条"这条记忆必须保持"的判据。
+
+    `path` 以 `/` 结尾表示整个目录前缀。判的是**内容摘要**，不是"文件在不在"——
+    空文件也算存在，但它的内容为空，两者在报告里要说得出区别。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    path: str
+    reason: str
+
+
+class ForbiddenTextDecl(BaseModel):
+    """一段不允许出现在记忆里的文本。
+
+    这是记忆中毒检测**现在能做的那一半**：受控实验里注入进去的那句话是我们自己
+    写的，所以写得出来。它抓不到没声明的注入——那不是这个类的实现问题，是这条路
+    的边界（见 docs/detectors.md 第九节）。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    text: str
+    reason: str
+
+
+class MemoryDecl(BaseModel):
+    """场景对记忆的判据。**空 = 不判，只观测。**
+
+    和 `exemptions` 一样属于"判卷标准"（进配置指纹的 `expect` 节），不属于被测对象：
+    改了它，前后两次运行就不再可比"失败少了几个"。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    must_hold: list[MustHoldDecl] = Field(default_factory=list)
+    forbidden: list[ForbiddenTextDecl] = Field(default_factory=list)
+
+
 class Scenario(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -248,6 +289,13 @@ class Scenario(BaseModel):
     # 这一节进配置指纹的"判卷标准"里（见 `identity.sections`）：加一条豁免之后，
     # 前后两次运行就不该再比"失败少了几个"——少掉的那些是被规则静音的，不是修好的。
     exemptions: list[ExemptionDecl] = Field(default_factory=list)
+
+    # 记忆族的判据（must_hold / forbidden）。**不写就是"这一族不判"**，不是
+    # "这一族没问题"——检测器在没判据时给的是 inconclusive，见 detectors/memory.py。
+    #
+    # 观测本身（会话边界上记忆长什么样）不需要声明，引擎每段会话都自动看一眼：
+    # 声明与否只决定**判不判**，不决定看不看。
+    memory: MemoryDecl = Field(default_factory=MemoryDecl)
 
     # 出现了没被 expect 匹配上的 fail 结论时怎么办。
     # 默认 fail：这是测试工具，"没预料到的失败"必须让人知道。
@@ -387,4 +435,21 @@ class Scenario(BaseModel):
                 )
                 for e in self.exemptions
             ]
+        )
+
+    # --- 记忆族的判据（见 docs/detectors.md 第九节）-------------------------
+
+    def memory_rules(self) -> MemoryRules:
+        """场景里的记忆判据 → 检测器吃的形状。
+
+        和 `exemption_set` 同一个理由放在这里：**校验要有统一的落点**，
+        `loader._check_references` 先调一遍，用户 YAML 里的错在加载时就报出来。
+        """
+        return MemoryRules(
+            must_hold=tuple(
+                MustHold(path=r.path, reason=r.reason) for r in self.memory.must_hold
+            ),
+            forbidden=tuple(
+                ForbiddenText(text=r.text, reason=r.reason) for r in self.memory.forbidden
+            ),
         )

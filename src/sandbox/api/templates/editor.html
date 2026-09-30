@@ -72,8 +72,37 @@
           —— {{ e.reason }}<br>
           {% endfor %}
           被静音的结论照样会出现在报告里（带着这条理由），
-          但"这次运行没有这个问题"和"这次运行没看见这个问题"是两件事。
+          但"这次运行没有这个问题"和"这次运行没看见这个问题"是两件事。<br>
+          <strong>记忆族的结论不吃豁免</strong>：指向 memory 的规则会让场景加载失败，
+          不想让某条记忆判据算失败，把那条判据去掉。
         </div>
+      </dd>
+      {% endif %}
+      {% if scenario.memory.must_hold or scenario.memory.forbidden %}
+      <dt>记忆判据</dt>
+      <dd>
+        {% if scenario.memory.must_hold %}
+        {{ scenario.memory.must_hold | length }} 条必须保持
+        <div class="note">
+          这些键在每个观测到它的时点上都必须是同一份内容（路径以 / 结尾 = 整个目录）：<br>
+          {% for r in scenario.memory.must_hold %}
+          <code>{{ r.path }}</code> —— {{ r.reason }}<br>
+          {% endfor %}
+          记忆只在<strong>会话边界</strong>上观测：中途改了又改回来的看不见，所以
+          报告不会说"它在会话里没变过"。
+        </div>
+        {% endif %}
+        {% if scenario.memory.forbidden %}
+        {{ scenario.memory.forbidden | length }} 个不许出现的标记
+        <div class="note">
+          这段文本不许落进长效记忆：<br>
+          {% for r in scenario.memory.forbidden %}
+          <code>{{ r.text }}</code> —— {{ r.reason }}<br>
+          {% endfor %}
+          它只管<strong>声明过的</strong>标记：没声明的注入它一个字都不会说——
+          通用做法要把工具返回体和记忆对一遍，而边界没留返回体。
+        </div>
+        {% endif %}
       </dd>
       {% endif %}
       {% if scenario.expected_charges is not none %}

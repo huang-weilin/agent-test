@@ -1,6 +1,8 @@
 """场景文件的加载与校验。
 
-校验里有三条是**跨字段**的，单看任何一个字段都发现不了，但它们出错的方式都很安静：
+校验里有四条是**跨字段**的，单看任何一个字段都发现不了，但它们出错的方式都很安静
+（完整清单是五条，见 `docs/scenarios.md`；第五条——无人值守会话里的写操作必须交代
+`may_run_unattended`——在 `spec.py` 的模型校验里，不在这里）：
 
 1. `restore_from` 引用了一张**后面**才拍的快照。这意味着"回到未来"，
    记忆视野会算出一个没意义的数，而归因完全建立在视野上。必须报错，
@@ -16,6 +18,10 @@
    三种写法都让规则**永远匹配不上**，而检测器不会因此报错——它只是安静地不生效。
    用户于是以为自己已经处理过这个问题了，报告里那条 fail 却还在。这类错误在
    加载时必须说清楚，因为它是"装上了但没接线"的静音开关。
+
+4. 记忆判据是空的（缺 path / 缺标记文本 / 缺理由）。同一个道理的反面：判据写得空
+   不是"不生效"，而是**生效得过了头**——空的标记文本会命中每一个条目，报出一条
+   满屏的中毒结论，把真正的问题淹掉。
 """
 from __future__ import annotations
 
@@ -134,6 +140,44 @@ def _check_references(scenario: Scenario, source: str) -> None:
             check_match(rule.match)
         except ValueError as exc:
             raise ScenarioError(f"{where}（{rule.detector}）的 {exc}") from exc
+
+    # 收口：把场景里的豁免整体转一遍（`spec.exemption_set` 会构造每一条 `Exemption`，
+    # 于是 `Exemption.__post_init__` 里那些**不在这段循环里**的规矩也会在这里生效）。
+    #
+    # 上面那段逐条校验是为了给出带位置的好消息，但"校验只有这一处"是危险的——
+    # `__post_init__` 后来加的规矩（比如"记忆族不吃豁免"）不会自动出现在上面，
+    # 而漏掉的症状是规则在加载时通过、跑到检测器那里才炸。`spec.exemption_set`
+    # 的文档字符串一直写着"加载时会先调一遍它"，这段就是那句话的兑现。
+    try:
+        scenario.exemption_set()
+    except ValueError as exc:
+        raise ScenarioError(f"{source}: {exc}") from exc
+
+    # --- 记忆判据必须真的在判东西 ---
+    #
+    # 两条都是"判据看着在，其实什么都没判"的写法。和豁免那三条同一类：检测器
+    # 不会因为判据写得空而报错，它只会安静地给一个 pass——而那看起来和
+    # "这条记忆守住了"一模一样。
+    for index, rule in enumerate(scenario.memory.must_hold):
+        where = f"{source}: memory.must_hold[{index}]"
+        if not rule.path.strip():
+            raise ScenarioError(f"{where} 的 path 是空的，它匹配不到任何东西。")
+        if not rule.reason.strip():
+            raise ScenarioError(
+                f"{where}（{rule.path}）缺 reason。"
+                f"没有理由的判据在报告里无法复核——读者看不出为什么这条必须保持。"
+            )
+    for index, rule in enumerate(scenario.memory.forbidden):
+        where = f"{source}: memory.forbidden[{index}]"
+        if not rule.text.strip():
+            # 空串是任何字符串的子串，会**命中每一个条目**——报一条满屏的
+            # "中毒"，而真正的问题被淹在里面。
+            raise ScenarioError(
+                f"{where} 的 text 是空的。空文本是任何内容的子串，"
+                f"它会命中记忆里的每一个条目。"
+            )
+        if not rule.reason.strip():
+            raise ScenarioError(f"{where}（{rule.text!r}）缺 reason。")
 
     # --- 脚本只能调用声明过的工具 ---
     for index, session in enumerate(scenario.sessions):

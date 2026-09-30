@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,8 @@ from sandbox.db.models import DetectorVerdict
 from sandbox.detectors import KNOWN_DETECTORS, run_all
 from sandbox.detectors.base import CallView, Exemption, ExemptionSet, Finding
 from sandbox.detectors.idempotency import ToolFacts
+from sandbox.detectors.memory import ForbiddenText, MemoryRules, MustHold
+from sandbox.memory.observe import PHASE_END, PHASE_START, MemoryEntry, MemoryObservation
 from sandbox.scenario.expect import match_expectations
 from sandbox.scenario.spec import Expectation
 from sandbox.trace.normalize import fingerprint, normalize_args
@@ -54,7 +57,7 @@ from sandbox.trace.normalize import fingerprint, normalize_args
 SOURCES: frozenset[str] = frozenset({"自造", "公开-PERSIST", "公开-GhostWriter", "访谈"})
 
 #: 检测器族。每一族都必须在语料里表态，缺一个就加载失败。
-FAMILIES: tuple[str, ...] = ("loop", "idempotency", "autonomy")
+FAMILIES: tuple[str, ...] = ("loop", "idempotency", "autonomy", "memory")
 
 #: `expect` 里表示"这一族不许报 fail/warning"的写法。
 NONE = "none"
@@ -67,6 +70,7 @@ _ITEM_KEYS = {
     "sessions",
     "calls",
     "exemptions",
+    "memory",
     "expect",
     "absent",
 }
@@ -81,6 +85,14 @@ _CALL_KEYS = {
 }
 _SESSION_KEYS = {"ordinal", "name", "autonomous", "memory_horizon"}
 _TOOL_KEYS = {"is_write", "enforces_idempotency", "may_run_unattended"}
+
+#: 语料里记忆判据能写的键。前两组和场景 YAML 那边是**同一组**（`MustHoldDecl` /
+#: `ForbiddenTextDecl` 的字段），有测试钉着两边不许漂移。
+#: `observations` 只属于语料：真实运行的观测由引擎在会话边界上拍，不是写出来的。
+MEMORY_KEYS: frozenset[str] = frozenset({"observations", "must_hold", "forbidden"})
+MUST_HOLD_KEYS: frozenset[str] = frozenset({"path", "reason"})
+FORBIDDEN_KEYS: frozenset[str] = frozenset({"text", "reason"})
+OBSERVATION_KEYS: frozenset[str] = frozenset({"ordinal", "phase", "entries", "horizon"})
 
 
 class CorpusError(ValueError):
@@ -115,6 +127,11 @@ class CorpusItem:
     unattended_allowlist: frozenset[str]
     autonomous_ordinals: frozenset[int]
     exemptions: ExemptionSet
+    #: 会话边界上的记忆观测。**第二条观测通道**——它不是边界上的调用，
+    #: 所以不在 `calls` 里（见 detectors/memory.py 的说明）。
+    memories: list[MemoryObservation] = field(default_factory=list)
+    #: 记忆判据（must_hold / forbidden）。空 = 这一族只观测不判定。
+    memory_rules: MemoryRules = field(default_factory=MemoryRules)
     #: 该报的结论，逐条比对（含 verdict 与 reason_code）。
     expect: list[Expectation] = field(default_factory=list)
     #: 每一族检测器"该不该报"。值为 True 表示这一族在这条轨迹上应当报出
@@ -174,6 +191,92 @@ def _reject_unknown(keys: Any, allowed: set[str] | frozenset[str], what: str, pa
             f"拼错的字段会被静默忽略，而那条约束于是从来没被检查过——"
             f"所以这里直接让加载失败。"
         )
+
+
+def _parse_memory(
+    raw: Any, path: str
+) -> tuple[list[MemoryObservation], MemoryRules]:
+    """把 `memory` 解析成观测 + 判据。
+
+    观测的 `entries` 写成 `{路径: 内容}`，**摘要由加载器算**——和 `calls` 的
+    `seq`、指纹同一个理由：手写摘要就会手写错，而错的摘要在报告里表现为
+    "内容变了"，指向一个根本没发生过的问题。
+
+    判据部分（`must_hold` / `forbidden`）与场景 YAML 是同一组字段，两处各写一遍
+    校验的话迟早会松掉一处，所以两处都从 `scenario.loader` 的同一套规矩来：
+    空路径、空标记、缺理由都在加载时报错。
+    """
+    if raw is None:
+        return [], MemoryRules()
+    mapping = _require_mapping(raw, "memory", path)
+    _reject_unknown(mapping, MEMORY_KEYS, "memory", path)
+
+    observations: list[MemoryObservation] = []
+    raw_observations = _require_list(mapping.get("observations") or [], "observations", path)
+    for i, entry in enumerate(raw_observations):
+        where = f"{path}: memory.observations[{i}]"
+        obs = _require_mapping(entry, "记忆观测", where)
+        _reject_unknown(obs, OBSERVATION_KEYS, "记忆观测", where)
+        if "ordinal" not in obs:
+            raise CorpusError(f"{where} 缺 ordinal。观测点是按 (会话, 边界) 排序的。")
+        phase = str(obs.get("phase", ""))
+        if phase not in (PHASE_START, PHASE_END):
+            raise CorpusError(
+                f"{where}: phase 只能是 {PHASE_START!r} 或 {PHASE_END!r}，收到 {phase!r}。"
+                f"边界名写错的后果是这一条被排到时间线的另一端，"
+                f"漂移会指向相反的方向，而报告看起来仍然正常。"
+            )
+        contents = _require_mapping(obs.get("entries") or {}, "entries", where)
+        observations.append(
+            MemoryObservation(
+                ordinal=int(obs["ordinal"]),
+                phase=phase,
+                # 不写 = 不知道（不是"自然延续"）。**不许猜**：视野决定了
+                # "键不见了"该算回滚还是算丢失，猜一个数就等于替标注人做归因。
+                horizon=None if obs.get("horizon") is None else int(obs["horizon"]),
+                entries=tuple(
+                    MemoryEntry(
+                        path=str(name),
+                        sha256=hashlib.sha256(str(text).encode("utf-8")).hexdigest(),
+                        text=str(text),
+                    )
+                    for name, text in contents.items()
+                ),
+            )
+        )
+
+    must_hold: list[MustHold] = []
+    for i, entry in enumerate(_require_list(mapping.get("must_hold") or [], "must_hold", path)):
+        where = f"{path}: memory.must_hold[{i}]"
+        rule = _require_mapping(entry, "记忆判据", where)
+        _reject_unknown(rule, MUST_HOLD_KEYS, "记忆判据", where)
+        target = str(rule.get("path", ""))
+        if not target.strip():
+            raise CorpusError(f"{where} 的 path 是空的，它匹配不到任何东西。")
+        reason = str(rule.get("reason", ""))
+        if not reason.strip():
+            raise CorpusError(f"{where}（{target}）缺 reason。没有理由的判据无法复核。")
+        must_hold.append(MustHold(path=target, reason=reason))
+
+    forbidden: list[ForbiddenText] = []
+    for i, entry in enumerate(_require_list(mapping.get("forbidden") or [], "forbidden", path)):
+        where = f"{path}: memory.forbidden[{i}]"
+        rule = _require_mapping(entry, "禁用标记", where)
+        _reject_unknown(rule, FORBIDDEN_KEYS, "禁用标记", where)
+        text = str(rule.get("text", ""))
+        if not text.strip():
+            # 空串是任何内容的子串，会命中每一个条目——报一条满屏的中毒结论，
+            # 把真正的问题淹在里面。
+            raise CorpusError(
+                f"{where} 的 text 是空的。空文本是任何内容的子串，"
+                f"它会命中记忆里的每一个条目。"
+            )
+        reason = str(rule.get("reason", ""))
+        if not reason.strip():
+            raise CorpusError(f"{where}（{text!r}）缺 reason。")
+        forbidden.append(ForbiddenText(text=text, reason=reason))
+
+    return observations, MemoryRules(must_hold=tuple(must_hold), forbidden=tuple(forbidden))
 
 
 def _parse_expectations(
@@ -343,15 +446,22 @@ def _parse_exemptions(raw: Any, path: str) -> ExemptionSet:
             raise CorpusError(
                 f"{where}: 豁免缺 reason。没有理由的豁免在报告里无法复核，等于永久静音。"
             )
-        rules.append(
-            Exemption(
-                detector=detector,
-                tool=mapping.get("tool"),
-                reason=reason,
-                match=dict(mapping.get("match", {})),
-                allow_write=bool(mapping.get("allow_write", False)),
+        try:
+            rules.append(
+                Exemption(
+                    detector=detector,
+                    tool=mapping.get("tool"),
+                    reason=reason,
+                    match=dict(mapping.get("match", {})),
+                    allow_write=bool(mapping.get("allow_write", False)),
+                )
             )
-        )
+        except ValueError as exc:
+            # `Exemption.__post_init__` 是**唯一**的收口处，它拦的规矩（比如指向
+            # 记忆族这种"不吃豁免"的检测器）必须原样变成加载期错误。漏了这一层，
+            # 那些规则会在加载时通过、跑到检测器那里才炸，而语料加载期的报错是
+            # 这个项目里唯一能让人看清自己写错了什么的地方。
+            raise CorpusError(f"{where}: {exc}") from exc
     return ExemptionSet(rules)
 
 
@@ -431,6 +541,7 @@ def parse_item(raw: Any, path: str) -> CorpusItem:
     sessions = _parse_sessions(mapping.get("sessions"), path)
     calls, lines = _parse_calls(mapping.get("calls"), path, item_id, tools, sessions)
     expectations, labels = _parse_expectations(mapping.get("expect"), path, item_id)
+    memories, memory_rules = _parse_memory(mapping.get("memory"), path)
 
     return CorpusItem(
         id=item_id,
@@ -442,6 +553,8 @@ def parse_item(raw: Any, path: str) -> CorpusItem:
         unattended_allowlist=_parse_allowlist(mapping.get("tools"), path),
         autonomous_ordinals=frozenset(s.ordinal for s in sessions if s.autonomous),
         exemptions=_parse_exemptions(mapping.get("exemptions"), path),
+        memories=memories,
+        memory_rules=memory_rules,
         expect=expectations,
         family_labels=labels,
         source_lines=lines,
@@ -479,6 +592,8 @@ def run_item(item: CorpusItem) -> ItemResult:
         unattended_allowlist=item.unattended_allowlist,
         autonomous_ordinals=item.autonomous_ordinals,
         exemptions=item.exemptions,
+        memories=item.memories,
+        memory_rules=item.memory_rules,
     )
     matched, missing, remaining = match_expectations(item.expect, findings)
     forbidden = [

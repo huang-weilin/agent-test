@@ -68,9 +68,9 @@ def test_every_item_matches_its_labels(results) -> None:
 
 
 def test_corpus_covers_every_detector_family(results) -> None:
-    """三族都要有正样本和负样本。
+    """每一族都要有正样本和负样本。
 
-    只覆盖一族的话，另外两族的精确率是拿 0 个样本算出来的——而结果会打印成
+    只覆盖一族的话，另外几族的精确率是拿 0 个样本算出来的——而结果会打印成
     "100.0%"，看起来和真的测过一样。
     """
     for family in FAMILIES:
@@ -115,7 +115,12 @@ BASE_ITEM = {
     "tools": {"get_order": {"is_write": False}},
     "sessions": [{"ordinal": 0}],
     "calls": [{"tool": "get_order", "args": {"order_id": "A1"}}],
-    "expect": {"loop": "pass", "idempotency": "inconclusive", "autonomy": "none"},
+    "expect": {
+        "loop": "pass",
+        "idempotency": "inconclusive",
+        "autonomy": "none",
+        "memory": "none",
+    },
 }
 
 
@@ -139,7 +144,12 @@ def test_minimal_item_loads() -> None:
     item = parse_item(BASE_ITEM, "t.yaml")
     assert item.id == "t-1"
     assert item.calls[0].fingerprint, "指纹要从和生产同一处算出来"
-    assert item.family_labels == {"loop": False, "idempotency": False, "autonomy": False}
+    assert item.family_labels == {
+        "loop": False,
+        "idempotency": False,
+        "autonomy": False,
+        "memory": False,
+    }
 
 
 def test_unknown_field_is_rejected() -> None:
@@ -157,7 +167,9 @@ def test_missing_family_label_is_rejected() -> None:
 
 def test_expect_must_reference_a_known_detector() -> None:
     _rejects(
-        _item(expect={"loop.strickt": "fail", "idempotency": "pass", "autonomy": "none"}),
+        _item(
+            expect={"loop.strickt": "fail", "idempotency": "pass", "autonomy": "none"}
+        ),
         "loop.strickt",
     )
 
@@ -229,7 +241,7 @@ def test_duplicate_ids_across_files_are_rejected(tmp_path) -> None:
         "    tools: {get_order: {is_write: false}}\n"
         "    sessions: [{ordinal: 0}]\n"
         "    calls: [{tool: get_order, args: {order_id: A1}}]\n"
-        "    expect: {loop: pass, idempotency: inconclusive, autonomy: none}\n"
+        "    expect: {loop: pass, idempotency: inconclusive, autonomy: none, memory: none}\n"
     )
     (tmp_path / "a.yaml").write_text(body, encoding="utf-8")
     (tmp_path / "b.yaml").write_text(body, encoding="utf-8")
@@ -255,18 +267,26 @@ WRITE_ITEM = {
         {"tool": "create_payment", "args": {"order_id": "A1", "amount": 99}},
         {"tool": "create_payment", "args": {"order_id": "A1", "amount": 99}},
     ],
-    "expect": {"loop": "pass", "idempotency": "fail", "autonomy": "none"},
+    "expect": {
+        "loop": "pass",
+        "idempotency": "fail",
+        "autonomy": "none",
+        "memory": "none",
+    },
 }
 
 
 def test_a_wrong_label_shows_up_as_missing_and_forbidden() -> None:
     """自检：故意把标注写反，两个方向都要被抓到。
 
-    这一条如果不红，上面那 31 条绿的就全是废话——一个永远为空的检查会让
+    这一条如果不红，前面那些绿的就全是废话——一个永远为空的检查会让
     精确率看起来是 100%。
     """
     # 该报 fail 却标了"这一族不许报" → 报出来了，进 forbidden
-    wrong = dict(WRITE_ITEM, expect={"loop": "pass", "idempotency": NONE, "autonomy": NONE})
+    wrong = dict(
+        WRITE_ITEM,
+        expect={"loop": "pass", "idempotency": NONE, "autonomy": NONE, "memory": NONE},
+    )
     result = run_item(parse_item(wrong, "t.yaml"))
     assert not result.ok
     assert [f.detector for f in result.forbidden] == ["idempotency"]
@@ -279,7 +299,7 @@ def test_a_wrong_label_shows_up_as_missing_and_forbidden() -> None:
             {"tool": "create_payment", "args": {"order_id": "A1"}, "idempotency_key": "k"},
             {"tool": "create_payment", "args": {"order_id": "A1"}, "idempotency_key": "k"},
         ],
-        expect={"loop": NONE, "idempotency": "fail", "autonomy": NONE},
+        expect={"loop": NONE, "idempotency": "fail", "autonomy": NONE, "memory": NONE},
     )
     result = run_item(parse_item(quiet, "t.yaml"))
     assert not result.ok
@@ -293,7 +313,7 @@ def test_absent_catches_a_finding_the_family_labels_cannot() -> None:
     item = parse_item(
         dict(
             WRITE_ITEM,
-            expect={"loop": "pass", "idempotency": "fail", "autonomy": "none"},
+            expect={"loop": "pass", "idempotency": "fail", "autonomy": "none", "memory": NONE},
             absent=[{"detector": "idempotency", "verdict": "pass"}],
         ),
         "t.yaml",
@@ -318,7 +338,7 @@ def test_absent_catches_a_finding_the_family_labels_cannot() -> None:
                     "idempotency_key": "k",
                 },
             ],
-            expect={"loop": "pass", "idempotency": "warning", "autonomy": "none"},
+            expect={"loop": "pass", "idempotency": "warning", "autonomy": "none", "memory": NONE},
             absent=[{"detector": "idempotency"}],
         ),
         "t.yaml",
@@ -340,6 +360,7 @@ def test_family_labels_or_fold_sub_detectors() -> None:
                 "loop": "pass",
                 "idempotency": "none",
                 "autonomy": "none",
+                "memory": "none",
             },
         ),
         "t.yaml",
@@ -357,7 +378,7 @@ def test_score_counts_precision_and_recall() -> None:
             WRITE_ITEM,
             id="t-quiet",
             calls=[{"tool": "create_payment", "args": {"order_id": "A1", "amount": 99}}],
-            expect={"loop": "pass", "idempotency": "pass", "autonomy": "none"},
+            expect={"loop": "pass", "idempotency": "pass", "autonomy": "none", "memory": NONE},
         ),
         "t.yaml",
     )  # 不该报也没报 → TN
@@ -377,7 +398,7 @@ def test_score_has_no_verdict_when_the_grid_is_empty() -> None:
         dict(
             WRITE_ITEM,
             calls=[{"tool": "create_payment", "args": {"order_id": "A1", "amount": 99}}],
-            expect={"loop": "pass", "idempotency": "pass", "autonomy": "none"},
+            expect={"loop": "pass", "idempotency": "pass", "autonomy": "none", "memory": NONE},
         ),
         "t.yaml",
     )
