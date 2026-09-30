@@ -48,13 +48,8 @@ NO_LIVE_SAMPLE: dict[str, str] = {
         "而 mock 的工具表里没有这样的参数：get_order 只有字符串 order_id，"
         "非数值字段一律保守判为不单调（loop.py 的 _all_monotonic）。要造得先加一个分页读工具"
     ),
-    "poison_marker_present": (
-        "要一个场景声明 memory.forbidden 且标记真的落进记忆——今天没有任何场景声明它。"
-        "演示 Agent 的记忆里目前只写它自己的动作记录，标记要进去得让它把工具返回的"
-        "内容也写进记忆，是 Agent 侧要加的能力"
-    ),
     "unauthorized_attempt_blocked": (
-        "要有一次带着 blocked_by_proxy 的调用，而今天 15 个场景一次都没有："
+        "要有一次带着 blocked_by_proxy 的调用，而今天 17 个场景一次都没有："
         "场景路径不配出口策略（runner 把它重置成默认策略），"
         "而未声明的工具调用走的是 tool_scope 那条路，不算写操作。"
         "要造得先想清楚这道拦截该由谁下、以及在报告里归给谁"

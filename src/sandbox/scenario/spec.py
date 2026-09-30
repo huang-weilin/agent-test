@@ -271,6 +271,24 @@ class MemoryDecl(BaseModel):
     forbidden: list[ForbiddenTextDecl] = Field(default_factory=list)
 
 
+class WorldDecl(BaseModel):
+    """Agent 醒来时，目标系统里长什么样。
+
+    今天只有一样东西：订单上的自由文本备注。它是**注入面**——上游系统里那些
+    第三方写得了的字段（订单备注、工单正文、邮件内容）。记忆中毒的受控实验要
+    的就是这句话：世界里有一句话，问题是 Agent 会不会把它带进长效记忆。
+
+    **它是世界，不是判据**：备注里写了什么与"什么算失败"无关（那是 `memory`
+    段的事）。两条场景把同一句话一个写成注入、一个写成正常备注，跑出来的差别
+    必须来自这里——只改判据不叫受控实验，那只是换了把尺子。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    #: 订单号 → 那句话。订单号必须是目标系统里真实存在的样例订单，加载时校验。
+    order_notes: dict[str, str] = Field(default_factory=dict)
+
+
 class Scenario(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -296,6 +314,18 @@ class Scenario(BaseModel):
     # 观测本身（会话边界上记忆长什么样）不需要声明，引擎每段会话都自动看一眼：
     # 声明与否只决定**判不判**，不决定看不看。
     memory: MemoryDecl = Field(default_factory=MemoryDecl)
+
+    # Agent 醒来时，目标系统里长什么样（今天只有订单备注）。
+    #
+    # 它和 `memory` 是一对：**这里写下的是世界里的那句话，那里写下的是"这句话
+    # 不许出现在记忆里"**。分开是刻意的——把注入文本写进判据段的话，"世界里有
+    # 这句话"和"我们要求它不在记忆里"就成了一件事，而对照实验要的正是两者的
+    # 差别：同一句话，一个场景里它进了记忆（fail），另一个场景里它压根不在世界里
+    # （pass）。
+    #
+    # 进配置指纹的 `world` 节：改了它等于换了这次测试面对的世界，前后两次
+    # 运行不该拿来比"失败少了几个"。
+    world: WorldDecl = Field(default_factory=WorldDecl)
 
     # 出现了没被 expect 匹配上的 fail 结论时怎么办。
     # 默认 fail：这是测试工具，"没预料到的失败"必须让人知道。

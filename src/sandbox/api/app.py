@@ -42,6 +42,7 @@ from sandbox.api.jobs import JobRegistry
 from sandbox.cost import aggregator as cost
 from sandbox.db.engine import init_db
 from sandbox.formatting import money, span_human, tokens
+from sandbox.memory.observe import phase_label
 from sandbox.regression import cases, diff
 from sandbox.scenario import identity, loader
 from sandbox.scenario.loader import ScenarioError
@@ -78,6 +79,16 @@ def _localdt(value: datetime | str | None, fmt: str = "%m-%d %H:%M:%S") -> str:
             # 认不出来就原样印，不猜。猜错的时间比不显示的时间更坏。
             return value
     return value.astimezone().strftime(fmt)
+
+
+def _phase_label_of(observation: dict[str, Any]) -> str:
+    """模板过滤器：把一条记忆观测的时点说成"会话 0 结束时"。
+
+    收的是整条观测而不是两个参数，因为模板里拿到的是报告快照里那个字典，写法
+    得跟着它走。拼法本身在 `memory/observe.py` 的 `phase_label` 里——命令行报告
+    和检测结论用的也是它。
+    """
+    return phase_label(observation["ordinal"], observation["phase"])
 
 
 def _verdict_label(verdict_ok: bool | None) -> tuple[str, str]:
@@ -143,6 +154,11 @@ def create_app(
     # "没过去多久"，而它是一小时）。两份实现意味着网页和命令行可能对同一个
     # 数给出不同说法，读的人第一个念头是"哪个坏了"。
     templates.env.filters["span"] = span_human
+    # 会话边界的时点说法。和上面同一个理由：`会话 0 结束时`这个说法在检测结论、
+    # 命令行报告、界面上必须是同一串字符——模板里手拼的话，少一个空格就是三种
+    # 写法，而读的人只会觉得报告马虎。（过滤器收的是整条观测，不是两个参数——
+    # 模板里拿到的是 `summarize_observations` 写下的那个字典。）
+    templates.env.filters["phase_label"] = _phase_label_of
 
     app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 

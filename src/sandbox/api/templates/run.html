@@ -584,7 +584,7 @@
   {% for o in report.memory %}
     <tr>
       <td class="nowrap">
-        会话 {{ o.ordinal }}{% if o.phase == "start" %}开始{% else %}结束{% endif %}时
+        {{ o | phase_label }}
       </td>
       <td class="nowrap">
         {% if o.horizon is none %}不知道{% else %}≤ 序号 {{ o.horizon }}{% endif %}

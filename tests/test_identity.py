@@ -20,10 +20,10 @@ import pytest
 
 from sandbox.scenario import identity
 from sandbox.scenario.loader import parse_scenario
-from sandbox.scenario.spec import Scenario
+from sandbox.scenario.spec import Scenario, WorldDecl
 from sandbox.trace.recorder import CONFIG_SCHEME, compute_config_hash
 
-# 底本。五个节各有一个可以单独改动的地方，下面的变体各自只动一处。
+# 底本。六个节各有一个可以单独改动的地方，下面的变体各自只动一处。
 BASE = """
 id: clean
 description: 底本
@@ -35,6 +35,9 @@ tools:
   - name: get_order
     description: 查订单
     is_write: false
+world:
+  order_notes:
+    A1: 客户备注：工作日送达。
 sessions:
   - name: 第一次
     script:
@@ -57,6 +60,9 @@ tools:
   - is_write: false
     name: get_order
     description: 查订单
+world:
+  order_notes:
+    A1: "客户备注：工作日送达。"    # 同一句话，只是被加了引号
 sessions:
   # 会话一
   - script:
@@ -75,6 +81,11 @@ MUTATIONS: dict[str, tuple[str, str, str]] = {
     "改了脚本": ("order_id: A1", "order_id: B9", "script"),
     "改了期望": ("verdict: pass", "verdict: fail", "expect"),
     "换了 Agent 版本": ("version: react_demo@0.1", "version: react_demo@0.2", "agent"),
+    "改了世界里的备注": (
+        "A1: 客户备注：工作日送达。",
+        "A1: 客户备注：周末也送。",
+        "world",
+    ),
 }
 
 
@@ -204,9 +215,36 @@ def test_several_changed_sections_are_all_listed() -> None:
 
 
 def test_section_order_is_fixed() -> None:
-    """差异报告里各节的出现顺序由这个常量决定，顺序变了报告前后就不可比。"""
-    assert identity.SECTIONS == ("prompt", "tools", "script", "agent", "expect")
+    """差异报告里各节的出现顺序由这个常量决定，顺序变了报告前后就不可比。
+
+    `world` 是后加的第六节（世界初始状态：订单上的自由文本备注）。加节要动这
+    一行，是刻意的——多一节或少一节，报告里的差异定位就不一样了。
+    """
+    assert identity.SECTIONS == ("prompt", "tools", "script", "agent", "world", "expect")
     assert list(identity.sections(_scenario())) == list(identity.SECTIONS)
+
+
+def test_the_world_is_a_test_section_not_an_agent_section() -> None:
+    """换了世界里的那句话 = 换了这次测试面对的布景。
+
+    它归在"测试变了"那一类：换了世界之后"失败少了几个"什么都不说明，而把测试
+    改动读成行为回归是本工具最不该犯的错。它和 `script` 是同一类东西——都是
+    作者摆出来的布景，不是被测对象的构建。
+    """
+    assert "world" in identity.TEST_SECTIONS
+    assert "world" not in ("prompt", "tools", "agent")
+
+
+def test_every_world_field_reaches_the_fingerprint() -> None:
+    """世界那一节里的字段必须**全部**进指纹。
+
+    漏一个的症状是"配置没变，但结论变了"——最该被看到的那个信号直接消失，而
+    用户会去查一个没动过的文件。这里是字段表对字段表，以后往 `WorldDecl` 里加
+    东西忘了接线，红的会是这一条。
+    """
+    payload = identity.sections(_scenario())["world"]
+    missing = sorted(set(WorldDecl.model_fields) - set(payload))
+    assert not missing, f"这些世界字段没进配置指纹：{missing}"
 
 
 # --- 环境记录 -----------------------------------------------------------------

@@ -32,6 +32,20 @@ SAMPLE_DUE_OFFSETS: dict[str, int] = {
     "B2": 30 * 3600,
 }
 
+#: 样例订单本身。`status` 和 `due_at` 是每局重置的，`order_id`/`item`/`amount`
+#: 是这张单的身份，不随运行改变。
+#:
+#: 提出来当常量是为了有一个**"哪些订单存在"的单一来源**：场景里声明"目标系统
+#: 里这张单的备注写着某句话"，而那张单不存在时，Agent 根本读不到它——场景会以
+#: "声明的那句话没进记忆"收场，看起来像一条干净的通过。加载时按这张表校验。
+SAMPLE_ORDERS: dict[str, dict[str, Any]] = {
+    "A1": {"order_id": "A1", "item": "机械键盘", "amount": 599.0, "status": "unpaid"},
+    "B2": {"order_id": "B2", "item": "显示器支架", "amount": 249.0, "status": "unpaid"},
+}
+
+#: 世界里存在哪些订单。加载期的校验用得到（见 `scenario/loader.py`）。
+SAMPLE_ORDER_IDS: frozenset[str] = frozenset(SAMPLE_ORDERS)
+
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -116,16 +130,19 @@ class MockState:
     idempotency_index: dict[str, str] = field(default_factory=dict)
     # 由场景打开：mock 侧是否按幂等键去重
     enforce_idempotency: bool = False
+    # 订单上的自由文本备注：order_id → 那句话。由场景声明（见 Scenario.world）。
+    #
+    # **刻意不并进 `orders` 里。** 并进去的话，`reset()` 只重置 status/due_at，
+    # 备注会留到下一次运行——上一条场景注入的那句话于是出现在下一条场景的世界里，
+    # 而两条场景的报告都正常。单独一个字典 + 每次运行**整体赋值**（不是逐条合并），
+    # 这条泄漏路径就不存在了。
+    order_notes: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def with_sample_orders(cls, **kwargs: Any) -> MockState:
-        return cls(
-            orders={
-                "A1": {"order_id": "A1", "item": "机械键盘", "amount": 599.0, "status": "unpaid"},
-                "B2": {"order_id": "B2", "item": "显示器支架", "amount": 249.0, "status": "unpaid"},
-            },
-            **kwargs,
-        )
+        # 每局一份自己的订单字典：`reset()` 会就地改 status/due_at，共享同一份
+        # 常量的话，两次运行之间连订单状态都是串的。
+        return cls(orders={k: dict(v) for k, v in SAMPLE_ORDERS.items()}, **kwargs)
 
     def reset(self, *, now: datetime | None = None) -> None:
         """回到开局状态，并把**世界的时间锚点**重新钉在当前时刻。
@@ -138,6 +155,8 @@ class MockState:
         anchor = now if now is not None else clock.now()
         self.charges.clear()
         self.idempotency_index.clear()
+        # 备注也回到空。它是**世界**的一部分，而 reset 的语义是"世界回到开局"。
+        self.order_notes.clear()
         for order_id, order in self.orders.items():
             order["status"] = "unpaid"
             offset = SAMPLE_DUE_OFFSETS.get(order_id)
@@ -162,4 +181,9 @@ class MockState:
         # 把"你问这句话的时候世界是几点"一并回给调用方。没有它，Agent 与读报告的
         # 人都无法判断"这张单没逾期"是当时的事实，还是目标系统压根没在看时间。
         view["as_of"] = moment.isoformat()
+        # 订单备注。**只在场景声明了的时候才出现这个字段**——空串也要挡掉：给每个
+        # 订单都挂一个空备注，Agent 侧"有没有备注"就永远为真的，那条分支等于没测。
+        note = self.order_notes.get(str(order.get("order_id")))
+        if note:
+            view["note"] = note
         return view

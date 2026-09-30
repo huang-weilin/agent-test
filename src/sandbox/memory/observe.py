@@ -31,6 +31,17 @@ PHASE_END = "end"
 _PHASE_ORDER = {PHASE_START: 0, PHASE_END: 1}
 
 
+def phase_label(ordinal: int, phase: str) -> str:
+    """会话边界上某个时点的说法："会话 0 结束时"。
+
+    **只有这一个地方拼它。** 检测结论、命令行报告、界面三处都要说出同一个时点
+    名字，各拼一份的结果是它们迟早不一致——而且不一致的方式很难看：少一个空格
+    （"会话 0结束时"），读的人不会觉得那是 bug，只会觉得报告马虎。
+    """
+    when = "开始" if phase == PHASE_START else "结束"
+    return f"会话 {ordinal} {when}时"
+
+
 @dataclass(frozen=True)
 class MemoryEntry:
     """记忆里的一个条目。`text` 是解码后的内容，供人读与做标记检索。"""
@@ -61,7 +72,7 @@ class MemoryObservation:
 
     @property
     def label(self) -> str:
-        return f"会话 {self.ordinal} {'开始' if self.phase == PHASE_START else '结束'}时"
+        return phase_label(self.ordinal, self.phase)
 
     def get(self, path: str) -> MemoryEntry | None:
         for entry in self.entries:

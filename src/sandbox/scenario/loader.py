@@ -1,7 +1,7 @@
 """场景文件的加载与校验。
 
-校验里有四条是**跨字段**的，单看任何一个字段都发现不了，但它们出错的方式都很安静
-（完整清单是五条，见 `docs/scenarios.md`；第五条——无人值守会话里的写操作必须交代
+校验里有五条是**跨字段**的，单看任何一个字段都发现不了，但它们出错的方式都很安静
+（完整清单是六条，见 `docs/scenarios.md`；第五条——无人值守会话里的写操作必须交代
 `may_run_unattended`——在 `spec.py` 的模型校验里，不在这里）：
 
 1. `restore_from` 引用了一张**后面**才拍的快照。这意味着"回到未来"，
@@ -22,6 +22,10 @@
 4. 记忆判据是空的（缺 path / 缺标记文本 / 缺理由）。同一个道理的反面：判据写得空
    不是"不生效"，而是**生效得过了头**——空的标记文本会命中每一个条目，报出一条
    满屏的中毒结论，把真正的问题淹掉。
+
+6. 世界里的备注挂在一张不存在的订单上，或者是空的。备注读不到时，这一支的预期
+   是 fail 就会明着失败（预期未达成），偏巧是 pass 就会安静地通过——而它证明的
+   东西是零。见 `WorldDecl`。
 """
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ from pydantic import ValidationError
 
 from sandbox.detectors import KNOWN_DETECTORS
 from sandbox.detectors.base import check_match
+from sandbox.mock.toolspec import SAMPLE_ORDER_IDS
 from sandbox.scenario.spec import Scenario
 
 SCENARIO_SUFFIXES = (".yaml", ".yml", ".json")
@@ -178,6 +183,28 @@ def _check_references(scenario: Scenario, source: str) -> None:
             )
         if not rule.reason.strip():
             raise ScenarioError(f"{where}（{rule.text!r}）缺 reason。")
+
+    # --- 世界里的那句话必须真的能被读到 ---
+    #
+    # 备注挂在目标系统的一张订单上，而订单是 mock 里那两张样例单。写错订单号
+    # （或者写了一张不存在的单）时，Agent 永远读不到那句话——如果这一支的预期
+    # 恰好是 pass（对照支就是这样），它会安安静静地通过，而它证明的东西是零。
+    for order_id, note in scenario.world.order_notes.items():
+        where = f"{source}: world.order_notes[{order_id!r}]"
+        if not note.strip():
+            raise ScenarioError(
+                f"{where} 的备注是空的。空备注在目标系统那边等同于没有备注，"
+                f"而「没有备注」会让这一支无论怎么跑都通过——它看起来像"
+                f"「Agent 没把世界里的东西记下来」。"
+            )
+        if order_id not in SAMPLE_ORDER_IDS:
+            raise ScenarioError(
+                f"{where} 指向一张不存在的订单。目标系统里存在的订单："
+                f"{sorted(SAMPLE_ORDER_IDS)}。\n"
+                f"备注挂在不存在的单上，Agent 永远读不到它——场景会以"
+                f"「世界里的那句话没进记忆」收场，而那和「Agent 没把它记下来」"
+                f"长得一模一样。"
+            )
 
     # --- 脚本只能调用声明过的工具 ---
     for index, session in enumerate(scenario.sessions):

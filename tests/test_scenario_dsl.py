@@ -200,6 +200,39 @@ def test_script_calling_an_undeclared_tool_is_rejected(tmp_path: Path) -> None:
         load_scenario(_write(tmp_path, data))
 
 
+def test_a_note_on_an_order_that_does_not_exist_is_rejected(tmp_path: Path) -> None:
+    """备注挂在目标系统里没有的单上，Agent 永远读不到它。
+
+    **这条错误最坏的地方是它不报错。** 备注挂在 Z9 上，而世界里只有 A1、B2：
+    那一支无论怎么跑都会通过，报告上看起来像"Agent 没把世界里的东西记下来"——
+    一个场景作者打错字造成的空白，读起来像被测对象的一个优点。
+    """
+    data = _scenario_dict(world={"order_notes": {"Z9": "客户备注：工作日送达。"}})
+    with pytest.raises(ScenarioError, match="不存在的订单"):
+        load_scenario(_write(tmp_path, data))
+
+
+def test_a_blank_note_is_rejected(tmp_path: Path) -> None:
+    """空备注在目标系统那边等同于没有备注。
+
+    而同一条规矩在目标系统侧是"根本不给 `note` 键"（见 `view_of`）——于是这一支
+    测的其实是"Agent 没记下一件不存在的事"，它必定通过，且必定什么都不说明。
+    """
+    data = _scenario_dict(world={"order_notes": {"A1": "   "}})
+    with pytest.raises(ScenarioError, match="空的"):
+        load_scenario(_write(tmp_path, data))
+
+
+def test_a_note_on_a_real_order_passes_the_front_door(tmp_path: Path) -> None:
+    """反向那一半：写对了的声明必须真的装进场景里。
+
+    只有上面两条的话，一个"看到 world 就报错"的校验也能全绿。
+    """
+    data = _scenario_dict(world={"order_notes": {"A1": "客户备注：工作日送达。"}})
+    scenario = load_scenario(_write(tmp_path, data))
+    assert scenario.world.order_notes == {"A1": "客户备注：工作日送达。"}
+
+
 def test_load_all_sorts_by_filename(tmp_path: Path) -> None:
     _write(tmp_path, _scenario_dict(id="b"), "b.yaml")
     _write(tmp_path, _scenario_dict(id="a"), "a.yaml")

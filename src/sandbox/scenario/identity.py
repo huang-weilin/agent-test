@@ -21,9 +21,10 @@
 | `tools` | 工具声明（含 `is_write`、幂等参数） | 改了它手里的工具 |
 | `script` | 每个会话的脚本、任务、快照点、记忆回滚位置、时间间隔 | 改了**测试本身** |
 | `agent` | 版本号、目录、入口、额外环境变量 | 换了被测对象的构建 |
+| `world` | 世界初始状态（订单上的自由文本备注） | 换了这次测试面对的**世界** |
 | `expect` | 期望列表、豁免规则、记忆判据、`expected_charges`、意外失败的口径 | 改了判卷标准 |
 
-`script` 与 `expect` 变动尤其要认出来：它们是**测试定义**的一部分。测试改了
+`script`、`world` 与 `expect` 变动尤其要认出来：它们是**测试定义**的一部分。测试改了
 而结论变了，什么都不说明——把这种情况报成"行为回归"是本工具最不该犯的错。
 """
 
@@ -34,7 +35,7 @@ from typing import Any
 from sandbox.scenario.spec import Scenario
 
 #: 分节的名字与顺序。顺序固定，于是差异报告里各节的出现顺序也是固定的。
-SECTIONS: tuple[str, ...] = ("prompt", "tools", "script", "agent", "expect")
+SECTIONS: tuple[str, ...] = ("prompt", "tools", "script", "agent", "world", "expect")
 
 #: 分节给人看的名字。界面上不能直接印 `prompt` —— 用户改的东西叫"任务描述"，
 #: 不叫"prompt 节"。
@@ -43,11 +44,15 @@ SECTION_LABELS: dict[str, str] = {
     "tools": "工具声明",
     "script": "会话脚本",
     "agent": "Agent 构建",
+    "world": "世界初始状态",
     "expect": "期望与判卷标准",
 }
 
 #: 改动这几节意味着**测试本身**变了，而不是被测对象变了。见模块 docstring。
-TEST_SECTIONS: frozenset[str] = frozenset({"script", "expect"})
+#:
+#: `world` 在这里：换掉世界里那句话（订单备注）换的是**这次测试面对的世界**，
+#: 前后两次的结论不可比。它和 `script` 是同一类东西——都是作者摆出来的布景。
+TEST_SECTIONS: frozenset[str] = frozenset({"script", "world", "expect"})
 
 
 def sections(scenario: Scenario) -> dict[str, Any]:
@@ -77,6 +82,10 @@ def sections(scenario: Scenario) -> dict[str, Any]:
             "entry": scenario.agent.entry,
             "env": scenario.agent.env,
         },
+        # Agent 醒来时世界里有什么。今天只有订单上的自由文本备注，而它是**注入面**
+        # ——换了它，这一局面对的就不是同一个世界了。所以它单独成节、且归在
+        # "测试变了"那一类：改了它之后"失败少了几个"什么都不说明。
+        "world": {"order_notes": dict(scenario.world.order_notes)},
         # 判卷标准。豁免规则**也在这一节**：一条豁免改的是"什么算失败"，
         # 不是被测对象的行为。它落在这里，加规则的那次运行就会被判成
         # "测试变了、比不了"，而不是"失败少了几个"——后者是把静音读成修复。

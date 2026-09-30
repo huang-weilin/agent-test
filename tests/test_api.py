@@ -817,7 +817,9 @@ async def test_the_memory_observation_table_shows_paths_not_contents(
     resp = await client.get("/runs/run-memory")
     assert resp.status_code == 200
     table = resp.text.split("<h2>记忆观测</h2>")[1].split("</table>")[0]
-    assert "会话 1结束" in table
+    # 时点的说法和命令行报告、检测结论共用同一个拼法（`observe.phase_label`）：
+    # 三处各拼一份的话，"会话 1 结束时"会以两种写法出现在同一次运行的报告里。
+    assert "会话 1 结束时" in table
     assert "notes/order-A1.md" in table
     assert "scratch/log.md" in table
     # 观测点是会话边界这件事必须写在页面上：读的人不翻文档。

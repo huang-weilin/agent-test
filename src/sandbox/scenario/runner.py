@@ -65,6 +65,7 @@ from sandbox.memory.observe import (
     PHASE_START,
     MemoryObservation,
     observe_memory,
+    phase_label,
     summarize_observations,
 )
 from sandbox.memory.snapshot import SnapshotRef, SnapshotStore
@@ -529,6 +530,11 @@ class ScenarioRunner:
         state.enforce_idempotency = any(
             t.enforces_idempotency for t in scenario.tools if t.is_write
         )
+        # 世界里的那几句话。**整体赋值，不是逐条 update**：逐条合并的话，上一条
+        # 场景注入的备注会留在这一条场景的世界里，而两条场景的报告都正常——
+        # 那正是"世界被上局污染"最难看出来的一种。reset() 也清空它，两处都是
+        # "这一局的世界"这个语义。
+        state.order_notes = dict(scenario.world.order_notes)
         proxy_app.set_policy(None)
         proxy_app.set_transport(None)
         # clear() 会连带外处理器一起清掉（见 runtime.RunRegistry.clear 的说明），
@@ -1063,9 +1069,11 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
     add("\n--- 记忆观测（会话边界上看到的，不是判定）---")
     if result.memory:
         for o in result.memory:
-            when = f"会话 {o['ordinal']}" + ("开始" if o["phase"] == "start" else "结束")
+            # 时点的说法从 `phase_label` 来（它也是检测结论和界面用的那一个）：
+            # 各拼一份的话，报告里会出现"会话 0开始时"和"会话 0 开始时"两种写法。
+            when = phase_label(o["ordinal"], o["phase"])
             horizon = "不知道" if o["horizon"] is None else f"≤ 会话 {o['horizon']}"
-            add(f"  {when}时  记忆视野 {horizon}  条目 {o['entries']}")
+            add(f"  {when}  记忆视野 {horizon}  条目 {o['entries']}")
             for label, key in (("新出现", "added"), ("消失", "removed"), ("内容变了", "changed")):
                 if o[key]:
                     add(f"       {label}：{'、'.join(o[key])}")
