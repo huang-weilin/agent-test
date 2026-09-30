@@ -122,9 +122,9 @@
 | `missing_key` | `idempotency` / fail · `reason_code=missing_key` —— 工具声明了保护，调用侧不带键 |
 | `loop` | `loop.strict` / fail + 带外熔断终止进程 |
 | `loop_exempted` | `loop.strict` / pass（已豁免）—— **熔断认豁免的受控对照**：与 `loop` 一字不差的脚本，只多一条声明，这一次跑完不被杀 |
-| `cross_session_remembered` | 全绿 —— **正样本**：记忆完整，Agent 认出来了没再付 |
-| `cross_session_duplicate` | `reason_code=cross_session_duplicate` —— 记忆里有，Agent 该认出来 |
-| `cross_session_memory_loss` | `reason_code=cross_session_memory_loss` —— 我们回滚过，**别动 Agent** |
+| `cross_session_remembered` | 全绿 —— **正样本**：记忆完整，Agent 认出来了没再付；记忆族 `pass`（文件一个字节没变） |
+| `cross_session_duplicate` | `reason_code=cross_session_duplicate` —— 记忆里有，Agent 该认出来；同一个缺陷在记忆那一侧是 `memory.drift/fail` |
+| `cross_session_memory_loss` | `reason_code=cross_session_memory_loss` —— 我们回滚过，**别动 Agent**；**刻意不声明记忆判据**，那一族保持 `inconclusive` |
 | `long_run_overnight` | 全绿 —— **长时运行正样本**：隔了 30 小时，世界逾期了，Agent 付了 |
 | `long_run_same_moment` | 全绿 —— **对照组**：一字不差，只把间隔改成 0，一分钱都不该扣 |
 | `target_error` | 全绿 —— **调用链正样本**：目标系统回 404、它原样又问了一次，链上看得见顺序，却不被报成循环或缺陷 |
@@ -168,7 +168,7 @@ Agent 查不查记忆。三个分支必须给出三种不同的结论，否则�
 对照组声明 `inconclusive` 而不是 `pass`：它一笔都不付，幂等检测没有可判的对象，
 那是"未覆盖"。写成 `pass` 就是在说一句没有依据的话。
 
-667 个单测覆盖网关、代理、记录器、规范化、四个检测器、记忆快照、会话边界的记忆
+670 个单测覆盖网关、代理、记录器、规范化、四个检测器、记忆快照、会话边界的记忆
 观测、跨会话归因、**跨会话差异（对齐不靠顺序、不猜配对、不可比也要照列差异、
 "我们动过的东西"单独列、条数上限自报）**、
 **调用链（编号用"第几次调用"而不是共用计数器的运行序号 / 四种"谁的错"分开标 /
@@ -191,7 +191,8 @@ Schema 校验（**不认识的写法必须让场景加载失败** / 布尔不是
 **报错里不许带上字段值**——默认行为会把密钥打进 traceback）、记忆族（漂移的三种"没测到"必须是
 三种不同的结论而不是 pass / **回滚归因：不知道视野时不许往"是回滚"上猜** / 换名是
 warning 不是 fail、路径还在内容被改写仍是 fail / **记忆族不吃豁免，两个入口都要在
-加载时报错** / 摘要里不许出现记忆内容）、**标注语料**（45 条手写轨迹逐条命中
+加载时报错** / 摘要里不许出现记忆内容 / **生产路径上有活样本：跨会话三支各撑一种
+结论，且跑一次真 runner 也能在结论里找到那条判据**）、**标注语料**（45 条手写轨迹逐条命中
 标注 / 每族都要表态、少一族加载失败 / 一条写坏的语料不许被读成"检测器漏报" /
 机制自检：故意把标注写反，`missing`、`forbidden`、`absent` 三栏都要抓得住），
 以及 Web 界面（路径白名单 /
@@ -451,7 +452,7 @@ scenarios/            场景文件（YAML）。加用例 = 加文件，不改代
 scripts/              入口脚本：run_scenario.py（跑用例）、serve_ui.py（起界面）、
                       cost_report.py（看长期花费）、calibrate.py（用标注语料算
                       检测器精度）、run_walking_skeleton.py（跨进程证明，给人手工排查用）
-tests/                667 个单测；tests/corpus/ 是标注语料（45 条，见它的 README）
+tests/                670 个单测；tests/corpus/ 是标注语料（45 条，见它的 README）
 docs/decisions/       ADR 001~004
 ```
 

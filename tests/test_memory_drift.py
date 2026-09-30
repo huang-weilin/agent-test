@@ -627,3 +627,76 @@ def test_a_corpus_item_with_a_wrong_memory_label_turns_red() -> None:
         DetectorVerdict.FAIL
     )
     assert bad.family_labels["memory"] is True
+
+
+# --- 生产路径：场景里写下的判据，真跑一次要走到检测器 --------------------------
+
+
+DECLARED_PASS = ROOT / "scenarios" / "cross_session_remembered.yaml"
+DECLARED_FAIL = ROOT / "scenarios" / "cross_session_duplicate.yaml"
+UNDECLARED = ROOT / "scenarios" / "cross_session_memory_loss.yaml"
+
+AGENT_PYTHON = ROOT / "agents" / "react_demo" / ".venv"
+
+
+def test_the_three_cross_session_branches_cover_the_three_memory_states() -> None:
+    """一族的三种结论各要有一个**真场景**撑着，不能只有构造出来的输入。
+
+    这个文件里绝大多数测试直接喂观测——那是这一族的观测通道特殊（记忆不在
+    `CallView` 里），不是偷懒。代价是它们全绕过了场景加载那一段：判据是从
+    `MemoryRules(...)` 构造出来的，而生产上它是从 YAML 读出来的。
+
+    于是会出现一种很安静的失效：检测器、加载器校验、报告渲染全都好，而
+    **没有任何一个场景真的会去判记忆**。每一支跑出来都是那句"没有声明判据"，
+    报告上看起来像"这一族没事"。
+
+    跨会话那三支正好落在三种结论上，而且是同一个受控实验的三个分支——所以
+    它们凑成的不是三个例子，是一组对照：
+
+        remembered   声明了 → 记忆没变 → pass
+        duplicate    声明了 → 记忆变了 → fail
+        memory_loss  刻意不声明 → 只观测 → inconclusive
+
+    最后那一支**不是漏了**：它的记忆是我们自己回滚掉的，在那儿写一句"必须保持"
+    会和回滚点直接矛盾（检测器会报 memory_rolled_back 让你去掉一条）。要有一支
+    真的不声明的场景留在仓库里，否则"没声明 = 只观测不判定"这条规矩就没有活样本。
+    """
+    passed = load_scenario(DECLARED_PASS).memory_rules()
+    failed = load_scenario(DECLARED_FAIL).memory_rules()
+    undeclared = load_scenario(UNDECLARED).memory_rules()
+
+    assert [r.path for r in passed.must_hold] == ["actions.jsonl"]
+    assert [r.path for r in failed.must_hold] == ["actions.jsonl"]
+    assert [r.path for r in passed.must_hold] == [r.path for r in failed.must_hold], (
+        "两支必须用同一条判据——结论相反要来自世界不同，不能来自判据不同"
+    )
+    assert undeclared.empty, "这一支必须一个字都不声明，它演的就是'只观测不判定'"
+
+
+async def test_a_declared_rule_reaches_the_detector_in_a_real_run(temp_db: str) -> None:
+    """**这条盯的是接线，不是逻辑。**
+
+    上面那条把三个场景文件读出来看判据写没写；这条证明那份判据真的走到了检测器
+    手里：跑一次真的 runner（真拉起被测 Agent、真的在两段会话之间回滚过记忆），
+    在真运行的结论里找那条 `memory.drift`。
+
+    它红过的样子是"检测器什么都没说"——判据在 YAML 里躺着，没人读它。
+    """
+    if not AGENT_PYTHON.exists():
+        pytest.skip(f"被测 Agent 的 venv 不在（{AGENT_PYTHON}），跳过端到端记忆判定")
+    from sandbox.scenario.runner import ScenarioRunner
+
+    result = await ScenarioRunner(session_timeout_s=120.0).run(load_scenario(DECLARED_FAIL))
+
+    assert result.error is None, result.error
+    assert result.ok, result.expectation and result.expectation.to_dict()
+
+    drift = next(f for f in result.findings if f.detector == "memory.drift")
+    assert drift.verdict == DetectorVerdict.FAIL
+    assert drift.detail["reason_code"] == "memory_value_changed"
+    # 判据是从场景文件里那条声明来的——这条键名对不上就说明走的不是那条路。
+    assert drift.detail["path"] == "actions.jsonl"
+
+    # 第二条观测通道也确实活着：4 个时点（两段会话，各一进一出）。
+    # 没有观测的话检测器只会给 inconclusive，上面那两条断言根本到不了。
+    assert len(result.memory) == 4
