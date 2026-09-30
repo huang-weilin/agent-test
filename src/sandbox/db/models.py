@@ -75,6 +75,19 @@ class TestRun(Base):
     scenario_id: Mapped[str] = mapped_column(String(128), index=True)
     agent_version: Mapped[str] = mapped_column(String(128))
     config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    #: 上面那个哈希的**口径**。NULL = 本字段存在之前跑的运行，它的
+    #: `config_hash` 是按旧口径算的（只覆盖场景 id 与模型名，改了脚本或
+    #: Prompt 它都不变），**不能拿来判"配置有没有变"**。
+    #:
+    #: 有这一列是因为"两种口径的哈希不相等"必须和"配置真的变了"分开。
+    #: 少了它，一次旧运行和一次新运行放一起比，会得出"配置变了"——
+    #: 那是一句基于不可比数据的结论。
+    config_scheme: Mapped[str | None] = mapped_column(String(16))
+    #: 分节的配置原始值（`scenario/identity.py` 的 `sections()`）。
+    #:
+    #: 存**原值**而不是哈希：差异报告要说清改了什么，只有哈希就只能说"变了"。
+    #: 和 `report_json` 同一个理由——场景文件事后被编辑，这份快照仍是当时的。
+    config_parts_json: Mapped[str | None] = mapped_column(Text)
     session_sequence_id: Mapped[str | None] = mapped_column(String(36), index=True)
 
     status: Mapped[str] = mapped_column(String(16), default=RunStatus.RUNNING.value)

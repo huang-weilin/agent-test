@@ -58,6 +58,7 @@ from sandbox.formatting import tokens as _tokens
 from sandbox.gateway.stub import scripted_upstream
 from sandbox.memory.adapters.file_memory import FileMemoryAdapter
 from sandbox.memory.snapshot import SnapshotRef, SnapshotStore
+from sandbox.scenario import identity
 from sandbox.scenario.expect import ExpectResult, evaluate
 from sandbox.scenario.spec import Scenario
 from sandbox.trace.reader import load_session_sequence
@@ -401,7 +402,12 @@ class ScenarioRunner:
                 json={
                     "scenario_id": scenario.id,
                     "agent_version": scenario.agent.version,
-                    "config": {"scenario": scenario.id, "model": scenario.agent.model},
+                    # 分节的配置指纹 + 环境事实。**别退回成
+                    # `{"scenario": id, "model": model}`**：那个口径下改了脚本
+                    # 或 Prompt，哈希都不变，于是"配置没变但结果变了"这个最该
+                    # 被抓到的信号，恰恰是唯一抓不到的。见 scenario/identity.py。
+                    "config": identity.sections(scenario),
+                    "env": identity.environment(scenario),
                     "declared_writes": sorted(scenario.declared_writes()),
                     "idempotency_key_params": scenario.idempotency_params(),
                     "tools": {t.name: f"/tools/{t.name}" for t in scenario.tools},

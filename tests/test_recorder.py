@@ -54,6 +54,39 @@ async def test_config_hash_is_content_addressed(temp_db: str) -> None:
         assert ra.config_hash != rc.config_hash, "改了 prompt 必须换哈希"
 
 
+async def test_start_run_records_scheme_and_original_parts(temp_db: str) -> None:
+    """口径与分节原值都要落库，缺一个回归对比就会说谎。
+
+    只有哈希能说"变了"，但说不出"改的是哪一块"；只有原值能定位到节，但两节
+    长得一样时又分不出是同一份还是两份。所以两个都存。
+
+    口径也必须存：**两个不同口径算出的哈希不相等，不能读成"配置变了"**。
+    """
+    ctx = await _make_run()
+    async with session_scope() as db_:
+        run = await db_.get(TestRun, ctx.run_id)
+        assert run.config_scheme == "2"
+        # 存的是**原值**，不是"给值算个哈希"——差异报告要引用它说出改了什么。
+        assert json.loads(run.config_parts_json) == {
+            "prompt": "v1",
+            "tools": ["create_payment"],
+        }
+
+
+async def test_run_without_config_says_so_rather_than_claiming_unchanged(temp_db: str) -> None:
+    """没带配置开出来的运行（测试、探活）不能假装自己有一份配置。
+
+    它记的是空配置，于是和任何真配置比对都会得出"全变了"——那是**正确**的
+    答案，因为确实无从比较。反过来若在这里塞一份假配置，就会凭空造出
+    "配置没变"的依据。
+    """
+    ctx = await _make_run(config=None, env=None)
+    async with session_scope() as db_:
+        run = await db_.get(TestRun, ctx.run_id)
+        assert json.loads(run.config_parts_json) == {}
+        assert json.loads(run.env_json) == {}
+
+
 async def test_tool_call_args_are_normalized_before_storage(db) -> None:
     """噪声字段必须被剔除后再入库，否则近似层比较会被噪声淹没。"""
     ctx = await _make_run(declared_writes={"create_payment"})

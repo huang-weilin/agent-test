@@ -50,11 +50,25 @@ _IDEMPOTENCY_FIELD_ALIASES: tuple[str, ...] = (
 )
 
 
+#: `config_hash` 的口径版本。
+#:
+#: **改这个常量的定义时必须一起改它。** 只有口径不同，两个哈希不相等才不会被
+#: 读成"配置变了"——而那是回归对比里最要命的一种误读：它会把"换了算法"报成
+#: "改了 Prompt"，用户于是去查一个没动过的文件。
+#:
+#: 1（隐式，未记录）：只覆盖场景 id 与模型名。改了脚本或 Prompt 它都不变。
+#: 2：覆盖 `scenario/identity.py` 分出的那五节，改动可定位到具体是哪一块。
+CONFIG_SCHEME = "2"
+
+
 def compute_config_hash(payload: dict[str, Any]) -> str:
     """对运行配置做内容寻址。
 
     需求要求"差异项可定位到具体的 Prompt 或工具改动"。没有这个哈希，
     两次运行的结果差异就只能靠人回忆上次改了什么。
+
+    传进来的 payload 就是 `identity.sections()` 的那五节，所以这个哈希覆盖
+    **整个配置**；单节的定位靠 `config_parts_json` 里的原值比对，不靠它。
     """
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -129,6 +143,10 @@ async def start_run(
                 scenario_id=scenario_id,
                 agent_version=agent_version,
                 config_hash=compute_config_hash(config or {}),
+                # 口径与分节原值一起落库：前者让"两种口径不相等"能和"配置真变了"
+                # 分开，后者让差异报告能说出改的是哪一块。
+                config_scheme=CONFIG_SCHEME,
+                config_parts_json=json.dumps(config or {}, ensure_ascii=False, default=str),
                 session_sequence_id=seq_id,
                 status=RunStatus.RUNNING.value,
                 env_json=json.dumps(env or {}, ensure_ascii=False, default=str),
