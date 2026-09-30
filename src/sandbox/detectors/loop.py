@@ -120,25 +120,39 @@ class LoopDetector:
         # 判据用"三个列表都为空"而不是"没有非 PASS 结论"：后者会被正常分页的
         # PASS 和被豁免静音的 PASS 误触发，产出重复的通过项。
         if not (strict or approximate or ping_pong):
-            findings.append(
-                Finding(
-                    # 用检测器本名而不是 `loop.strict` —— 这条覆盖的是三项检查的
-                    # 总和，挂在严格层名下会让"严格层判出了循环"这个查询把它一起捞出来。
-                    detector=self.name,
-                    verdict=DetectorVerdict.PASS,
-                    summary=(
-                        f"已在 {len(agent_calls)} 次工具调用中比对，"
-                        f"未发现严格重复、近似重复或委托乒乓。"
-                    ),
-                    confidence=Confidence.HIGH,
-                    detail={
-                        "checked_calls": len(agent_calls),
-                        "distinct_operations": len(
-                            {(c.tool_name, c.fingerprint) for c in agent_calls}
-                        ),
-                    },
+            if not agent_calls:
+                # 一次 Agent 自己发起的调用都没有，比对样本是 0。
+                # 这时候报 PASS 就是在说"查过了、干净"——而实际一句都没查。
+                # 唯一的来路是全部调用都带 snapshot_restore（没有别的分支能让
+                # live 非空而 agent_calls 为空），所以文案直接点明这件事。
+                findings.append(
+                    inconclusive(
+                        self.name,
+                        f"全部 {len(replay_calls)} 次工具调用都来自快照恢复重放，"
+                        f"没有 Agent 自己发起的调用，无法判定是否循环。",
+                        detail={"snapshot_replays": len(replay_calls)},
+                    )
                 )
-            )
+            else:
+                findings.append(
+                    Finding(
+                        # 用检测器本名而不是 `loop.strict` —— 这条覆盖的是三项检查的
+                        # 总和，挂在严格层名下会让"严格层判出了循环"这个查询把它一起捞出来。
+                        detector=self.name,
+                        verdict=DetectorVerdict.PASS,
+                        summary=(
+                            f"已在 {len(agent_calls)} 次工具调用中比对，"
+                            f"未发现严格重复、近似重复或委托乒乓。"
+                        ),
+                        confidence=Confidence.HIGH,
+                        detail={
+                            "checked_calls": len(agent_calls),
+                            "distinct_operations": len(
+                                {(c.tool_name, c.fingerprint) for c in agent_calls}
+                            ),
+                        },
+                    )
+                )
         return findings
 
     # --- 严格层 ---------------------------------------------------------
@@ -308,7 +322,7 @@ class LoopDetector:
             verdict=DetectorVerdict.FAIL,
             summary=(
                 f"{tool_name} 以相似参数重复调用 {len(cluster)} 次，"
-                f"变化的字段 {sorted(differing)} **不是**单调推进，"
+                f"变化的字段 {sorted(differing)} 并非单调推进，"
                 f"是在原地打转。"
             ),
             # 近似层允许更多误报，按规格降级为 warning 语义的置信度
@@ -387,7 +401,7 @@ class LoopDetector:
                 finding = Finding(
                     detector=finding.detector,
                     verdict=DetectorVerdict.PASS,
-                    summary=f"{finding.summary}（已被豁免规则 {exemption.label} 静音）",
+                    summary=f"{finding.summary}{exemption.note()}",
                     confidence=Confidence.MEDIUM,
                     detail={**finding.detail, "would_have_been": "fail"},
                     exempted_by=exemption.label,
@@ -533,7 +547,7 @@ class LoopDetector:
         return Finding(
             detector=finding.detector,
             verdict=DetectorVerdict.PASS,
-            summary=f"{finding.summary}（已被豁免规则 {exemption.label} 静音）",
+            summary=f"{finding.summary}{exemption.note()}",
             confidence=Confidence.MEDIUM,
             detail={**finding.detail, "would_have_been": "fail"},
             exempted_by=exemption.label,

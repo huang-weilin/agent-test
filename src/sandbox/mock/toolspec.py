@@ -65,7 +65,7 @@ TOOL_SPECS: dict[str, ToolSpec] = {
     ),
     "create_payment": ToolSpec(
         name="create_payment",
-        description="对指定订单发起支付。**有副作用**：每成功一次就产生一笔扣款。",
+        description="对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。",
         parameters={
             "type": "object",
             "properties": {

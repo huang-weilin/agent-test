@@ -294,6 +294,13 @@ def test_snapshot_replays_are_reported_separately(make_call) -> None:
     assert len(replay) == 1
     assert replay[0].verdict == DetectorVerdict.WARNING
 
+    # 一次 Agent 自己发起的调用都没有 → 比对样本是 0，只能说"没测到"。
+    # 报 PASS 会变成"已在 0 次工具调用中比对，未发现循环"——把没查说成查过。
+    overall = [f for f in findings if f.detector == "loop"]
+    assert len(overall) == 1
+    assert overall[0].verdict == DetectorVerdict.INCONCLUSIVE
+    assert overall[0].detail["snapshot_replays"] == 3
+
 
 def test_blocked_calls_retry_does_not_become_an_agent_loop(make_call) -> None:
     """沙箱拦了它、再报它循环，等于自己制造误报（ADR 003 场景）。"""

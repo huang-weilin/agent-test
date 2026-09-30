@@ -77,9 +77,12 @@ def sections(scenario: Scenario) -> dict[str, Any]:
             "entry": scenario.agent.entry,
             "env": scenario.agent.env,
         },
-        # 判卷标准。
+        # 判卷标准。豁免规则**也在这一节**：一条豁免改的是"什么算失败"，
+        # 不是被测对象的行为。它落在这里，加规则的那次运行就会被判成
+        # "测试变了、比不了"，而不是"失败少了几个"——后者是把静音读成修复。
         "expect": {
             "expect": [e.model_dump(mode="json") for e in scenario.expect],
+            "exemptions": [e.model_dump(mode="json") for e in scenario.exemptions],
             "unexpected_failures": scenario.unexpected_failures,
             "expected_charges": scenario.expected_charges,
         },

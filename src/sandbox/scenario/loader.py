@@ -1,6 +1,6 @@
 """场景文件的加载与校验。
 
-校验里有两条是**跨字段**的，单看任何一个字段都发现不了，但它们出错的方式都很安静：
+校验里有三条是**跨字段**的，单看任何一个字段都发现不了，但它们出错的方式都很安静：
 
 1. `restore_from` 引用了一张**后面**才拍的快照。这意味着"回到未来"，
    记忆视野会算出一个没意义的数，而归因完全建立在视野上。必须报错，
@@ -11,6 +11,11 @@
 
 第二条的取舍值得说明：确实存在"故意让 Agent 调用未声明工具来测出口代理"的场景，
 但那种场景应当显式声明该工具再把它放到 allowlist 之外，而不是靠拼错名字。
+
+3. 豁免规则指向未知检测器、未声明的工具，或者 `match` 里写了不认识的键。
+   三种写法都让规则**永远匹配不上**，而检测器不会因此报错——它只是安静地不生效。
+   用户于是以为自己已经处理过这个问题了，报告里那条 fail 却还在。这类错误在
+   加载时必须说清楚，因为它是"装上了但没接线"的静音开关。
 """
 from __future__ import annotations
 
@@ -20,6 +25,8 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from sandbox.detectors import KNOWN_DETECTORS
+from sandbox.detectors.base import check_match
 from sandbox.scenario.spec import Scenario
 
 SCENARIO_SUFFIXES = (".yaml", ".yml", ".json")
@@ -92,7 +99,7 @@ def _check_references(scenario: Scenario, source: str) -> None:
                 f"{source}: 会话 #{index}（{session.name}）要恢复到快照 "
                 f"{session.restore_from!r}，但那个快照此时还不存在。\n"
                 f"到这一步为止可用的快照：{sorted(defined) or '（无）'}\n"
-                f"恢复到**之后**才拍的快照等于让记忆回到未来，"
+                f"恢复到之后才拍的快照等于让记忆回到未来，"
                 f"记忆视野会算错，而归因完全建立在视野上。"
             )
         # 本会话拍下的快照，供**后面的**会话引用。所以校验在循环开头、
@@ -100,6 +107,33 @@ def _check_references(scenario: Scenario, source: str) -> None:
         for name in (session.snapshot_before, session.snapshot_after):
             if name:
                 defined.add(name)
+
+    # --- 豁免规则必须真的能命中 ---
+    #
+    # 三条都是"规则看着在，实际永远不生效"的写法。检测器那边一条规则匹配不上
+    # 不会报错，只会安静地不静音——于是用户以为自己已经处理过这个问题了，
+    # 而报告里那条 fail 还在。这类错误必须在加载时说清楚。
+    for index, rule in enumerate(scenario.exemptions):
+        where = f"{source}: 豁免规则 #{index}"
+        if rule.detector not in KNOWN_DETECTORS:
+            raise ScenarioError(
+                f"{where} 指向未知检测器 {rule.detector!r}，它永远不会命中。\n"
+                f"已知检测器：{sorted(KNOWN_DETECTORS)}"
+            )
+        if not rule.reason.strip():
+            raise ScenarioError(
+                f"{where}（{rule.detector}）缺 reason。"
+                f"没有理由的豁免在报告里无法复核，等于永久静音。"
+            )
+        if rule.tool is not None and rule.tool not in tool_names:
+            raise ScenarioError(
+                f"{where}（{rule.detector}）指向未声明的工具 {rule.tool!r}，它永远不会命中。\n"
+                f"已声明的工具：{sorted(tool_names) or '（无）'}"
+            )
+        try:
+            check_match(rule.match)
+        except ValueError as exc:
+            raise ScenarioError(f"{where}（{rule.detector}）的 {exc}") from exc
 
     # --- 脚本只能调用声明过的工具 ---
     for index, session in enumerate(scenario.sessions):

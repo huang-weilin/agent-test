@@ -1271,6 +1271,65 @@ def test_templates_do_not_render_markdown_asterisks() -> None:
     assert not offenders, "模板里有 Markdown 星号（应写成 <strong>）：\n" + "\n".join(offenders)
 
 
+def test_editor_shows_declared_exemptions_with_their_reasons() -> None:
+    """编辑器右侧那张卡要把豁免摊开写，连理由一起。
+
+    豁免是**判据的例外**：一份场景写着"这个结论不算问题"，看场景的人必须看得见，
+    而且看得见为什么。只写"豁免 N 条"等于把理由藏回文件里——那正是豁免要求
+    必填 reason 想避免的事。
+
+    这里直接渲染模板（不走 HTTP），是因为仓库里的场景没有一条带豁免：豁免是
+    给具体项目的误报写的，通用示例不该凭空静音一个结论。于是模板这一层的
+    覆盖只能自己造一份场景来喂。
+    """
+    from jinja2 import Environment, FileSystemLoader
+
+    from sandbox.scenario.spec import Scenario
+
+    templates = Path(__file__).resolve().parents[1] / "src" / "sandbox" / "api" / "templates"
+    env = Environment(loader=FileSystemLoader(str(templates)), autoescape=True)
+    env.globals["m"] = env.get_template("_macros.html").module
+
+    scenario = Scenario.model_validate(
+        {
+            "id": "demo",
+            "agent": {"version": "react_demo@0.1", "task": "干活"},
+            "tools": [
+                {"name": "fetch_page", "description": "翻页", "is_write": False,
+                 "parameters": {"type": "object", "properties": {}}},
+                {"name": "create_payment", "description": "付款", "is_write": True,
+                 "parameters": {"type": "object", "properties": {}}},
+            ],
+            "sessions": [{"name": "第一次", "script": [{"tool_calls": []}]}],
+            "exemptions": [
+                {
+                    "detector": "loop.approximate",
+                    "tool": "fetch_page",
+                    "reason": "翻页拉取是正常行为，页码递增不算循环",
+                    "match": {"arg_differs_on": ["page"]},
+                },
+                {
+                    "detector": "idempotency",
+                    "tool": "create_payment",
+                    "reason": "上游重试机制自动发起的，已确认外部有去重",
+                    "allow_write": True,
+                },
+            ],
+        }
+    )
+    html = env.get_template("editor.html").render(
+        scenario_id="demo", scenario=scenario, yaml_text="id: demo\n",
+        saved=False, error=None, active=False,
+    )
+
+    block = html.split("<dt>豁免</dt>")[1].split("</dd>")[0]
+    assert "2 条" in block
+    assert "翻页拉取是正常行为" in block
+    assert "上游重试机制自动发起的" in block
+    assert "<code>loop.approximate</code>" in block
+    assert "写" in block, "静音写操作的那条要标出来"
+
+
 def test_args_are_truncated_with_a_visible_marker() -> None:
     """截断要带省略号。不带的话读者会以为参数本来就长这样，
     而"参数少了一个字段"和"参数被截断显示"是两回事。"""

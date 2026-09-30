@@ -71,28 +71,36 @@ def _matches(expectation: Expectation, finding: Finding) -> bool:
     return expectation.reason_code is None or expectation.reason_code == _reason_code(finding)
 
 
-def evaluate(
-    scenario: Scenario,
-    findings: list[Finding],
-    *,
-    unexpected_failures: str | None = None,
-) -> ExpectResult:
-    """比对预期与实际结论。
-
-    每条预期**各自**去找一条没被占用的实际结论，而不是按顺序配对——
+def match_expectations(
+    expectations: list[Expectation], findings: list[Finding]
+) -> tuple[list[tuple[Expectation, Finding]], list[Expectation], list[Finding]]:
+    """一条预期**各自**去找一条没被占用的实际结论，而不是按顺序配对——
     同一批结论可能同时满足多条预期，按顺序配对会让结果依赖于字典序。
+
+    单独抽出来给 `tests/corpus` 用：语料的标注和场景的 `expect` 是同一套语义，
+    共用这一份实现才不会出现"语料里判通过、场景里判不通过"这种两套标准。
     """
     remaining = list(findings)
     matched: list[tuple[Expectation, Finding]] = []
     missing: list[Expectation] = []
-
-    for expectation in scenario.expect:
+    for expectation in expectations:
         hit = next((f for f in remaining if _matches(expectation, f)), None)
         if hit is None:
             missing.append(expectation)
         else:
             remaining.remove(hit)
             matched.append((expectation, hit))
+    return matched, missing, remaining
+
+
+def evaluate(
+    scenario: Scenario,
+    findings: list[Finding],
+    *,
+    unexpected_failures: str | None = None,
+) -> ExpectResult:
+    """比对预期与实际结论。"""
+    matched, missing, remaining = match_expectations(scenario.expect, findings)
 
     policy = unexpected_failures or scenario.unexpected_failures
     unexpected: list[Finding] = []

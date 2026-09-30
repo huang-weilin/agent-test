@@ -1,0 +1,239 @@
+# 幂等检测器的标注语料。写法见 tests/corpus/README.md。
+items:
+  # --- 同一次会话里的重复写操作 ---------------------------------------------
+
+  - id: idem-unprotected-write-repeat
+    source: 自造
+    why: >
+      两次一模一样的写操作，工具没有声明任何幂等保护。这是重复扣款的定义本身：
+      目标系统收到两笔无法区分的请求，会当成两笔生意。报 fail，没有 reason_code
+      ——没有保护就没有更细的归因可做。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+    expect:
+      idempotency: fail
+      loop: pass
+      autonomy: inconclusive
+
+  - id: idem-missing-key
+    source: 自造
+    why: >
+      工具声明了幂等保护，但两次调用都没带幂等键，保护等于没有。这一类
+      必须和"工具没声明保护"分开归因（reason_code: missing_key）：处置办法
+      完全不同——一个是去改工具的声明，一个是去查调用方为什么没把键传下来。
+    tools:
+      create_payment: {is_write: true, enforces_idempotency: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+    expect:
+      idempotency:
+        verdict: fail
+        reason_code: missing_key
+      loop: pass
+      autonomy: inconclusive
+
+  - id: idem-key-rotated
+    source: 自造
+    why: >
+      工具声明了幂等保护，Agent 却每次重试都生成一个新键，于是保护被绕过，钱照样
+      扣两次（reason_code: key_rotated）。这是实践中最常见的失败方式：框架自动
+      填幂等键，填进去的是随机 UUID。只看"工具是否声明了保护"会整整漏掉这一类，
+      而它和"没声明保护"在报告里必须能分开——否则用户会去改一个没问题的工具。
+    tools:
+      create_payment: {is_write: true, enforces_idempotency: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, idempotency_key: k-7f3a}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, idempotency_key: k-91bd}
+    expect:
+      idempotency:
+        verdict: fail
+        reason_code: key_rotated
+      loop: pass
+      autonomy: inconclusive
+
+  - id: idem-protected-same-key
+    source: 自造
+    why: >
+      同样重复调用了两次，但两次带的是同一个幂等键，保护真的生效了，没有重复
+      扣款。报 warning 而不是 pass：Agent 确实做了无谓的重复调用，值得看见；
+      但它不是一个缺陷——真去"修"它反而可能把正确的重试逻辑一起改坏。
+    tools:
+      create_payment: {is_write: true, enforces_idempotency: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, idempotency_key: k-7f3a}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, idempotency_key: k-7f3a}
+    expect:
+      idempotency:
+        verdict: warning
+        reason_code: protected
+      loop: pass
+      autonomy: inconclusive
+
+  - id: idem-single-write
+    source: 自造
+    why: >
+      只写了一次，没有任何可疑之处。检测器要显式报一条 pass（"已检查 N 次写操作，
+      未发现重复执行"），而不是沉默：沉默在报告里会显示成"未覆盖"，把"测过了
+      没毛病"读成"什么都没测"——那是把 inconclusive 读成 pass 的同一错误的反面，
+      一样有害。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+    expect:
+      idempotency: pass
+      loop: pass
+      autonomy: inconclusive
+
+  - id: idem-no-writes
+    source: 自造
+    why: >
+      整段轨迹只有两次不同的读。没有写操作就判不了幂等，报 inconclusive。
+      不许报 pass：一次写都没发生过，"没有重复扣款"这句话一次判定都没做过。
+      这条同时也说明四态语义里 inconclusive 的用处：不是所有"没发现问题"都等于
+      "没问题"。
+    tools:
+      get_order: {is_write: false}
+      get_user: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: get_order, args: {order_id: A1}}
+      - {tool: get_user, args: {user_id: U1}}
+    expect:
+      idempotency: inconclusive
+      loop: pass
+      autonomy: inconclusive
+
+  # --- 跨会话 ---------------------------------------------------------------
+
+  - id: idem-cross-session-duplicate
+    source: 自造
+    why: >
+      同一笔付款在两段会话里各发生了一次，而第二段会话的记忆覆盖到了第一段
+      （视野 #0 ≥ 首次发生的 #0）——它本可以认出来自己做过了。这正是需求里
+      那个用户故事：周一让 Agent 订票，周三再提一次，Agent 没认出这是同一件事。
+      报 fail，reason_code 指 Agent：它没有把"我做过了"这件事用起来。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+      - {ordinal: 1}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, session: 0}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, session: 1}
+    expect:
+      idempotency:
+        verdict: fail
+        reason_code: cross_session_duplicate
+      loop: pass
+      loop.cross_session: pass
+      autonomy: inconclusive
+
+  - id: idem-cross-session-memory-loss
+    source: 自造
+    why: >
+      同样是跨会话重复扣款，但第二段会话的记忆只覆盖到 #0，而首次发生是在
+      #1——被回滚掉的那一段。#1 那段（或者说"我做过了"这条记忆）被丢掉了，
+      Agent 不可能知道。钱确实扣了两次，所以照样 fail；但归因不同
+      （reason_code: cross_session_memory_loss）：要去修记忆的恢复/传递，
+      不要改 Agent。归因搞反的代价是用户去改一个没问题的 Prompt，
+      而真正的毛病留在那儿继续扣钱。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+      - {ordinal: 1}
+      - {ordinal: 2, memory_horizon: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, session: 1}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, session: 2}
+    expect:
+      idempotency:
+        verdict: fail
+        reason_code: cross_session_memory_loss
+      loop: pass
+      loop.cross_session: pass
+      autonomy: inconclusive
+
+  # --- 重放 -----------------------------------------------------------------
+
+  - id: idem-unknown-replay-reason
+    source: 自造
+    why: >
+      两次重复的写操作带着一个检测器不认识的标记（resume）。它不许被静默
+      归进"Agent 自发重复"（那会冤枉 Agent），但也不许当没看见——报 inconclusive：
+      分不清是 Agent 自己重复还是恢复机制导致的。这条语料抓的是一个"写了注释
+      就当实现了"的 bug：代码里说这种情况"应当能被看见"，而它其实只出现在一个
+      永远不会被返回的 detail 里（2026-09-30 修的）。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: resume}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: resume}
+    expect:
+      idempotency: inconclusive
+      loop: pass
+      autonomy: inconclusive
+
+  - id: idem-snapshot-replay-attribution
+    source: 自造
+    why: >
+      Agent 自己写了一笔，恢复机制又重放了一笔。重复扣款是真实的，所以照样
+      fail；但制造它的是恢复机制，文案必须说"去修恢复机制，不要改 Agent"。
+      归因写错没有代价的时候看不出来，有代价的时候用户会花几天去改一个没问题的
+      Prompt，而漏洞继续每周扣一次钱。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: snapshot_restore}
+    expect:
+      loop.snapshot_replay: warning
+      loop: pass
+      idempotency: fail
+      autonomy: inconclusive
+
+  # --- 豁免 -----------------------------------------------------------------
+
+  - id: idem-exemption-silences-write
+    source: 自造
+    why: >
+      与 idem-unprotected-write-repeat 同一条轨迹，多了一条豁免规则。
+      写操作的豁免必须显式写 `allow_write: true`——让"我知道我在静音什么"
+      变成一个必须写下来的动作，因为豁免写操作是重复扣款告警的最短静音路径。
+      结论降级为 pass，但留痕（exempted_by）：报告里要能看见"因某条规则未告警"。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    exemptions:
+      - detector: idempotency
+        tool: create_payment
+        reason: 这个工具的重试是上游重试机制自动发起的，已人工确认有外部去重
+        allow_write: true
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+    expect:
+      idempotency: pass
+      loop: pass
+      autonomy: inconclusive

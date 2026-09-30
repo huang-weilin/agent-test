@@ -60,6 +60,22 @@
       <dt>会话</dt><dd>{{ scenario.sessions | length }}</dd>
       <dt>工具</dt><dd>{{ scenario.tools | length }}</dd>
       <dt>预期</dt><dd>{{ scenario.expect | length }} 条</dd>
+      {% if scenario.exemptions %}
+      <dt>豁免</dt>
+      <dd>
+        {{ scenario.exemptions | length }} 条
+        <div class="note">
+          这个场景会把这些结论降级成 pass：<br>
+          {% for e in scenario.exemptions %}
+          <code>{{ e.detector }}</code>{% if e.tool %} / <code>{{ e.tool }}</code>{% endif %}
+          {% if e.allow_write %}<span class="badge fail">写</span>{% endif %}
+          —— {{ e.reason }}<br>
+          {% endfor %}
+          被静音的结论照样会出现在报告里（带着这条理由），
+          但"这次运行没有这个问题"和"这次运行没看见这个问题"是两件事。
+        </div>
+      </dd>
+      {% endif %}
       {% if scenario.expected_charges is not none %}
       <dt>目标系统侧扣款</dt>
       <dd>

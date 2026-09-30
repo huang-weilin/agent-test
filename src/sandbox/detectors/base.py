@@ -65,6 +65,36 @@ class Finding:
     exempted_by: str | None = None
 
 
+#: `match` 里认得的键。写错的键（`arg_differs_on_page` 这种）会让规则永远
+#: 匹配不上——而规则看起来是在的，报告里也不会有任何异常。一条"装上了但没
+#: 接线"的静音开关比没有规则更坏，所以在这里硬拦。
+KNOWN_MATCH_KEYS: frozenset[str] = frozenset({"arg_differs_on", "tool_has_idempotency"})
+
+
+def check_match(match: dict[str, Any]) -> None:
+    """校验 `match` 的形状。不合法就抛 `ValueError`。
+
+    单独做成函数，是为了让**场景加载**（用户写的 YAML）和**检测器构造**报同一
+    条错：两条入口各写一遍校验，迟早会有一条松掉，而松掉的那条正是用户走的那条。
+    """
+    unknown = set(match) - KNOWN_MATCH_KEYS
+    if unknown:
+        raise ValueError(
+            f"match 里有不认识的键 {sorted(unknown)}，这条规则永远不会命中。"
+            f"认得的键只有 {sorted(KNOWN_MATCH_KEYS)}。"
+        )
+    differs = match.get("arg_differs_on")
+    if differs is not None and (
+        isinstance(differs, str)
+        or not isinstance(differs, (list, tuple))
+        or not all(isinstance(name, str) for name in differs)
+    ):
+        raise ValueError(
+            f"arg_differs_on 要的是字段名列表（例如 [page]），收到 {differs!r}。"
+            f"写成字符串的话集合运算是按字符走的，看起来能跑，命中的是别的规则。"
+        )
+
+
 @dataclass(frozen=True)
 class Exemption:
     """一条豁免规则。
@@ -87,11 +117,23 @@ class Exemption:
                 f"豁免规则 {self!r} 缺少 reason。"
                 f"没有理由的豁免在报告里无法复核，等于永久静音。"
             )
+        try:
+            check_match(self.match)
+        except ValueError as exc:
+            raise ValueError(f"豁免规则 {self!r} 的 {exc}") from exc
 
     @property
     def label(self) -> str:
         target = self.tool or "*"
         return f"exemption:{self.detector}/{target}"
+
+    def note(self) -> str:
+        """静音留痕的固定措辞，附在结论摘要后面。
+
+        带上 reason 是刻意的：只印 label 的话，读报告的人还得翻回场景文件才知道
+        "为什么允许"。豁免的全部代价就是被看见——省掉理由等于让它重新变成静音。
+        """
+        return f"（已被豁免规则 {self.label} 静音：{self.reason}）"
 
 
 class ExemptionSet:
@@ -131,10 +173,6 @@ class ExemptionSet:
                 continue
             return rule
         return None
-
-    def silenced_count(self, detector: str) -> int:
-        """报告要显示"因 N 条豁免未告警"。豁免不是静默的。"""
-        return sum(1 for r in self.rules if r.detector == detector)
 
 
 def inconclusive(detector: str, summary: str, detail: dict[str, Any] | None = None) -> Finding:

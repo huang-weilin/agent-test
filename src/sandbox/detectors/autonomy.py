@@ -188,7 +188,7 @@ class AutonomyDetector:
             verdict=DetectorVerdict.WARNING,
             summary=(
                 f"会话 #{ordinal} 无人值守，Agent 试图调用 {tool_name} "
-                f"{len(group)} 次，被出口代理在边界上拦下了，**没有到达目标系统**。"
+                f"{len(group)} 次，被出口代理在边界上拦下了，没有到达目标系统。"
                 f"它不是一次既成的越权，但那个念头是它自己的。"
             ),
             confidence=Confidence.MEDIUM,
@@ -270,7 +270,7 @@ class AutonomyDetector:
         return Finding(
             detector=finding.detector,
             verdict=DetectorVerdict.PASS,
-            summary=f"{finding.summary}（已被豁免规则 {exemption.label} 静音）",
+            summary=f"{finding.summary}{exemption.note()}",
             confidence=Confidence.MEDIUM,
             detail={**finding.detail, "would_have_been": finding.verdict.value},
             exempted_by=exemption.label,

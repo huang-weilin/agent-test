@@ -51,10 +51,9 @@ from sandbox.clock import clock
 from sandbox.config import REPO_ROOT, settings
 from sandbox.cost import aggregator as cost
 from sandbox.db.engine import init_db
-from sandbox.detectors.autonomy import AutonomyDetector
-from sandbox.detectors.base import ExemptionSet, Finding
-from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
-from sandbox.detectors.loop import LoopDetector
+from sandbox.detectors import run_all
+from sandbox.detectors.base import Finding
+from sandbox.detectors.idempotency import ToolFacts
 from sandbox.formatting import money as _money
 from sandbox.formatting import span_human
 from sandbox.formatting import tokens as _tokens
@@ -788,24 +787,22 @@ def _name_of(ref: SnapshotRef, named: dict[str, SnapshotRef]) -> str | None:
 def _run_detectors(scenario: Scenario, calls: list[Any]) -> list[Finding]:
     """跑全套检测器。工具事实来自场景声明，是写/读属性的单一来源。
 
-    顺序固定：输出顺序稳定，比对预期时不会因为字典序漂移而时红时绿。
+    装配在 `detectors.run_all` 里，**和 `tests/corpus/` 共用同一份**：语料算出来的
+    精度只有在"语料跑的就是线上跑的那一套"时才有意义。
 
-    主动行为审计的两份**声明**（授权名单、自主会话）也在这里进检测器——它和
-    幂等检测器拿 `ToolFacts` 是同一个套路：声明走构造参数，观测走 `list[CallView]`。
+    四份声明全部从场景进来（工具事实、无人值守白名单、自主会话、豁免规则）——
+    观测从 `calls` 进来。这条分工是全项目的判据，不是这里的实现细节。
     """
     facts = {
         t.name: ToolFacts(t.name, t.is_write, t.enforces_idempotency) for t in scenario.tools
     }
-    findings: list[Finding] = []
-    findings.extend(IdempotencyDetector(facts).run(calls, ExemptionSet()))
-    findings.extend(LoopDetector().run(calls, ExemptionSet()))
-    findings.extend(
-        AutonomyDetector(
-            allowlist=frozenset(scenario.unattended_allowlist()),
-            autonomous_ordinals=frozenset(scenario.autonomous_ordinals()),
-        ).run(calls, ExemptionSet())
+    return run_all(
+        calls,
+        tool_facts=facts,
+        unattended_allowlist=frozenset(scenario.unattended_allowlist()),
+        autonomous_ordinals=frozenset(scenario.autonomous_ordinals()),
+        exemptions=scenario.exemption_set(),
     )
-    return findings
 
 
 def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
@@ -844,14 +841,14 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
             add(f"       世界时间 {s.virtual_started_at}{gap}")
             if not s.clock_matched:
                 add(
-                    f"       ** 时钟对不上：场景声明世界走了 {span_human(s.declared_offset_s)}，"
-                    f"实际走了 {span_human(s.observed_offset_s)} **"
+                    f"       !! 时钟对不上：场景声明世界走了 {span_human(s.declared_offset_s)}，"
+                    f"实际走了 {span_human(s.observed_offset_s)}"
                 )
         consumed = f"       脚本消费 {s.script_steps_consumed}/{s.script_steps_declared}"
         if s.killed:
             consumed += f"（熔断所致，前提成立）\n       熔断原因：{s.kill_reason}"
         elif not s.premise_held:
-            consumed += "  ** 这一段没跑完，前提未成立 **"
+            consumed += "   这一段没跑完，前提未成立 "
         add(consumed)
 
     if result.clock is not None:
@@ -865,7 +862,7 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
             f"真实耗时 {c.real_elapsed_s:.1f}s（约 {c.speed:.0f} 倍）"
         )
         add(
-            "  **这段时间不是等出来的**：引擎把目标系统的时钟往前拨，世界该变的都\n"
+            "  这段时间不是等出来的：引擎把目标系统的时钟往前拨，世界该变的都\n"
             "     变了，而被测 Agent 在两次会话之间本来就不在跑。"
         )
 
@@ -879,7 +876,7 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
         add(f"  无人值守的会话：{sessions}")
         add(f"  被授权无人值守运行的工具：{allowed}")
         add(
-            "  **声明不拦截**：没被授权的工具被调用时照样会执行，扣款照样发生。\n"
+            "  声明不拦截：没被授权的工具被调用时照样会执行，扣款照样发生。\n"
             "     审计要回答的是「它到底干了什么」；要拦，用的是出口代理的放行名单。"
         )
 
@@ -897,7 +894,7 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
     s = result.summary
     add(
         f"  通过 {s.get('pass', 0):.0f} / 失败 {s.get('fail', 0):.0f} / "
-        f"警告 {s.get('warning', 0):.0f} / **未覆盖 {s.get('inconclusive', 0):.0f}**"
+        f"警告 {s.get('warning', 0):.0f} / 未覆盖 {s.get('inconclusive', 0):.0f}"
     )
     add(
         f"  覆盖率 {s.get('coverage_ratio', 0):.0%}"
@@ -924,8 +921,8 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
             # 金额不全的时候必须说出来。只印 `$0.0000` 的话，读报告的人会以为
             # 这次运行不要钱——而实际上是我们没有这个模型的单价，一个字都没算。
             add(
-                f"  **注意：其中 {c.unpriced_calls} 次调用的模型不在定价表中，"
-                f"成本按 0 计。上面的金额是下界，不是账单。**"
+                f"  !! 注意：其中 {c.unpriced_calls} 次调用的模型不在定价表中，"
+                f"成本按 0 计。上面的金额是下界，不是账单。"
             )
         if c.cache_read_tokens or c.cache_write_tokens:
             add(
@@ -953,7 +950,7 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
             )
         if any(b.exceeded for b in result.budget):
             add(
-                "     超预算**不会**让本次运行算作不通过——那是累计花费，和被测\n"
+                "     超预算不会让本次运行算作不通过——那是累计花费，和被测\n"
                 "     Agent 这一次做没做错事无关。两者压成同一个结论的话，一次\n"
                 "     完全干净的运行会因为上个月跑太多而报 fail。"
             )
@@ -976,7 +973,7 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
 
     if not result.premises_held:
         add(
-            "\n  ** 有会话没把脚本跑完，检测结论不指向被测对象，本次不算通过。**\n"
+            "\n   有会话没把脚本跑完，检测结论不指向被测对象，本次不算通过。\n"
             "     常见原因：Agent 提前退出（工具调用报错、导入失败、环境变量没配好）。"
         )
 

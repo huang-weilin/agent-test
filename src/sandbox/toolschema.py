@@ -169,7 +169,7 @@ def check_schema(schema: dict[str, Any], *, tool: str, path: str = "") -> None:
         raise SchemaError(
             f"{where} 用了不支持的写法：{unknown}。\n"
             f"支持的只有：{sorted(SUPPORTED_KEYWORDS)}。\n"
-            f"**这不是实现遗漏，是刻意的**：不认识的写法会被静默忽略，"
+            f"这不是实现遗漏，是刻意的：不认识的写法会被静默忽略，"
             f"而「这一类参数从来没被检查过」在报告上完全看不出来。"
             f"要么改用支持的写法，要么把这条约束从声明里去掉——"
             f"留在那里假装有效是最坏的一种。"

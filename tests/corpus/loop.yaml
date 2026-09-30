@@ -1,0 +1,291 @@
+# 循环检测器的标注语料。
+#
+# 写法见 tests/corpus/README.md。每一条都要对三族检测器表态：该报（fail/warning）
+# 还是不报。少一族就加载失败——见 src/sandbox/corpus.py 里的说明。
+items:
+  # --- 严格层 ---------------------------------------------------------------
+
+  - id: loop-strict-repeat-read
+    source: 自造
+    why: >
+      同一个只读调用，参数一字不差地发了三次。这是确定性最高的循环：Agent 在原地
+      打转，每次都拿回一样的答案。严格层要报 fail，而且不该被"只读无所谓"豁免掉——
+      只读重复的成本是钱和上下文（所以另有一条 read_repeats 的 pass 记着这件事）。
+    tools:
+      get_order: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: get_order, args: {order_id: A1}}
+      - {tool: get_order, args: {order_id: A1}}
+      - {tool: get_order, args: {order_id: A1}}
+    expect:
+      loop.strict: fail
+      idempotency: inconclusive
+      idempotency.read_repeats: pass
+      autonomy: inconclusive
+
+  - id: loop-strict-repeat-write
+    source: 自造
+    why: >
+      三次完全相同的写操作，全部成功。循环检测器报 fail（在原处打转），幂等检测器
+      也报 fail（同一笔扣了三次）——两条结论问的不是一件事：前者是"做了无用功"，
+      后者是"钱动了三次"。同一个 trace 上有两条 fail 是对的，不是重复报告。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+    expect:
+      loop.strict: fail
+      idempotency: fail
+      autonomy: inconclusive
+
+  # --- 有限重试：不许报成循环 -------------------------------------------------
+
+  - id: loop-bounded-retry-read
+    source: 自造
+    why: >
+      同一个读调用失败后重试了两次，一共三次。这不是循环：重试有理由（上一次
+      失败了），而且次数在上界（3）之内。负样本——检测器要是把"错误后的重试"
+      也报成循环，那么每次网络抖动都会制造一条 fail，报告很快就会被整体忽略。
+      这里没有那条"已比对 N 次、未发现循环"的汇总 pass：它有且仅在严格/近似/
+      乒乓三层一条结论都没产出时才出现，而这条轨迹上重试那一条已经占了这个位置。
+    tools:
+      get_order: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: get_order, args: {order_id: A1}, status: error}
+      - {tool: get_order, args: {order_id: A1}, status: error}
+      - {tool: get_order, args: {order_id: A1}, status: error}
+    expect:
+      loop.retry: pass
+      idempotency: inconclusive
+      idempotency.read_repeats: pass
+      autonomy: inconclusive
+
+  - id: loop-write-retry-after-error
+    source: 自造
+    why: >
+      同样是"失败后重试两次"，但这次是写操作。循环检测器仍然不计为循环
+      （loop.retry 一条 pass），幂等检测器却报 fail——两个检测器在这条轨迹上
+      结论相反，而这是对的：重试一个失败的写操作是支付里最危险的模式（超时之后
+      到底扣没扣，谁也不知道），"钱"这一问的正确答案和"打转"这一问不一样。
+      标注取幂等这边为 fail。遗留问题：三次调用的 status 都是 error，
+      文案说的"这是重复扣款"比观测说得多——观测支持的是"重复尝试"。
+      记在 tests/corpus/README.md 的待决清单里。
+      同前一条：这里也没有那条循环层的汇总 pass（重试那一条已经产出了结论）。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, status: error}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, status: error}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, status: error}
+    expect:
+      loop.retry: pass
+      idempotency: fail
+      autonomy: inconclusive
+
+  # --- 近似层 ---------------------------------------------------------------
+
+  - id: loop-approximate-non-monotonic
+    source: 自造
+    why: >
+      同一个查询发三次，只有页码在变，而且是 1 → 3 → 2：不是单调推进。
+      翻页是单调的，来回翻不是——这是"在原地打转"的典型形状。
+      （参数里刻意带了五个字段：近似层按相似度聚类，只有一个字段时页码相隔
+      两页就已经不成簇了，那时这条轨迹根本走不到判定这一步。）
+    tools:
+      list_orders: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 1}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 3}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 2}}
+    expect:
+      loop.approximate: fail
+      idempotency: inconclusive
+      autonomy: inconclusive
+
+  - id: loop-monotonic-paging-is-not-a-loop
+    source: 自造
+    why: >
+      页码 1 → 2 → 3，只有页码在变，单调推进。这是正常遍历，不是循环。
+      负样本：把这类报成 fail，等于每次翻页都告警，而翻页是 Agent 干活的常态。
+      检测器要留下一条 pass 说明"为什么这次没告警"，否则读报告的人分不出
+      "查过了、是正常遍历"和"这一段压根没测"。
+    tools:
+      list_orders: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 1}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 2}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 3}}
+    expect:
+      loop.approximate: pass
+      idempotency: inconclusive
+      autonomy: inconclusive
+
+  - id: loop-monotonic-paging-unbounded
+    source: 自造
+    why: >
+      页码一路翻到 9 页还没停。分不清"结果集很大"和"停不下来"——而两个方向的
+      代价不对称：报 warning 只是多看一眼，报 pass 而它其实停不下来是账单不封顶。
+      所以超过阈值就报 warning（reason_code: monotonic_unbounded），而不是 pass。
+    tools:
+      list_orders: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 1}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 2}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 3}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 4}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 5}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 6}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 7}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 8}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 9}}
+    expect:
+      loop.approximate:
+        verdict: warning
+        reason_code: monotonic_unbounded
+      idempotency: inconclusive
+      autonomy: inconclusive
+
+  # --- 委托乒乓 -------------------------------------------------------------
+
+  - id: loop-ping-pong
+    source: 公开-GhostWriter
+    why: >
+      两个工具交替出现六次，a→b→a→b→a→b。公开案例里这是多 Agent 互相委派而
+      没人在收敛：A 让 B 去查，B 回头又让 A 确认，来回一圈什么都没推进。
+      严格层也会各自报一条（每个工具都有三次相同调用）——两条结论都留着：
+      严格层说的是"这个调用重复了"，乒乓说的是"重复的形状是互相触发"。
+      标注里写两条 strict 是因为两个工具各命中一次。
+    tools:
+      get_order: {is_write: false}
+      get_user: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: get_order, args: {order_id: A1}}
+      - {tool: get_user, args: {user_id: U1}}
+      - {tool: get_order, args: {order_id: A1}}
+      - {tool: get_user, args: {user_id: U1}}
+      - {tool: get_order, args: {order_id: A1}}
+      - {tool: get_user, args: {user_id: U1}}
+    expect:
+      loop.strict: fail
+      loop.ping_pong: fail
+      idempotency: inconclusive
+      idempotency.read_repeats: pass
+      autonomy: inconclusive
+
+  # --- 跨会话 ---------------------------------------------------------------
+
+  - id: loop-cross-session-read-repeat
+    source: 自造
+    why: >
+      同一个只读查询出现在两段会话里。跨会话的重复读报 warning 而不是 fail：
+      浪费的是钱和上下文，不是一致性。判据是会话序号——用
+      session_sequence_id 的话永远只数得出一个会话，那是个永远说不出结论的检测器。
+    tools:
+      get_order: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+      - {ordinal: 1}
+    calls:
+      - {tool: get_order, args: {order_id: A1}, session: 0}
+      - {tool: get_order, args: {order_id: A1}, session: 1}
+    expect:
+      loop.cross_session: warning
+      loop: pass
+      idempotency: inconclusive
+      autonomy: inconclusive
+
+  # --- 边界拦下的不算 -------------------------------------------------------
+
+  - id: loop-blocked-calls-do-not-count
+    source: 公开-PERSIST
+    why: >
+      三次相同调用里，两次在出口代理那里就被拦下了，只有一次到了目标系统。
+      PERSIST 那类工具投毒的目标之一就是让 Agent 反复尝试被拦的动作，然后
+      报告把它读成"Agent 在循环"——那是沙箱自己造出来的误报：被拦下的调用
+      没有到达目标系统，Agent 看到的是一次失败，重试有理由。
+      这条轨迹上一次循环都不该报，两条 pass 都是"查过了、没毛病"。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, blocked_by_proxy: true, status: blocked}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, blocked_by_proxy: true, status: blocked}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+    expect:
+      loop: pass
+      idempotency: pass
+      autonomy: inconclusive
+
+  # --- 快照重放 -------------------------------------------------------------
+
+  - id: loop-all-calls-are-snapshot-replays
+    source: 自造
+    why: >
+      三次调用全部来自快照恢复重放，没有一次是 Agent 自己发起的。
+      循环检测器必须报 inconclusive：一次 Agent 的调用都没有，比对样本是 0，
+      报 pass 会变成"已在 0 次工具调用中比对，未发现循环"——把没查说成查过。
+      （这条语料抓的就是这个 bug，2026-09-30 修的。）
+      重放本身要单独报一条 warning（它不是 Agent 的行为，但确实可能造成重复副作用），
+      幂等检测器据此把归因指向恢复机制而不是 Agent。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: snapshot_restore}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: snapshot_restore}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: snapshot_restore}
+    expect:
+      loop.snapshot_replay: warning
+      loop: inconclusive
+      loop.cross_session: inconclusive
+      idempotency: fail
+      autonomy: inconclusive
+
+  # --- 豁免：一对对照样本 ---------------------------------------------------
+
+  - id: loop-approximate-paging-exempted
+    source: 自造
+    why: >
+      与 loop-approximate-non-monotonic 逐字同一条轨迹，只多了一条豁免规则：
+      list_orders 的差异只出现在 page 上时，允许它不单调。用途是"我知道这个工具
+      的翻页本来就会来回（比如二分查找式的排除法），别再报它了"。
+      结论降级成 pass，但必须留痕（exempted_by）——豁免不是静默的，
+      报告里要能看见"因某条规则未告警"，否则豁免就成了永久静音的最短路径。
+      两条例子的差值是这份语料里唯一一处"改一个变量看结论怎么变"的对照。
+    tools:
+      list_orders: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    exemptions:
+      - detector: loop.approximate
+        tool: list_orders
+        reason: 这个工具的排除法翻页本来就不单调，已人工确认无害
+        match: {arg_differs_on: [page]}
+    calls:
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 1}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 3}}
+      - {tool: list_orders, args: {query: book, status: paid, sort: asc, region: cn, page: 2}}
+    expect:
+      loop.approximate: pass
+      idempotency: inconclusive
+      autonomy: inconclusive

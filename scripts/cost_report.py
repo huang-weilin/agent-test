@@ -100,7 +100,7 @@ async def _report(period: str, limit: int, as_json: bool) -> int:
     if not statuses:
         print(
             "  （未设预算。在 .env 里配 SANDBOX_COST_BUDGET_DAILY_USD / _WEEKLY_USD\n"
-            "   / _MONTHLY_USD 开启。**默认不设限是刻意的**：一个没配过的阈值\n"
+            "   / _MONTHLY_USD 开启。默认不设限是刻意的：一个没配过的阈值\n"
             "   会在别人第一次跑的时候弹出一堆他不认识的告警，而告警一多就会被\n"
             "   整体忽略，包括真正要紧的那些。）"
         )
@@ -116,8 +116,8 @@ async def _report(period: str, limit: int, as_json: bool) -> int:
     unpriced = sum(r.unpriced_calls for r in by_model.values())
     if unpriced:
         print(
-            f"\n**注意：有 {unpriced} 次调用的模型不在定价表中，成本按 0 计。**\n"
-            f"   这些数字是**下界**，不是账单。定价表见 src/sandbox/gateway/pricing.py。"
+            f"\n**注意：有 {unpriced} 次调用的模型不在定价表中，成本按 0 计。\n"
+            f"   这些数字是下界**，不是账单。定价表见 src/sandbox/gateway/pricing.py。"
         )
     return 0
 

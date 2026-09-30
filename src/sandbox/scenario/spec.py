@@ -25,6 +25,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from sandbox.db.models import DetectorVerdict
+from sandbox.detectors.base import Exemption, ExemptionSet
 from sandbox.toolschema import check_schema
 
 
@@ -205,6 +206,30 @@ class Expectation(BaseModel):
     note: str = ""
 
 
+class ExemptionDecl(BaseModel):
+    """一条豁免规则。把某一类结论降级成 pass，同时在报告里留痕。
+
+    形状和 `sandbox.detectors.base.Exemption` 一一对应，但**故意分成两个类**：
+    这一层管"用户写下来的东西长什么样"，那一层管"怎么匹配"。合成一个的话，
+    检测器内部想加个字段就得动用户能写的 schema。
+
+    理由（`reason`）是必填的，而且是唯一必填的——没有理由的豁免在报告里无法复核，
+    等于永久静音。写操作的豁免还要额外写 `allow_write: true`，那是刻意设的第二道门：
+    让"我在静音一次重复扣款告警"变成一个必须写下来的动作。
+
+    `match` 的键在加载时校验（见 `loader._check_references`），写错的键会让规则
+    永远匹配不上。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    detector: str
+    tool: str | None = None
+    reason: str
+    match: dict[str, Any] = Field(default_factory=dict)
+    allow_write: bool = False
+
+
 class Scenario(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -214,6 +239,15 @@ class Scenario(BaseModel):
     tools: list[ToolDecl]
     sessions: list[SessionSpec]
     expect: list[Expectation] = Field(default_factory=list)
+
+    # 误报控制：把某类结论降级成 pass 并留痕。
+    #
+    # 和"期望"分开是刻意的：期望是"我要求它报这个"，豁免是"我知道它报了但它没事"。
+    # 前者是判据，后者是判据的例外，读报告的人需要分得开这两句话。
+    #
+    # 这一节进配置指纹的"判卷标准"里（见 `identity.sections`）：加一条豁免之后，
+    # 前后两次运行就不该再比"失败少了几个"——少掉的那些是被规则静音的，不是修好的。
+    exemptions: list[ExemptionDecl] = Field(default_factory=list)
 
     # 出现了没被 expect 匹配上的 fail 结论时怎么办。
     # 默认 fail：这是测试工具，"没预料到的失败"必须让人知道。
@@ -329,3 +363,28 @@ class Scenario(BaseModel):
     def unattended_allowlist(self) -> set[str]:
         """被授权在无人值守时运行的工具。审计的另一半对照物。"""
         return {t.name for t in self.tools if t.may_run_unattended}
+
+    # --- 误报控制（见 docs/detectors.md 第二节）----------------------------
+
+    def exemption_set(self) -> ExemptionSet:
+        """把场景里的豁免规则转成检测器吃的形状。
+
+        豁免和 `unattended_allowlist` 是同一类东西：**声明**。声明留在场景里，
+        检测器只看到接口——所以这里是一次转换，不是一次判定。
+
+        转换放在 spec 上而不是 runner 里，是为了让**校验**有个统一的落点：
+        `loader._check_references` 会先调一遍它，用户 YAML 里的错在加载时就报出来，
+        而不是等跑到一半才炸。
+        """
+        return ExemptionSet(
+            [
+                Exemption(
+                    detector=e.detector,
+                    tool=e.tool,
+                    reason=e.reason,
+                    match=dict(e.match),
+                    allow_write=e.allow_write,
+                )
+                for e in self.exemptions
+            ]
+        )

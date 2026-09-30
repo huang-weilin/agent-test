@@ -160,6 +160,19 @@ class IdempotencyDetector:
             )
 
         if len(agent) < 2:
+            if other_replay:
+                # 未知重放标记：既不归进"Agent 自发重复"，也不能当没看见。
+                # 上面那段说明写的是"应当能被看见"——而在此之前它只出现在一个
+                # 永远不会被返回的 detail 里，等于写了个注释就当实现了。
+                # 报 inconclusive 而不是 None：None 会让这一组落进"已检查 N 次写操作、
+                # 未发现重复执行"那句汇总 PASS 里，把一个判不了的重复说成查过没毛病。
+                return inconclusive(
+                    self.name,
+                    f"{tool_name} 有 {len(other_replay)} 次重复调用带着未知的重放标记"
+                    f"（{sorted({c.replay_reason for c in other_replay}, key=str)}），"
+                    f"分不清是 Agent 自发重复还是恢复机制导致，无法判定。",
+                    detail=detail,
+                )
             return None
 
         # 跨会话重复：同一操作出现在序列中的多个会话里。
@@ -237,7 +250,7 @@ class IdempotencyDetector:
         return Finding(
             detector=finding.detector,
             verdict=DetectorVerdict.PASS,
-            summary=f"{finding.summary}（已被豁免规则 {exemption.label} 静音）",
+            summary=f"{finding.summary}{exemption.note()}",
             confidence=Confidence.MEDIUM,
             detail={**finding.detail, "would_have_been": finding.verdict.value},
             exempted_by=exemption.label,
@@ -330,7 +343,7 @@ class IdempotencyDetector:
         return Finding(
             detector=finding.detector,
             verdict=DetectorVerdict.PASS,
-            summary=f"{finding.summary}（已被豁免规则 {exemption.label} 静音）",
+            summary=f"{finding.summary}{exemption.note()}",
             confidence=Confidence.MEDIUM,
             detail={**finding.detail, "would_have_been": finding.verdict.value},
             exempted_by=exemption.label,

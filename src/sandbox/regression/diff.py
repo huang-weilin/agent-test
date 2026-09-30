@@ -276,7 +276,7 @@ def comparability(baseline: Snapshot, current: Snapshot) -> tuple[str, list[str]
     labels = _section_labels(changed)
     if identity.TEST_SECTIONS.intersection(changed):
         return TEST_CHANGED, changed, [
-            f"改的是**测试本身**（{labels}）。两次运行比的不是同一套测试，"
+            f"改的是测试本身（{labels}）。两次运行比的不是同一套测试，"
             f"结论差异说明不了被测对象的问题。"
         ]
     return CONFIG_CHANGED, changed, [
