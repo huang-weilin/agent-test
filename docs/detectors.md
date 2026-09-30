@@ -146,6 +146,35 @@ run_id、检测器、豁免规则），因为这个运行确实在打转、而�
 - 需要工具的幂等声明：`idempotency: {enabled, key_header}`。未声明且为写操作 → 告警（这是文档要求的"对无幂等保护的写操作触发告警"）。
 - 声明的保护要验证是否**真的生效**：重复调用每次换一个新幂等键（框架自动填随机 UUID 是最常见的失败方式），等同于没有保护。
 
+### 三种"保护没生效"的写法，各有一个活样本
+
+这一章的判定读两处输入：工具的 `enforces_idempotency` 声明，和**记录器从请求体里
+取出来的**幂等键。两处都容易"代码在、路径不通"——声明没有场景写 `true`，或者键
+没有任何场景传过——那时分支还在、单测还绿，而报告里永远只出 `missing_key` 一条。
+四支对照把四种结论各钉在一个场景上：
+
+| 场景 | `enforces_idempotency` | 调用带的键 | 真实扣款 | 结论 |
+|---|---|---|---|---|
+| `duplicate` | `false` | —— | 2 | `fail`（不带 reason_code：压根没有保护，不是"保护没用上"） |
+| `missing_key` | `true` | 一次都没带 | 2 | `fail` · `missing_key` |
+| `key_rotated` | `true` | 每次换一个新的 | 2 | `fail` · `key_rotated` |
+| `protected` | `true` | 两次复用同一个 | 1 | `warning` · `protected` |
+
+中间两支的结论字面上完全一样，**只有 `reason_code` 不同**，而它们要修的地方不同：
+一支是"接口有保护但没被用上"，另一支是"重试时换了个新键"。所以 `expect` 必须比对
+`reason_code`（`scenario/expect.py` 里那条"写了就必须对上"的规矩就是为这种成对
+场景定的）。
+
+最后一支报 `warning` 而不是 `pass`：重复调用是真的，只是没多扣钱。写成 `pass` 会
+让它在报告里和"干净的一次调用"长得一样。
+
+四支的工具声明只差 `enforces_idempotency` 一行、脚本只差键怎么写，**这条"只差"
+由测试钉住**（`tests/test_detector_idempotency.py` 的 `test_the_four_scenarios_differ_only_in_the_world`
+把四份 YAML 的脚本骨架和声明逐字段比过）——结论不同必须来自世界不同，不能来自尺子
+不同。另有一条端到端测试跑真的 runner，在真运行的结论里找 `key_rotated` 与
+`protected`，并把**真实扣款笔数**一起对上（2 笔 / 1 笔）：结论与账本分开验，两边
+都说保护生效才算数。
+
 ### 跨会话重复：归因靠记忆视野，不靠推测
 
 需求里的用户故事是"用户周一让 Agent 订票，周三再次要求时，Agent 没有识别出

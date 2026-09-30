@@ -1,0 +1,73 @@
+id: key_rotated
+description: >
+  目标系统声明了幂等保护，Agent 这次也带了键——但两次调用带的是两个不同的键。
+  保护看着在被使用，实际一次都没命中，钱还是扣了两次。
+
+  它和 missing_key.yaml 是同一条缝的两种掉法：那边是键根本没带，这边是带了
+  却不指向同一次操作。光看"调用里有没有幂等键"会以为这一支是安全的，
+  所以判定要看的是两个键一不一致，而不是有没有。
+
+  四支幂等场景构成一组对照，工具声明只差一行、脚本只差键怎么写：
+  duplicate（没有保护）、missing_key（有保护、一次键都没带）、key_rotated（有
+  保护、每个键都是新的）——这三支都真扣两次钱、都报错；protected 是同一段脚本
+  把键复用，只扣一次钱、只报警告。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我把订单 A1 处理掉。
+  model: stub-model
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: true
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+sessions:
+  - name: 重复支付，每次换一个键
+    script:
+      # 两个键都把"第几次尝试"编了进去——这是最常见的那种错：幂等键要标识
+      # 一次**业务操作**，不是一次**尝试**。键变了，目标系统就认不出这是
+      # 同一笔支付，保护形同虚设。
+      - tool_calls:
+          - name: create_payment
+            arguments:
+              order_id: A1
+              amount: 599.0
+              idempotency_key: pay-A1-attempt-1
+      - tool_calls:
+          - name: create_payment
+            arguments:
+              order_id: A1
+              amount: 599.0
+              idempotency_key: pay-A1-attempt-2
+      - content: 支付完成。
+
+expected_charges: 2
+
+expect:
+  # 比对 reason_code 而不是只看 fail：与 missing_key 同样是 fail，但要去修的地方
+  # 不一样——那边是把键贯穿下去，这边是让键在一次操作的多次尝试之间保持不变。
+  - detector: idempotency
+    verdict: fail
+    reason_code: key_rotated
+    note: >
+      工具侧有保护、调用侧也带了键，但每个键都是新的，所以保护一次都没命中。
+      判定看的是重复调用之间的键是否一致。

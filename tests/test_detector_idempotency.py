@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from sandbox.db.models import DetectorVerdict
-from sandbox.detectors.base import Exemption, ExemptionSet
+from sandbox.detectors.base import Exemption, ExemptionSet, Finding
 from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
+from sandbox.scenario.loader import load_scenario
+from sandbox.scenario.runner import ScenarioResult, ScenarioRunner
+from sandbox.scenario.spec import Scenario
 
 PAY = {"order_id": "A1", "amount": 599}
 PROTECTED = {"create_payment": ToolFacts("create_payment", True, enforces_idempotency=True)}
@@ -209,7 +216,147 @@ def test_inconsistent_write_declaration_cannot_lead_to_silencing(make_call) -> N
 
 
 def test_exemption_with_empty_reason_is_rejected() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="reason"):
         Exemption(detector="idempotency", tool="x", reason="")
+
+
+# --- 生产路径上有活样本 --------------------------------------------------------
+#
+# 上面那些用例喂的是**人为构造的轨迹**，证明的是检测器本身对不对。它们证明不了
+# 另一件事：这条分支在真实运行里走得到。`key_rotated` 与 `protected` 曾经就是
+# 走不到的那种——分支写着、单测绿着、而场景里没有任何一支会传幂等键，于是报告
+# 里永远只有 missing_key。这一段把四条分支各自钉在一个场景上。
+
+ROOT = Path(__file__).resolve().parents[1]
+SCENARIOS = ROOT / "scenarios"
+# 四支对照。工具声明只差 enforces_idempotency 一行，脚本只差键怎么写。
+DUPLICATE_SCENARIO = SCENARIOS / "duplicate.yaml"
+MISSING_KEY_SCENARIO = SCENARIOS / "missing_key.yaml"
+KEY_ROTATED_SCENARIO = SCENARIOS / "key_rotated.yaml"
+PROTECTED_SCENARIO = SCENARIOS / "protected.yaml"
+AGENT_PYTHON = ROOT / "agents" / "react_demo" / ".venv"
+
+
+def _steps(scenario: Scenario) -> list[list[tuple[str, dict]]]:
+    """脚本的骨架：每一步调了哪个工具、除了幂等键之外的参数。
+
+    刻意不含会话名与散文——那两处是给人看的，本来就该各写各的。而幂等键要摘掉
+    单独比：它在四支之间**正是那个变量**，混进来会让"脚本一模一样"这句话失效。
+    """
+    skeleton = []
+    for session in scenario.sessions:
+        for step in session.script:
+            calls = []
+            for call in step.get("tool_calls") or []:
+                args = {k: v for k, v in call["arguments"].items() if k != "idempotency_key"}
+                calls.append((call["name"], args))
+            skeleton.append(calls)
+    return skeleton
+
+
+def _declaration(scenario: Scenario) -> dict[str, tuple[bool, bool, str | None]]:
+    return {
+        t.name: (t.is_write, t.enforces_idempotency, t.idempotency_param)
+        for t in scenario.tools
+    }
+
+
+def test_the_four_scenarios_differ_only_in_the_world() -> None:
+    """四支的差别必须是世界里的差别，不能是尺子不同。
+
+    脚本（除幂等键外）四支完全相同；工具声明里只有 protected 那三支与
+    duplicate 差一个字段。于是"四支给出四种结论"这件事只可能来自声明与键——
+    也就是被测对象与目标系统的行为差异。
+    """
+    duplicate = load_scenario(DUPLICATE_SCENARIO)
+    missing = load_scenario(MISSING_KEY_SCENARIO)
+    rotated = load_scenario(KEY_ROTATED_SCENARIO)
+    reused = load_scenario(PROTECTED_SCENARIO)
+
+    skeleton = _steps(duplicate)
+    assert _steps(missing) == skeleton
+    assert _steps(rotated) == skeleton
+    assert _steps(reused) == skeleton, "四支的脚本除了幂等键还有别的差别"
+
+    # 三支声明了保护，一支没有。写工具的那三个字段里只差中间那个。
+    protected_declaration = _declaration(missing)
+    assert _declaration(rotated) == protected_declaration
+    assert _declaration(reused) == protected_declaration
+    assert _declaration(duplicate)["get_order"] == protected_declaration["get_order"]
+    assert protected_declaration["create_payment"] == (True, True, "idempotency_key")
+    assert _declaration(duplicate)["create_payment"] == (True, False, "idempotency_key"), (
+        "duplicate 与另外三支的差别不止 enforces_idempotency 一个字段"
+    )
+
+
+def test_the_four_scenarios_declare_four_different_outcomes() -> None:
+    """四种结论各自被一支场景声明，且带键与不写键分得出来。
+
+    duplicate 刻意不写 reason_code（目标系统没实现保护，那条分支不带码）；
+    另外三支必须写，因为它们的 fail 长得一样、只有码不同。
+    """
+    def declared(path: Path) -> list[tuple[str, str | None]]:
+        return [(e.verdict.value, e.reason_code) for e in load_scenario(path).expect]
+
+    assert declared(DUPLICATE_SCENARIO) == [("fail", None)]
+    assert declared(MISSING_KEY_SCENARIO) == [("fail", "missing_key")]
+    assert declared(KEY_ROTATED_SCENARIO) == [("fail", "key_rotated")]
+    assert declared(PROTECTED_SCENARIO) == [("warning", "protected")]
+
+    # 地面真值：前三支真的扣了两次钱，第四支真的只扣了一次。
+    charges = {
+        path.name: load_scenario(path).expected_charges
+        for path in (
+            DUPLICATE_SCENARIO,
+            MISSING_KEY_SCENARIO,
+            KEY_ROTATED_SCENARIO,
+            PROTECTED_SCENARIO,
+        )
+    }
+    assert charges == {
+        "duplicate.yaml": 2,
+        "missing_key.yaml": 2,
+        "key_rotated.yaml": 2,
+        "protected.yaml": 1,
+    }
+
+
+async def test_a_rotated_key_and_a_reused_key_reach_the_detector_in_a_real_run(
+    temp_db: str,
+) -> None:
+    """端到端：同一段脚本，只换键的写法，钱的去向和结论都要跟着变。
+
+    这条测试的真正对象是**接线**：`enforces_idempotency: true` 要从场景声明走到
+    mock 的去重开关，幂等键要从场景脚本经代理的记录器走到检测器的证据里。任何
+    一处断了，下面四个断言里总有一个会红。
+
+    两支都断言真实扣款笔数：结论说 protected 而钱扣了两次，正是这个工具要抓的
+    失效方式——结论和账本必须分开验。
+    """
+    if not AGENT_PYTHON.exists():
+        pytest.skip(f"被测 Agent 的 venv 不在（{AGENT_PYTHON}），跳过端到端幂等分支")
+
+    rotated = await ScenarioRunner(session_timeout_s=120.0).run(load_scenario(KEY_ROTATED_SCENARIO))
+    reused = await ScenarioRunner(session_timeout_s=120.0).run(load_scenario(PROTECTED_SCENARIO))
+
+    for result in (rotated, reused):
+        assert result.error is None, result.error
+        assert result.ok, result.expectation and result.expectation.to_dict()
+
+    def only(result: ScenarioResult) -> Finding:
+        return next(f for f in result.findings if f.detector == "idempotency")
+
+    rotated_finding = only(rotated)
+    assert rotated_finding.verdict == DetectorVerdict.FAIL
+    assert rotated_finding.detail["reason_code"] == "key_rotated"
+    assert len(rotated_finding.detail["idempotency_keys"]) == 2
+
+    reused_finding = only(reused)
+    # warning 不能让整次运行变成不通过——上面的 result.ok 已经证了这一点。
+    assert reused_finding.verdict == DetectorVerdict.WARNING
+    assert reused_finding.detail["reason_code"] == "protected"
+    assert len(reused_finding.detail["idempotency_keys"]) == 1
+
+    assert (rotated.egress_charges, reused.egress_charges) == (2, 1), (
+        "键的写法没有真的改变钱的去向——那这两支就什么都证明不了"
+    )

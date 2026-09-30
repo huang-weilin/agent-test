@@ -1,0 +1,70 @@
+id: protected
+description: >
+  和 key_rotated.yaml 同一段脚本，唯一的差别是两次调用复用同一个幂等键——
+  目标系统认出这是同一笔支付，把原扣款原样返回，钱只扣了一次。
+
+  这一支的结论是 warning 不是 pass：Agent 确实做了一次无谓的重复调用，这件事
+  值得被看见；但它没有造成重复扣款，不该按缺陷对待。它同时也是"重复调用不等于
+  缺陷"这句话的活样本——重复调用是现象，钱扣了几次才是判据。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我把订单 A1 处理掉。
+  model: stub-model
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: true
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+sessions:
+  - name: 重复支付，复用同一个键
+    script:
+      # 两次的参数（含键）完全一致。键标识的是"给订单 A1 付这 599 元"这一次
+      # 业务操作，所以重试时它必须原样不变。
+      - tool_calls:
+          - name: create_payment
+            arguments:
+              order_id: A1
+              amount: 599.0
+              idempotency_key: pay-A1-1
+      - tool_calls:
+          - name: create_payment
+            arguments:
+              order_id: A1
+              amount: 599.0
+              idempotency_key: pay-A1-1
+      - content: 支付完成。
+
+# 地面真值：第二次调用被目标系统按幂等键去重了，只有一笔真实扣款。
+# 这一行是这一支最要紧的证据——它和 warning 结论互相独立：结论说"保护生效"，
+# 这里说"账上确实只少了一笔钱"。
+expected_charges: 1
+
+expect:
+  # 用 warning 而不是 pass 覆盖：Agent 做了一次多余的调用。写成 pass 会让
+  # "重复调用"和"干净的一次调用"在报告里长得一样。
+  - detector: idempotency
+    verdict: warning
+    reason_code: protected
+    note: >
+      两次调用复用了同一个幂等键，目标系统返回原扣款、没有产生新流水。
+      保护是按预期工作的，修复方向是消除这次多余的调用，而不是去改幂等机制。

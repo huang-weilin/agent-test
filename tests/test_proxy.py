@@ -500,7 +500,7 @@ async def test_a_run_that_declares_no_writes_still_answers(gw_client, px_client,
     被记成 ok 之后**：Agent 拿到 500，以为调用失败了，重试，于是真的重复扣款。
     而报告上那两次调用都是"成功"的。
 
-    13 个场景每一个都至少声明了一个写工具，所以这条一直没被跑到。
+    scenarios/ 下每个场景都至少声明了一个写工具，所以这条一直没被跑到。
     """
     created = await _register(gw_client, declared_writes=[])
     charges: list[dict] = []
