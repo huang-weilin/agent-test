@@ -275,11 +275,18 @@ async def call_tool(
     latency_ms = int((time.perf_counter() - started) * 1000)
 
     ok = 200 <= status_code < 300
+    # 体量按**实际发给 Agent 的那份字节**量：用同一个 `JSONResponse` 渲染器，
+    # 而不是自己 `json.dumps` 一遍。两处各算一次的话，分隔符与 `ensure_ascii`
+    # 的差异会让"报告里的体量"和"Agent 实际收到的"永远对不上——而两边看起来
+    # 都合理，谁也发现不了。
+    #
+    # 正文本身不进库（见 `ToolCall.result_bytes`）：这里留下的是长度。
+    response = JSONResponse(status_code=status_code, content=body)
     call_id = await record_tool_call(
         ctx,
         tool_name=tool_name,
         args=payload,
-        result=body,
+        result_bytes=len(response.body),
         status="ok" if ok else "error",
         error=None if ok else str(body)[:1000],
         latency_ms=latency_ms,
@@ -292,21 +299,23 @@ async def call_tool(
     # 局限，不是疏忽：先证明熔断通路能真的终止进程，再决定预测逻辑值不值得做。
     await watchdog.enforce(ctx.run_id)
 
-    headers = {
-        "X-Sandbox-Run-Id": ctx.run_id,
-        "X-Sandbox-Tool-Call-Id": call_id,
-        # 写判定与 `record_tool_call` 落库时**调的是同一个函数**，不是照着它重写
-        # 一遍判据。两边各判一次的话，总有一天会不一致，而那时报告会显示"这是个
-        # 读操作"却同时报出一条重复扣款。
-        #
-        # 调函数而不是写 `tool_name in ctx.declared_writes`：后者在声明为 `None`
-        # 时是一句 `TypeError`，而它掉在**这次调用已经发生、已经记成 ok 之后**——
-        # Agent 拿到 500，以为失败了，重试，于是真的重复扣款。手工 curl 那条明确
-        # 支持的路径和只读场景都会走到这里。判定该不该是写、`None` 时怎么办，
-        # 都是 `looks_like_write` 一个人的事。
-        "X-Sandbox-Is-Write": "1" if looks_like_write(tool_name, ctx.declared_writes) else "0",
-    }
-    return JSONResponse(status_code=status_code, content=body, headers=headers)
+    # 响应对象在上面就建好了（为了量体量），这里只往上加两个头：
+    # `call_id` 要等落库之后才知道，所以头只能后加。
+    response.headers["X-Sandbox-Run-Id"] = ctx.run_id
+    response.headers["X-Sandbox-Tool-Call-Id"] = call_id
+    # 写判定与 `record_tool_call` 落库时**调的是同一个函数**，不是照着它重写
+    # 一遍判据。两边各判一次的话，总有一天会不一致，而那时报告会显示"这是个
+    # 读操作"却同时报出一条重复扣款。
+    #
+    # 调函数而不是写 `tool_name in ctx.declared_writes`：后者在声明为 `None`
+    # 时是一句 `TypeError`，而它掉在**这次调用已经发生、已经记成 ok 之后**——
+    # Agent 拿到 500，以为失败了，重试，于是真的重复扣款。手工 curl 那条明确
+    # 支持的路径和只读场景都会走到这里。判定该不该是写、`None` 时怎么办，
+    # 都是 `looks_like_write` 一个人的事。
+    response.headers["X-Sandbox-Is-Write"] = (
+        "1" if looks_like_write(tool_name, ctx.declared_writes) else "0"
+    )
+    return response
 
 
 #: 匿名通用出口调用记在谁名下。**它不是任何一个场景声明的工具**——手工 curl
@@ -529,11 +538,12 @@ async def _generic_egress(
         forward_url = f"{settings.tool_upstream_base_url.rstrip('/')}{matched.mock_path}"
 
     status_code, resp_body = await _forward(forward_url, upstream_body, headers)
+    response = JSONResponse(status_code=status_code, content=resp_body)
     call_id = await record_tool_call(
         ctx,
         tool_name=label,
         args=envelope,
-        result=resp_body,
+        result_bytes=len(response.body),
         status="ok" if 200 <= status_code < 300 else "error",
         latency_ms=int((time.perf_counter() - started) * 1000),
         # 通用出口转发的是**一次 POST 到调用方指定的地址**：它会不会改目标系统的
@@ -546,11 +556,9 @@ async def _generic_egress(
         # 加载期校验（`ToolDecl`）保证它声明的就是写。
         is_write=True,
     )
-    return JSONResponse(
-        status_code=status_code,
-        content=resp_body,
-        headers={"X-Sandbox-Run-Id": ctx.run_id, "X-Sandbox-Tool-Call-Id": call_id},
-    )
+    response.headers["X-Sandbox-Run-Id"] = ctx.run_id
+    response.headers["X-Sandbox-Tool-Call-Id"] = call_id
+    return response
 
 
 def _passthrough_headers(request: Request) -> dict[str, str]:

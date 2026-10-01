@@ -34,8 +34,9 @@ from sandbox.detectors.base import CallView, Finding
 #:   对象做错了事，混进 `findings` 会让 `ok` 把它们算到它头上（`blocked_by_proxy`
 #:   那一整套区分就是为了这个）。
 #:
-#: 留下来的两条恰是跑完之后**再也算不出来**的：接口的返回体不落库、schema 是过线
-#: 来的声明，只有站在边界上、手里拿着这次调用的原始参数时才判得了。
+#: 留下来的两条恰是跑完之后**再也算不出来**的：返回体的正文不留档（检测器看不到
+#: `has_more` 这类只有正文里才有的东西）、schema 是过线来的声明，只有站在边界上、
+#: 手里拿着这次调用的原始参数时才判得了。
 BOUNDARY_DETECTORS: frozenset[str] = frozenset({"tool_scope", "tool_schema"})
 
 
@@ -135,7 +136,8 @@ async def load_boundary_findings(session_sequence_id: str) -> list[Finding]:
     这次运行的报告——于是 `expect` 里写 `tool_schema` 永远"未命中"，报告上一条
     也看不到，`ok` 也不受影响。而三份文档和两个页面都在说它们进了检测结论。
     结论是在边界上判的，读回来就是这一趟的事；跑完之后再判一次是另一套判据
-    （返回体不落库），那才是真的会分叉。
+    （返回体的正文不留档，`tool_scope` 判的"工具声明了没有"也只在调用当时成立），
+    那才是真的会分叉。
 
     排序：先按会话序号，再按写入时刻。**只有写入时刻是不够的**——它是墙钟，而
     这个项目的墙钟会被快照恢复和时间加速拨动；跨会话的先后必须以序号为准，那

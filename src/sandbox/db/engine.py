@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import structlog
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -18,6 +19,8 @@ from sqlalchemy.schema import CreateColumn
 
 from sandbox.config import settings
 from sandbox.db.models import Base
+
+log = structlog.get_logger(__name__)
 
 
 def _ensure_sqlite_parent_dir(url: str) -> None:
@@ -102,11 +105,59 @@ async def _add_missing_columns() -> None:
             await conn.execute(text(statement))
 
 
+def _legacy_content_to_erase(sync_conn: Any) -> list[str]:
+    """要把**内容**清掉的旧列（这是擦除，不是补列）。
+
+    整个机制只加不删，这里是唯一的例外，理由值得写下来：`tool_call.result_json`
+    曾经存的是工具返回体的正文。各处对用户的承诺是它不落库（README 与四份
+    docs 九处，连场景/测试/源码注释共十三处，数法见 `db/models.py` 那段注），
+    而代码一直在写——两边对齐之后，承诺这边赢了，正文不再写。
+    **但旧库里那些已经写进去的正文不会自己消失。** 留着它们，等于让旧库继续
+    持有一个我们已经说不持有的东西，而且没人会再去看它（读取方只有两处注释）。
+
+    只清空、不删列：删列要走真正的迁移（Alembic 未启用），而在这一点上清空与
+    删列对"库里还有没有返回体正文"是等价的。语句是幂等的——第二次跑时
+    `WHERE result_json IS NOT NULL` 已经匹配不到任何行。
+    """
+    inspector = inspect(sync_conn)
+    if "tool_call" not in set(inspector.get_table_names()):
+        return []
+    present = {col["name"] for col in inspector.get_columns("tool_call")}
+    if "result_json" not in present:
+        return []  # 新库：这一列根本没建过
+    return ["UPDATE tool_call SET result_json = NULL WHERE result_json IS NOT NULL"]
+
+
+async def _erase_legacy_content() -> int:
+    """跑一次擦除，返回擦掉的行数。
+
+    **擦除必须出声。** 静默地清掉别人库里的数据，和静默地不记某次调用是同一类
+    问题——只是方向相反：前者会让"我还留着历史"这句话不成立，而用户不会知道。
+    """
+    erased = 0
+    async with engine.begin() as conn:
+        for statement in await conn.run_sync(_legacy_content_to_erase):
+            result = await conn.execute(text(statement))
+            erased += result.rowcount or 0
+    if erased:
+        log.warning(
+            "db.legacy_tool_result_bodies_erased",
+            rows=erased,
+            column="tool_call.result_json",
+            why="返回体正文不再落库，旧库里的存量一并清空",
+        )
+    return erased
+
+
 async def init_db() -> None:
-    """建表 + 补齐新增的列。生产环境应改为 Alembic 迁移（依赖已声明，尚未启用）。"""
+    """建表 + 补齐新增的列 + 擦掉承诺不再持有的旧内容。
+
+    生产环境应改为 Alembic 迁移（依赖已声明，尚未启用）。
+    """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _add_missing_columns()
+    await _erase_legacy_content()
 
 
 async def drop_all() -> None:

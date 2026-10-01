@@ -1611,7 +1611,7 @@ async def invalid_args_row(seeded: dict) -> dict:
                 args_json=_json.dumps({"order_id": "A1"}),
                 arg_hash="hi",
                 fingerprint="fpi",
-                result_json=None,
+                result_bytes=None,
                 status="invalid_args",
                 error="缺少参数 amount",
                 is_write=True,

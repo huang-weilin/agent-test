@@ -262,7 +262,31 @@ class ToolCall(Base):
     # 跨会话指纹 = hash(tool_name + arg_hash)，幂等检测的核心
     fingerprint: Mapped[str] = mapped_column(String(64), index=True)
 
-    result_json: Mapped[str | None] = mapped_column(Text)
+    # 工具返回体的**字节数**。正文不落库——这是刻意的，也是这里从 `result_json`
+    # 改过来的原因：
+    #
+    # * **没有人读它。** 从第一次提交（4b290d6）起它就一直在写，而全仓的读取方
+    #   只有两处：`detectors/base.py` 里一句"CallView 刻意不含它"的注释，和一处
+    #   测试把它设成 None。**写进去、没人看**的那些字节，代价是实打实的：返回体
+    #   是被测对象自己引出来的内容（可能很大、可能有 PII），而它在库里待多久
+    #   由保留期决定，不由当初那次调用决定。
+    # * **文档一直在说它不落库。** 一共**十三处**写着"返回体不落库（只留参数
+    #   指纹）"，其中几处还挂着"按 ADR 002"。数法：在改正之前那次提交上
+    #   `git grep -n "不落库\|不留档\|不留正文\|不入库\|留参数指纹"`，再去掉
+    #   与工具返回值无关的那一条（`mock/toolspec.py` 里订单视图那句）。分布是
+    #   README 三处、call-chain 两处、detectors 两处、scenarios 一处、
+    #   session-diff 一处（README 与四份 docs 共九处），场景注释、测试注释各
+    #   一处，源码注释两处。ADR 002 里没有这句话（它说的是 span 级数据不重复
+    #   落库）。十三处说法与代码相反，而代码这一侧的实际情况是：
+    #   **用户被告诉了一件不成立的事**。
+    # * **报告需要的是体量，不是正文**：按工具拆成本要算"这个工具的返回体在
+    #   上下文里被重发了多少"，那是个乘法，正文不参与。
+    #
+    # 于是两边对齐到中间：留下体量、不留正文，十三处说法改成"只留参数指纹与
+    # 返回体字节数"。**NULL 与 0 是两件事**：0 表示返回了一个空体；NULL 表示
+    # 没有体量记录——这次调用没出去（被策略挡下、参数不合法、还没发就失败了），
+    # 或者这一行来自正文被清掉之前的老库（那时没量过体量，也就补不出来）。
+    result_bytes: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), default="ok")
     error: Mapped[str | None] = mapped_column(Text)
 

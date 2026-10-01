@@ -374,7 +374,7 @@ async def record_tool_call(
     *,
     tool_name: str,
     args: dict[str, Any] | None = None,
-    result: Any = None,
+    result_bytes: int | None = None,
     status: str = "ok",
     error: str | None = None,
     latency_ms: int = 0,
@@ -390,6 +390,12 @@ async def record_tool_call(
     POST，而它记在哪个名字下由被测对象说（甚至可能什么都没说）。按名字推的话，
     一次往任意地址发的 POST 会被记成读操作，于是幂等和主动行为审计都看不见它
     ——报告上完全正常，只是少了一次扣款。
+
+    `result_bytes` 是**返回体的字节数，不是返回体**。参数名和类型都写成这样是
+    故意的：签名里没有地方能塞正文，想塞的人会在 mypy 那一步就被拦下。体量由
+    调用方量（它手里才有真正发出去的那份字节），见 `proxy/app.py` 里那句注释
+    ——用自己 `json.dumps` 一遍的办法量的话，分隔符和转义的差异会让报告里的
+    体量与 Agent 实际收到的永远对不上。
     """
     raw_args = args or {}
     normalized = normalize_args(raw_args)
@@ -410,11 +416,7 @@ async def record_tool_call(
                 args_json=json.dumps(normalized, ensure_ascii=False, default=str),
                 arg_hash=arg_hash,
                 fingerprint=fingerprint(tool_name, normalized),
-                result_json=(
-                    json.dumps(result, ensure_ascii=False, default=str)
-                    if result is not None
-                    else None
-                ),
+                result_bytes=result_bytes,
                 status=status,
                 error=error,
                 is_write=(
