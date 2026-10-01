@@ -112,6 +112,33 @@ def test_extra_arguments_can_be_allowed_explicitly() -> None:
     assert validate_arguments(lenient, {"order_id": "A1", "amount": 599, "x": 1}) == []
 
 
+def test_an_undeclared_key_set_is_not_a_declaration_of_no_keys() -> None:
+    """`{type: object}` 没有说键是怎样的，于是**键上不核对**。
+
+    旧行为把每一个键都判成"多出来的"：一份非声明于是让这个工具的每一次调用都
+    在边界上被拒，报告上写着"Agent 参数送错了"，而真相是这份声明让每一次调用
+    都过不去。凭空造出来的约束比漏检更坏——它把账记在被测对象头上。
+    """
+    assert validate_arguments({"type": "object"}, {"order_id": "A1", "extra": 1}) == []
+    # 声明仍然算数：`type` 那一条照常查（而且只报这一条，不往下衍生）。
+    assert _codes({"type": "object"}, "A1") == ["type_mismatch"]
+
+
+def test_an_empty_properties_table_is_a_declaration_of_no_keys() -> None:
+    """**空表和「没给」是两件事。**
+
+    这里给的是空表，那就是一句写下来的"一个键都不许"；只写了
+    `additionalProperties: false`、`properties` 一个字没写，也是同一句表态的
+    另一种写法。两种都照旧拒绝，因为约束是写下来的，不是推出来的。
+    """
+    assert _codes({"type": "object", "properties": {}}, {"order_id": "A1"}) == [
+        "unexpected_argument"
+    ]
+    assert _codes({"type": "object", "additionalProperties": False}, {"x": 1}) == [
+        "unexpected_argument"
+    ]
+
+
 def test_a_wrong_type_does_not_also_report_its_fields() -> None:
     """类型不对就不再往里查。
 

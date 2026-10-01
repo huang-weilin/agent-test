@@ -59,8 +59,10 @@ _HTTP_POST_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "url": {"type": "string"},
-        # 自由形状不是省事，是唯一说得通的那一种：body 里装什么由目标系统定，
-        # 而这条路的目标由调用方定。见下面 test_a_free_form_body_is_the_only_honest_form。
+        # 键上不核不是省事，是唯一说得通的那一种：body 里装什么由目标系统定，
+        # 而这条路的目标由调用方定。见 `ToolDecl` 的
+        # `_an_open_target_declares_the_route_protocol` 与
+        # test_a_bare_body_declaration_does_not_blame_the_agent_for_our_own_schema。
         "body": {"type": "object", "additionalProperties": True},
     },
     "required": ["url"],
@@ -211,10 +213,10 @@ def test_an_open_target_tool_must_say_it_is_a_write() -> None:
       type: object
       properties:
         url: {type: string}
-        body: {type: object}
+        body: {type: object, properties: {}}
       required: [url]
 """,
-            "自由形状",
+            "不许对键表态",
         ),
         (
             """    parameters:
@@ -228,7 +230,7 @@ def test_an_open_target_tool_must_say_it_is_a_write() -> None:
           required: [order_id]
       required: [url]
 """,
-            "自由形状",
+            "不许对键表态",
         ),
         (
             """    parameters:
@@ -253,6 +255,28 @@ def test_an_open_target_tool_must_declare_the_route_protocol(params: str, needle
         parse_scenario(_text(params=params))
     assert needle in str(exc.value)
     assert "http_post" in str(exc.value)
+
+
+def test_a_body_that_says_nothing_about_keys_loads() -> None:
+    """`body: {type: object}` 是**没表态**，不是"一个字段都不许有"——加载得过。
+
+    这条与上面那两行的区别就是整条规则的分界线：拒掉的是**对键表了态**的写法
+    （列了键、给了空表、或写死 false），因为那些写法会让每一次转发都被判成参数
+    错误、账记在被测对象头上；什么都没写就没有可违反的约束。
+    """
+    scenario = parse_scenario(
+        _text(
+            params="""    parameters:
+      type: object
+      properties:
+        url: {type: string}
+        body: {type: object}
+      required: [url]
+"""
+        )
+    )
+    http_post = next(t for t in scenario.tools if t.name == "http_post")
+    assert http_post.parameters["properties"]["body"] == {"type": "object"}
 
 
 def test_a_rule_only_the_open_route_can_reach_is_not_an_orphan() -> None:
@@ -559,19 +583,18 @@ async def test_the_mock_plays_the_host_only_when_the_rule_says_so(
     assert str(seen[0].url) == "https://pay.example.com/v1/charges"
 
 
-async def test_a_bare_body_declaration_blames_the_agent_for_our_own_schema(
+async def test_a_bare_body_declaration_does_not_blame_the_agent_for_our_own_schema(
     gw_client, px_client, db
 ) -> None:
-    """加载期为什么要拦「裸的 body」：不拦的话，账会记在被测对象头上。
+    """`body: {type: object}` 什么都没说，于是**键上不核**，调用照常出去。
 
-    这一条把那个场景真跑一遍——**绕过加载期的场景校验，直接按线上那份载荷注册**
-    （网关收什么就是什么，校验在场景那层）。声明里 body 是个 object、没有
-    properties、也没写 additionalProperties，于是空 properties 的默认读法
-    「一个字段都不许有」生效：Agent 送一次再正常不过的请求体，被判成
-    invalid_tool_arguments，finding 上写着是它参数不符合声明。
+    这一条与下一条是同一件事的两半，都**绕过加载期的场景校验，直接按线上那份
+    载荷注册**（网关收什么就是什么，校验在场景那层）：
 
-    真相是**这份声明让每一次调用都过不去**。名字换一下：这不是"少核了一层"，
-    是核对的方式错了——比不核对更难发现，因为报告上有结论、结论还像是真的。
+    * 这里 body 是个 object、没写 properties——没有任何可违反的约束，转发的
+      请求体不会被判成参数错误。改之前它会被读成"一个字段都不许有"，账记在
+      被测对象头上。
+    * 下一条 body 给的是**空表**：那是一句写下来的话，照样拒。
     """
     bare = {
         "type": "object",
@@ -581,6 +604,46 @@ async def test_a_bare_body_declaration_blames_the_agent_for_our_own_schema(
     created = await _register(
         gw_client,
         tool_schemas={"http_post": bare, "create_payment": _CREATE_PAYMENT_SCHEMA},
+    )
+    _allow_pay()
+    seen: list[Any] = []
+    proxy_app.set_transport(_spy(seen))
+
+    resp = await px_client.post(
+        "/fetch/http_post",
+        json=_ENVELOPE,
+        headers={"Authorization": f"Bearer {created['api_key']}"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert len(seen) == 1, "参数没被挑出错，请求就该发出去"
+    call = (await db.execute(select(ToolCall))).scalar_one()
+    assert call.status == "ok"
+    findings = (await db.execute(select(DetectorFinding))).scalars().all()
+    assert findings == [], "一份没表态的声明不该产出任何结论"
+
+
+async def test_an_empty_body_table_blames_the_agent_for_our_own_schema(
+    gw_client, px_client, db
+) -> None:
+    """加载期为什么拦「对键表了态的 body」：不拦的话，账会记在被测对象头上。
+
+    声明里 body 是个 object、properties 是**空表**，于是"一个字段都不许有"生效：
+    Agent 送一次再正常不过的请求体，被判成 invalid_tool_arguments，finding 上写着
+    是它参数不符合声明。
+
+    真相是**这份声明让每一次调用都过不去**。名字换一下：这不是"少核了一层"，
+    是核对的方式错了——比不核对更难发现，因为报告上有结论、结论还像是真的。
+    加载期把这类写法拦下（见 `ToolDecl`），正是为了让它在场景里写不出来。
+    """
+    trapping = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}, "body": {"type": "object", "properties": {}}},
+        "required": ["url"],
+    }
+    created = await _register(
+        gw_client,
+        tool_schemas={"http_post": trapping, "create_payment": _CREATE_PAYMENT_SCHEMA},
     )
     _allow_pay()
     seen: list[Any] = []

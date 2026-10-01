@@ -41,8 +41,8 @@ tools:
       type: object
       properties:
         url: {type: string, description: 要访问的网址}
-        # 与对照组一字不差。body 里装什么由目标系统定，所以声明成自由形状
-        # （加载时会核这件事）。
+        # 与对照组一字不差。body 里装什么由目标系统定，所以键上不核——写键的
+        # 名单（空表也算）加载期会拒。
         body:
           type: object
           additionalProperties: true

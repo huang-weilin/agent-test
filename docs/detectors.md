@@ -421,6 +421,14 @@ run_id、检测器、豁免规则），因为这个运行确实在打转、而�
 四条 `tool_schema/fail`，而 `expected_charges: 0` 同时说明它们**一笔都没到达目标
 系统**。
 
+**"不符合声明"里有一半是"声明没表态"。** `properties` 一个字没写
+（`{type: object}`）时，键上没有可核对的东西；旧行为把它读成"一个键都不许"
+（`properties or {}`），于是这个工具的每一次调用都被拒、报告说 Agent 参数送错了，
+而真相是这份声明让每一次调用都过不去。现在球在"表过态的声明"这一边：空表
+（`properties: {}`）是一句写下来的话，照拒；没写不是。这一对的受控实验是
+`scenarios/schema_keys_undeclared.yaml`（通过）与 `scenarios/schema_empty_properties.yaml`
+（两条 `tool_schema/fail`），差别只有那一行。
+
 ### 它们怎么进到这次运行里
 
 代理在拒绝的那一刻把结论写进 `detector_finding` 表，跑完之后由

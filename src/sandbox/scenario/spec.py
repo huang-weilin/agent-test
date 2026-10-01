@@ -163,8 +163,9 @@ class ToolDecl(BaseModel):
 
         两种都在加载时拦下，而不是让它们安静地待在声明里。
 
-        `body` 于是只能是自由形状（`additionalProperties: true`）——它里面每一条
-        约束都是关于某个目标系统的断言，而这条路的目标由调用方定。
+        `body` 于是不许对键表态——它里面每一条关于键的约束都是关于某个目标系统的
+        断言，而这条路的目标由调用方定。两种写法都表示键上不核：什么都不写
+        （`{type: object}`），或者写 `additionalProperties: true` 把这件事写下来。
 
         **还有一条：它必须是写操作。** 通用出口转发的是 POST，而目标由调用方
         定——所以"这个工具只读"是一句沙箱没法核实、也不该采信的话：一次往任意
@@ -211,18 +212,20 @@ class ToolDecl(BaseModel):
                 f"工具 {self.name!r} 的 {GENERIC_EGRESS_URL_FIELD!r} 必须是字符串类型的 URL。"
             )
 
-        # `body` 只能是自由形状，而且必须把这件事写下来。
+        # `body` 不许对键表态。
         #
         # 上面那条"别声明目标系统的 schema"在这里露了原形：声明里对 `body` 的
         # 每一个约束都是**关于某个目标系统**的断言，而这条路的目标由调用方定
         # ——同一个工具今天发给支付网关、明天发给工单系统。所以"body 里只许有
-        # order_id 和 amount"是一句沙箱核实不了、而且随目的地而变的话。
+        # order_id 和 amount"是一句沙箱核实不了、而且随目的地而变的话；写下去
+        # 的后果不是"多核了一层"，而是每一次转发都被判成 invalid_tool_arguments
+        # ——报告上写着"Agent 参数送错了"，而真相是这份声明让每一次调用都过不去。
         #
-        # 更要紧的是不写它会发生什么。**空 properties 意味着"这个键一个都不许
-        # 有"**（见 toolschema 的默认拒绝），于是一次带着真实业务字段的转发会被
-        # 判成 invalid_tool_arguments——报告上写着"Agent 参数送错了"，而真相是
-        # 这份声明让每一次调用都过不去。这正是那份文件（spec.py）一直在拦的
-        # "写了却没人核对"，只不过这次是**核对的方式错了**，比不核对更难发现。
+        # **两种写法都表示"键上不核"**：什么都不写（`{type: object}`），或者写
+        # `additionalProperties: true` 把这件事故意写下来。表态了就拒——空的
+        # properties 表是一句写下来的"一个字段都不许有"，一样会冤枉 Agent。
+        # 这条规则于是和运行时的判法严丝合缝：**拒掉的，恰好是那些会让每一次调用
+        # 都过不去的写法**（见 toolschema 的模块 docstring）。
         body = properties.get(GENERIC_EGRESS_BODY_FIELD)
         if body is None:
             return self
@@ -231,14 +234,15 @@ class ToolDecl(BaseModel):
                 f"工具 {self.name!r} 的 {GENERIC_EGRESS_BODY_FIELD!r} 必须是对象"
                 f"（它是原样转发给目标系统的那份请求体）。"
             )
-        if body.get("additionalProperties") is not True:
+        if "properties" in body or body.get("additionalProperties") is False:
             raise ValueError(
-                f"工具 {self.name!r} 的 {GENERIC_EGRESS_BODY_FIELD!r} 必须声明成自由"
-                f"形状：additionalProperties: true。\n"
+                f"工具 {self.name!r} 的 {GENERIC_EGRESS_BODY_FIELD!r} 不许对键表态："
+                f"不写 properties（或写 additionalProperties: true）都表示键上不核，"
+                f"写了键的名单就会被当真的约束。\n"
                 f"它对 body 的每一条约束都是关于某个「目标系统」的断言，而这条路"
-                f"的目标由调用方定——同一个工具可以去不同的主机。少写这一句的后果"
-                f"不是少核了一层，而是每一次带业务字段的转发都会被判成参数错误"
-                f"（空 properties 在这里的意思是一个字段都不许有），报告上却写着"
+                f"的目标由调用方定——同一个工具可以去不同的主机。写下去的后果不是"
+                f"少核了一层，而是每一次带业务字段的转发都会被判成参数错误（一份"
+                f"空的 properties 表在这里的意思是「一个字段都不许有」），报告上却写着"
                 f"是 Agent 送错了参数。"
             )
         return self

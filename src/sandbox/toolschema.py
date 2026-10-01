@@ -26,12 +26,28 @@
 
 ## 一条刻意偏离 JSON Schema 默认值的地方
 
-`additionalProperties` 的 JSON Schema 默认值是"允许"，这里反过来：**没写就是
-不许**。理由是这个字段在目标系统上几乎从来不是"随便传"——多出来的参数要么被
-静默丢掉（我们的 mock 就是这样：`create_payment` 只看 `order_id` / `amount` /
-`idempotency_key`），要么让接口报错。两种都不该算通过，而"模型编了一个不存在的
-参数名、值被丢掉、报告全绿"正是最该被抓到的一类缺陷。要放宽，写
+`additionalProperties` 的 JSON Schema 默认值是"允许"，这里反过来：**声明里列了键
+之后，没写就是不许**。理由是这个字段在目标系统上几乎从来不是"随便传"——多出来的
+参数要么被静默丢掉（我们的 mock 就是这样：`create_payment` 只看 `order_id` /
+`amount` / `idempotency_key`），要么让接口报错。两种都不该算通过，而"模型编了一个
+不存在的参数名、值被丢掉、报告全绿"正是最该被抓到的一类缺陷。要放宽，写
 `additionalProperties: true`——**让"我知道我在放宽什么"成为一个写下来的动作**。
+
+**这条偏离的适用范围是"表过态的声明"**，这一点以前是含糊的，而含糊的代价落在被
+测对象头上：`properties` 一个字都没写时（`{type: object}`），旧行为把每一个键都
+判成多出来的——一份**没说键是怎样的**声明，被当成了**说"一个键都不许"**。于是
+这个工具的每一次调用都在边界上被拒、报告上写着"Agent 参数送错了"，而真相是这份
+声明让每一次调用都过不去。这不是漏检，是**凭空造了一条约束**。
+
+所以两个"空"要分开，和这个项目别处同一条规矩：
+
+* `properties` **没给**（`{type: object}`）：键上无可核对之物，不核对。声明仍然
+  算数——`type` 那一条照常查（参数必须是对象）。
+* `properties: {}` **给了空表**：那是一个写下来的表态（"一个键都不许"），照旧拒绝
+  任何键；想显式说同一件事也可以写 `additionalProperties: false`。
+
+要"只许这几个键"，写 `properties`；要"什么都行"，写 `additionalProperties: true`；
+要"这份声明不设标准"，写 `{}`（见 `validate_arguments`）。
 """
 
 from __future__ import annotations
@@ -302,6 +318,10 @@ def _check_object(
     problems: list[ArgumentProblem] = []
     properties = schema.get("properties") or {}
     where = f"参数 {path}" if path else "调用参数"
+    #: 这份声明有没有对"允许哪些键"表过态。**用 `in` 判，不是判真假**：空表也是
+    #: 表态（"一个键都不许"），而没给不是。两件事混起来的话，`{type: object}`
+    #: 会变成"每个键都是多出来的"——凭空造出来的约束，账记在被测对象头上。
+    declares_keys = "properties" in schema or schema.get("additionalProperties") is False
 
     for name in schema.get("required") or []:
         if name not in value:
@@ -322,9 +342,11 @@ def _check_object(
             problems.extend(
                 _check(properties[name], element, path=f"{path}.{name}" if path else name)
             )
-        elif schema.get("additionalProperties") is not True:
+        elif declares_keys and schema.get("additionalProperties") is not True:
             # 默认不许（见模块 docstring）。多出来的参数在真实系统上要么被丢掉、
-            # 要么让接口报错，两种都不该算通过。
+            # 要么让接口报错，两种都不该算通过。**前提是这份声明表过态**：
+            # 键一个都没列、也没说 false 的话，没有可对照的东西，不在这里凭空
+            # 造一条出来。
             problems.append(
                 ArgumentProblem(
                     code="unexpected_argument",
