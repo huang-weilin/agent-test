@@ -119,6 +119,67 @@ items:
       idempotency: inconclusive
       autonomy: inconclusive
 
+  - id: loop-similar-ids-are-a-batch-not-a-loop
+    source: 自造
+    why: >
+      六个各不相同的订单号，按批次一个个查过去——真实 Agent 最常见的活法之一。
+      它们的字面很像（只差末尾四位），近似层会把它们聚成一簇，而变化的字段
+      order_id 是字符串：「没有序」——谈不上"回退"，也就谈不上"在原地打转"。
+      这条是负样本，量的是一类误报：观测支持的是"这些参数不一样"，
+      而"在原地打转"说的是"它走回去了"，字符串字段给不出后者的证据。
+      （修之前它报的是 loop.approximate/fail，见 docs/detectors.md 第三节。）
+    tools:
+      get_order: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: get_order, args: {order_id: ORD-2024-0000}}
+      - {tool: get_order, args: {order_id: ORD-2024-0001}}
+      - {tool: get_order, args: {order_id: ORD-2024-0002}}
+      - {tool: get_order, args: {order_id: ORD-2024-0003}}
+      - {tool: get_order, args: {order_id: ORD-2024-0004}}
+      - {tool: get_order, args: {order_id: ORD-2024-0005}}
+    expect:
+      memory: none
+      loop.approximate: none
+      idempotency: inconclusive
+      autonomy: inconclusive
+    absent:
+      # 不只是"不许报 fail"：这条轨迹上近似层**一句话都不该有**。报 pass 也是在
+      # 说"判为正常遍历"，而它根本没有判过——它判不了。
+      - {detector: loop.approximate, verdict: pass}
+      - {detector: loop.approximate, verdict: warning}
+
+  - id: loop-string-cursor-paging-is-not-a-loop
+    source: 自造
+    why: >
+      游标是字符串的翻页（`cursor` 一页一个 token），六页。这是正常遍历：
+      游标一个个往后走，没有回头。字符串没有序，检测器说不出"它走回去了"，
+      所以这一族该沉默，由族级的 loop 结论去说"已比对、未见重复"。
+      修之前它报的是 loop.approximate/fail「在原地打转」——一条会被拿去查
+      Agent 行为缺陷的结论，而那里根本没有缺陷。
+      （游标「长得像」才作数：近似层是按相似度聚类的，token 各不相似时
+      这一串根本进不到判定那一步，那样这条样本就什么都没量到——第一版
+      写的是 `tok0f3a/tok1b7c/…` 那种，探针打上去是绿的。）
+    tools:
+      list_orders: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: list_orders, args: {status: unpaid, cursor: tok0000}}
+      - {tool: list_orders, args: {status: unpaid, cursor: tok0001}}
+      - {tool: list_orders, args: {status: unpaid, cursor: tok0002}}
+      - {tool: list_orders, args: {status: unpaid, cursor: tok0003}}
+      - {tool: list_orders, args: {status: unpaid, cursor: tok0004}}
+      - {tool: list_orders, args: {status: unpaid, cursor: tok0005}}
+    expect:
+      memory: none
+      loop.approximate: none
+      idempotency: inconclusive
+      autonomy: inconclusive
+    absent:
+      - {detector: loop.approximate, verdict: fail}
+
   - id: loop-monotonic-paging-is-not-a-loop
     source: 自造
     why: >

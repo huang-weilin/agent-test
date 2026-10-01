@@ -67,6 +67,18 @@ _ABSENT = {
         "改源码再还原，放在仓库里就有被提交进去的风险。从仓库里永远找不到它，"
         "而 `docs/cost.md` 指它是对的——那是给改这段代码的人看的路标。"
     ),
+    "_probes/probe_monotonic_state.py": (
+        "同上，住在仓库外面。`docs/detectors.md` 第三节那几条「我量过」的说法"
+        "（三态判定、两趟写法、十二个哈希种子）都由它核，指它是对的。"
+    ),
+    "_probes/measure_paging_shapes.py": (
+        "同上，住在仓库外面。量的是「参数形状决定近似层结论」那张表，"
+        "`docs/detectors.md` 第三节引它。"
+    ),
+    "_probes/measure_cluster_linkage.py": (
+        "同上，住在仓库外面。README 的缺口表和 `docs/detectors.md` 都写着"
+        "「链式聚类」这个出口**量过了、不通**，量的就是它。"
+    ),
     "notes/a.md": (
         "`docs/detectors.md` 举的例子：讲「目录判据的粒度是整块」时，举的是**记忆"
         "目录里**的布局（`notes/` 下逐条声明各写一行），不是仓库里的文件。"

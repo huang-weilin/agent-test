@@ -103,6 +103,100 @@ def test_page_churn_is_a_loop(make_call) -> None:
     assert approx[0].detail["values_monotonic"] is False
 
 
+def test_similar_ids_in_a_batch_are_not_a_loop(make_call) -> None:
+    """**负样本：一批不同的订单号。** 字符串字段没有序，谈不上"回退"。
+
+    "在原地打转"说的是"它走回去了"，那要证据；字符串字段给不出这个证据，
+    观测支持的只是"这些参数不一样"。修之前这一串报的是 fail
+    「以相似参数重复调用 6 次…是在原地打转」——一条会被拿去查 Agent 行为缺陷的
+    结论，而那里根本没有缺陷。
+
+    **刻意用没有字段权重的检测器**：误报发生在默认路径上，而大多数用户不会去写
+    那张权重表。形状也不许凑——近似的字符串才聚得成簇，参数各不相似时这一串
+    压根走不到判定那一步，那样测的就成了空气（见 `tests/corpus/loop.yaml` 里
+    那条样本的 `why`）。
+    """
+    calls = [
+        make_call(i, "get_order", {"order_id": f"ORD-2024-{i:04d}"}) for i in range(1, 7)
+    ]
+    findings = LoopDetector().run(calls, ExemptionSet())
+
+    assert not _of(findings, ".approximate"), (
+        "一批不同的订单号被报成了循环："
+        + "；".join(f.summary for f in _of(findings, ".approximate"))
+    )
+
+
+def test_string_cursor_paging_is_not_a_loop(make_call) -> None:
+    """字符串游标翻页同样是正常遍历，不是循环。
+
+    和上一条同源，但形状不同：上一条是**读不同的东西**，这一条是**读同一个
+    结果集的下一页**。两条都落在"变化的字段是字符串"上。
+    """
+    calls = [
+        make_call(i, "list_orders", {"status": "unpaid", "cursor": f"tok{i:04d}"})
+        for i in range(6)
+    ]
+    findings = LoopDetector().run(calls, ExemptionSet())
+
+    assert not _of(findings, ".approximate"), (
+        "字符串游标翻页被报成了循环："
+        + "；".join(f.summary for f in _of(findings, ".approximate"))
+    )
+
+
+def test_a_numeric_loop_still_reports_after_the_string_fix(make_call) -> None:
+    """**保住检出。** 上面两条改的是"判不了"，不是"别报了"。
+
+    少了这一条，"把近似层改成永远沉默"也能让那两条全绿——那是一个更坏的世界
+    （真正的循环一条都报不出来），而它只看负样本是看不出来的。判据是数值字段
+    有明确的回退（3 → 2）。
+
+    形状和 `tests/corpus/loop.yaml` 的 `loop-approximate-non-monotonic` 一致
+    （五个字段、四个常量）：这就是**下面那条"形状依赖"缺陷**——字段少了这个簇
+    根本聚不起来，同一个循环会被判成 pass。那件事没在这一片里修，见
+    `docs/detectors.md` 第三节末尾。
+    """
+    calls = [
+        make_call(
+            i,
+            "list_orders",
+            {"query": "book", "status": "paid", "sort": "asc", "region": "cn", "page": p},
+        )
+        for i, p in enumerate([1, 3, 2], start=1)
+    ]
+    findings = LoopDetector().run(calls, ExemptionSet())
+
+    approx = _of(findings, ".approximate")
+    assert [f.verdict for f in approx] == [DetectorVerdict.FAIL], (
+        "数值字段明确回退的循环没报出来：" + str([f.summary for f in approx])
+    )
+    assert approx[0].detail["values_monotonic"] is False
+
+
+def test_mixed_fields_where_one_has_no_order_are_not_judged(make_call) -> None:
+    """一个数值字段 + 一个字符串字段：判不了，所以不报。
+
+    判据是**只要有一个变化字段说不出序，就不能声称"它在打转"**——那句话是整个
+    簇的结论，不是逐字段的。放开这一条的话，任何人往参数里加一个字符串字段
+    （备注、租户号）就能把误报引回来。
+
+    形状是量出来挑的：常量字段少于三个时这串聚不成簇，那样这条样本什么都没量到
+    （探针打上去是绿的——第一版就是那样，改成这个形状才咬得住）。
+    """
+    calls = [
+        make_call(
+            i,
+            "list_orders",
+            {"query": "book", "status": "paid", "sort": "asc", "page": p, "note": n},
+        )
+        for i, (p, n) in enumerate([(1, "ready"), (3, "ready!"), (2, "ready.")], start=1)
+    ]
+    findings = LoopDetector().run(calls, ExemptionSet())
+
+    assert not _of(findings, ".approximate")
+
+
 def test_pagination_exemption_does_not_silence_a_strict_loop(make_call) -> None:
     """翻页豁免只能放过"页码在变"的情况。
 

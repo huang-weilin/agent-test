@@ -333,7 +333,13 @@ class LoopDetector:
         if not differing:
             return None
 
-        monotonic = self._all_monotonic(cluster, differing)
+        monotonic = self._monotonic_state(cluster, differing)
+        if monotonic is None:
+            # **判不了它是不是在打转，那就别说。** 沉默不是漏报：族级的 `loop`
+            # 结论照旧会说"已在 N 次调用中比对"，读的人分得清"查过、没毛病"和
+            # "这一段没测"。反过来，报一条"在原地打转"是在说**它走回去了**——
+            # 而字符串字段上没有"回去"这回事（判据见 `_monotonic_state`）。
+            return None
         detail: dict[str, Any] = {
             "tool_name": tool_name,
             "count": len(cluster),
@@ -406,16 +412,51 @@ class LoopDetector:
             fields.update(sim.differing_fields)
         return fields
 
-    def _all_monotonic(self, cluster: list[CallView], fields: set[str]) -> bool:
-        """变化字段的取值是否随序号单调推进（允许相等，不允许回退）。"""
+    def _monotonic_state(self, cluster: list[CallView], fields: set[str]) -> bool | None:
+        """变化字段的取值随序号怎么走：True 只进不退 / False 明确的回退 / None 判不了。
+
+        **三个状态，不是两个。** 非数值字段（订单号、游标）没有序，谈不上"回退"，
+        而原先把这种"判不了"折进了"不是单调"——于是任何一批**相似的字符串参数**
+        都被报成"在原地打转"。量于 2026-10-01（`../_probes/measure_paging_shapes.py`、
+        `../_probes/measure_cluster_linkage.py`）：
+
+          * 12 个不同的订单号 `ORD-2024-0000…0011`（正常批处理）→
+            `loop.approximate/fail`「以相似参数重复调用 12 次…是在原地打转」；
+          * 字符串游标翻 12 页（正常遍历）→ 同样报 fail。
+
+        观测支持的是"这些参数不一样"，而"在原地打转"说的是"**它走回去了**"——
+        后者要证据，字符串字段给不出这个证据。这和 `845e3b5`（空表 vs 没给）、
+        `9c2cbe4`（没写 `properties` vs 写了空表）是同一族毛病：**把"判不了"折进
+        某个具体判定，等于凭空造了一条观测。**
+
+        原注释写着"判成不单调只会多报一次循环"——那是把误报当成了廉价的东西。
+        这个项目里最贵的错恰恰是报告说了比观测更多的话：一条写着"在原地打转"的
+        fail 会被拿去查 Agent 的行为缺陷，而那里根本没有缺陷。
+
+        真正**完全相同**的参数重复不靠这里：严格层按指纹逐条比对，`cursor=a` 与
+        `cursor=b` 来回发的那种循环，严格层每一条都抓得住。（`bool` 要先于 `int`
+        判定——Python 里 `True` 是 `int` 的实例。）
+
+        **两趟，不是一趟。先问完"有没有判不了的字段"，再看"有没有回退的"。**
+        写成一趟（碰到判不了就 return None、碰到回退就 return False）时，答案是
+        **集合的迭代顺序**决定的：`{page, note}` 里先取到 `page`，就在回退那一步
+        直接 return False 了，根本走不到 `note` 那个"判不了"。而字符串集合的迭代
+        顺序随 `PYTHONHASHSEED` 变——同一段轨迹会时红时绿地报"在原地打转"。
+
+        量于 2026-10-01（`../_probes/probe_monotonic_state.py` 的第五段），跑的是
+        `test_mixed_fields_where_one_has_no_order_are_not_judged`，十二个 seed：
+        一趟写法绿 6/12（红的正好是另一半），两趟写法绿 12/12。**一半的进程里报
+        "Agent 在原地打转"，另一半里不报**——同一个 trace、同一份代码，只是哈希
+        种子不同。这不是"偶尔误报"，是一条随机器摆动的结论。
+        """
+        numeric_values: list[list[int | float]] = []
         for field in fields:
             values = [normalize_args(c.args).get(field) for c in cluster]
             numeric = [v for v in values if isinstance(v, int | float) and not isinstance(v, bool)]
             if len(numeric) != len(values):
-                # 非数值字段无法谈单调性，保守判为不单调。
-                # 保守在这里是安全的：判成不单调只会多报一次循环，
-                # 判成单调会让真正的循环静默通过。
-                return False
+                return None
+            numeric_values.append(numeric)
+        for numeric in numeric_values:
             if any(b < a for a, b in zip(numeric, numeric[1:], strict=False)):
                 return False
         return True
