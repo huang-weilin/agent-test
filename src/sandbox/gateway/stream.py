@@ -177,6 +177,7 @@ async def settle_and_record(
     observed_output: int | None,
     started: float,
     streaming: bool,
+    request_bytes: int | None = None,
 ) -> dict[str, Any]:
     """结算 + 落库，返回 cost breakdown。
 
@@ -197,6 +198,7 @@ async def settle_and_record(
         latency_ms=int((time.perf_counter() - started) * 1000),
         streaming=streaming,
         status=numbers.status,
+        request_bytes=request_bytes,
     )
 
 
@@ -325,6 +327,7 @@ async def relay_stream(
     reserved: Reserved,
     model: str,
     started: float,
+    request_bytes: int | None = None,
 ) -> AsyncIterator[bytes]:
     """边转边读：把上游的帧发给客户端，同时累计成一次调用。
 
@@ -364,6 +367,7 @@ async def relay_stream(
                 observed_output=estimate_output_tokens(acc),
                 started=started,
                 streaming=True,
+                request_bytes=request_bytes,
             )
         except asyncio.CancelledError:
             # 生成器正被取消。预算已经结清（上面那一行是同步的），**丢的是明细**：

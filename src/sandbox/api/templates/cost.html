@@ -78,13 +78,49 @@
   会被劈成两半，两边的数都对不上任何一次运行——而对不上账的账单比没有账单更糟。
 </p>
 
-<h2>没做的：按工具拆解</h2>
+{% if by_tool and by_tool.tools %}
+{# 这一节的口径和上面几张表**不是一个东西**，所以它单独写，不套 `rollup_table`：
+   上面每一行都是"花了多少"，这一行没有花费——工具调用本身不花 token，钱花在
+   它返回的内容上：那些内容进了上下文，之后的每一次请求都要为它再付一遍。 #}
+<h2>按工具（上下文占用，不是"这个工具花了多少钱"）</h2>
+<table class="grid">
+  <thead>
+    <tr><th>工具</th><th class="num">调用</th><th class="num">返回体</th>
+        <th class="num">实测增量</th><th class="num">租金</th></tr>
+  </thead>
+  <tbody>
+  {% for t in by_tool.tools %}
+    <tr>
+      <td><code>{{ t.tool_name }}</code></td>
+      <td class="num">{{ t.calls }}</td>
+      <td class="num nowrap">
+        {% if t.measured_size_calls %}{{ t.total_result_bytes | byte_size }}
+        {% else %}<span class="dim">量不到</span>{% endif %}
+      </td>
+      <td class="num nowrap">
+        {% if t.growth_measured_calls %}{{ t.context_growth_bytes | byte_size }}
+        {% else %}<span class="dim">量不到</span>{% endif %}
+      </td>
+      <td class="num nowrap">
+        {% if t.measured_size_calls %}
+          {{ t.rent_bytes | byte_size }}
+          {% if t.rent_tokens is not none %}
+            <span class="dim">≈{{ t.rent_tokens | tokens }} tok</span>
+          {% endif %}
+        {% else %}<span class="dim">量不到</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
 <p class="note">
-  需求要求按 Agent、工具、场景三个维度拆解。Agent 和场景做了，<strong>工具没做</strong>，
-  因为做不出一个诚实的版本：工具调用本身不花 token，token 花在 LLM 上。
-  沿时间线把"产生这次工具调用的那次 LLM 调用"配上去是个错的近似——
-  工具<strong>返回的内容</strong>会留在上下文里，让之后每一次调用继续为它付钱。
-  硬报一个数，用户会拿它去砍工具，而那个数是错的。
+  上面几张表问的是"花了多少"，这一张问的是<strong>谁在吃上下文</strong>。
+  「租金」是条件数字：假设这个工具的返回体在此后每次请求里原样重发，它一共占多少
+  字节——它只按返回体本身算，而实测的每轮增量比返回体还大（JSON 转义与消息外壳
+  都要算进去），<strong>所以租金是下界，不是账单</strong>。
+  量不到的那几格写「量不到」不写 0：<code>0 B</code> 说的是"它返回了空体"。
+  见 <code>docs/cost.md</code>。
 </p>
+{% endif %}
 
 {% endblock %}

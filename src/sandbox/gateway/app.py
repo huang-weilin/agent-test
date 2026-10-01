@@ -279,6 +279,14 @@ async def chat_completions(
 ) -> Any:
     started = time.perf_counter()
     payload = await request.json()
+    # **收到的那份字节**，不重新序列化一遍：重编码会改掉键序、空格与转义，量出来
+    # 的就不是模型实际收到的那一坨了。`request.json()` 内部已经把 body 读进缓存，
+    # 这里再要一次不会重复读流。
+    #
+    # 它有两个用处，都是"把估的换成量的"：按工具拆成本要用它算这次运行的字节/
+    # token 密度（见 `cost/aggregator.py` 的 `by_tool`），以及它是预扣估算器唯一
+    # 的实测对照（估算器估的就是这个 blob）。
+    request_bytes = len(await request.body())
 
     active = runs.resolve(authorization, x_sandbox_run_id)
     if active is None:
@@ -326,7 +334,13 @@ async def chat_completions(
 
     if payload.get("stream"):
         return await _streaming_response(
-            payload, ctx=ctx, budget=budget, reserved=est, model=model, started=started
+            payload,
+            ctx=ctx,
+            budget=budget,
+            reserved=est,
+            model=model,
+            started=started,
+            request_bytes=request_bytes,
         )
 
     try:
@@ -350,6 +364,7 @@ async def chat_completions(
         observed_output=None,
         started=started,
         streaming=False,
+        request_bytes=request_bytes,
     )
 
     # 响应头是给人和给验收脚本看的：一眼能看出这次请求落在哪个运行、预算还剩多少。
@@ -371,6 +386,7 @@ async def _streaming_response(
     reserved: Reserved,
     model: str,
     started: float,
+    request_bytes: int | None = None,
 ) -> JSONResponse | StreamingResponse:
     """流式：转发上游的帧，同时累计结算。
 
@@ -415,6 +431,7 @@ async def _streaming_response(
             reserved=reserved,
             model=model,
             started=started,
+            request_bytes=request_bytes,
         ),
         media_type="text/event-stream",
         headers=headers,

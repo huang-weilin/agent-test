@@ -13,8 +13,12 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # 只为标注。运行期不导入 cost——它要连数据库，这儿只用它的属性。
+    from sandbox.cost.aggregator import ToolCostReport
 
 #: 单个参数值印出来的上限。超过就截断并带上省略号——**截断必须自己说出来**，
 #: 否则"参数里少了个字段"和"参数太长没印全"在报告上是同一个样子。
@@ -41,6 +45,140 @@ def money(usd: float) -> str:
 def tokens(n: int) -> str:
     """千分位。`1234567` 和 `1,234,567` 读起来不是一回事。"""
     return f"{n:,}"
+
+
+def byte_size(n: int) -> str:
+    """字节数，按量级换单位。
+
+    和 `span_human` 同一个道理：量级不能印丢。这里的数用在"哪坨内容在吃上下文"
+    上，差一位就是十倍。**负数照印**——工具调用之后上下文变小是真实发生过的事
+    （Agent 自己裁过），把它显示成 0 会把"它裁了"这件事抹掉。
+    """
+    sign = "-" if n < 0 else ""
+    size = abs(n)
+    if size < 1000:
+        return f"{sign}{size} B"
+    if size < 1_000_000:
+        return f"{sign}{size / 1000:.1f} KB"
+    return f"{sign}{size / 1_000_000:.1f} MB"
+
+
+#: 按工具那一段的标题。终端上两个出口（场景报告、跨运行成本报告）共用同一句：
+#: 标题换一种说法，读的人会以为两处报的不是同一件事。
+TOOL_COST_TITLE = "按工具（上下文占用，不是「这个工具花了多少钱」）"
+
+
+def tool_cost_lines(report: ToolCostReport) -> list[str]:
+    """按工具那一段的正文行（不含标题）。**终端上两个出口共用这一份。**
+
+    为什么这十几行要单独抽出来：同一条「租金是条件数字、不是账单」的话，写在
+    场景报告里一份、写在跨运行成本报告里又一份，两边迟早会有一边忘了跟着改。
+    而这个项目的读者只有一个办法发现那种漂移——把两份报告并排看，而他不会。
+
+    三个数各自带着名字，因为它们是三种口径：
+
+    * 「返回体」是边界量到的那份字节（`ToolCall.result_bytes` 的和），数出来的；
+    * 「实测增量」是这次调用之后第一次请求比之前那次大了多少——**观测**，
+      量不到就写「量不到」，不写 0；
+    * 「租金」是**条件数字**：返回体在此后每次请求里原样重发的话，它一共占多少
+      字节。它只按返回体本身的字节数算，而实测的每轮增量比返回体还大（JSON
+      转义与消息外壳），所以租金是下界——这句话必须印出来，否则读的人会拿它当
+      账单。
+
+    **总和印在说明句里，不印成一列。** 各工具的租金加起来是说得通的：在"原样
+    重发"这个假设下，每一次请求里属于工具返回体的那部分字节**只会被算到产生它的
+    那个工具头上**，所以合计是"输入账单里可归到工具返回体的那一部分"的下界，而且
+    它不会超过整段范围的输入字节总量（量于 2026-10-01 的那次
+    `loop_paging_bounded`：Σ请求体 44,720 B，租金 24,081 B，约一半）。它不该占
+    一列，是因为它不是某一行的事——放在任意一行旁边都会被读成"这一行的"。
+    """
+    rows = sorted(report.tools.values(), key=lambda t: (-t.rent_bytes, t.tool_name))
+    # 宽度按这一节里最长的名字算：写死宽度的话，一个长名字就会把整列顶歪，
+    # 而歪掉的表格比没有表格更难读。名字按**列宽**算：工具名是被测对象自己
+    # 声明的，可以是中文。
+    width = max(display_width(t.tool_name) for t in rows)
+    lines: list[str] = []
+    for tool in rows:
+        # **一次都没量到的时候印「量不到」，不印 0。** 0 B 是一句更强的话——它说的是
+        # "这个工具返回了空体"，而作者知道的是"这一列存在之前跑的老行没有体量"。
+        # 这两种情况在报告上都出现（老库的行、被挡下的调用），而它们的区别恰好是
+        # 读的人要的那个：前者说明历史数据不全，后者说明策略在生效。
+        measured = bool(tool.measured_size_calls)
+        size_text = byte_size(tool.total_result_bytes) if measured else "量不到"
+        rent = byte_size(tool.rent_bytes) if measured else "量不到"
+        if measured:
+            rent_tokens = report.tokens_for(tool.rent_bytes)
+            if rent_tokens is not None:
+                rent += f"（≈{tokens(rent_tokens)} tok）"
+        growth = (
+            byte_size(tool.context_growth_bytes) if tool.growth_measured_calls else "量不到"
+        )
+        lines.append(
+            f"    {pad_left(tool.tool_name, width)}  {tool.calls:>3} 次  "
+            f"返回体 {pad_left(size_text, 9)}  "
+            f"实测增量 {pad_left(growth, 9)}  "
+            f"租金 {rent}"
+        )
+
+    lines.append("    「实测增量」是这次调用之后第一次请求比之前那次大了多少字节——观测。")
+    if report.bytes_per_token is None:
+        lines.append(
+            "    「租金」只报了字节：没有一条调用记下请求体字节数"
+            "（在这一列存在之前跑的），折算 token 的密度无从量起。"
+        )
+    else:
+        total = report.tokens_for(report.total_rent_bytes)
+        total_text = byte_size(report.total_rent_bytes)
+        if total is not None:
+            total_text += f"（≈{tokens(total)} tok）"
+        # 只有一个工具时不写「合计」：一个东西的合计就是它自己，那两个字只会
+        # 让读的人去找另一个数。
+        head = "各工具合计" if len(rows) > 1 else "这一次的租金"
+        lines.append(
+            f"    「租金」是条件数字，不是观测：假设某个工具的返回体在此后每次请求里"
+            f"原样重发，它一共占多少字节。折算用这段范围实测的密度 "
+            f"{report.bytes_per_token:.2f} 字节/token（Σ请求体 ÷ Σ输入 token，只算"
+            f"量到的那 {report.llm_calls_measured}/{report.llm_calls} 次调用）；"
+            f"{head} {total_text}——在同一个假设下，这就是输入账单里可归到工具返回体"
+            f"的那一部分。"
+        )
+    lines.append(
+        "    实测的每轮增量比返回体本身大（JSON 转义与消息外壳都要算进去），"
+        "所以租金是下界，不是账单。"
+    )
+    unmeasured = sum(t.unmeasured_size_calls for t in report.tools.values())
+    if unmeasured:
+        lines.append(
+            f"    另有 {unmeasured} 次调用没量到返回体字节数（在这一列存在之前跑的老行，"
+            f"或者根本没出去的调用）。它们不计进「返回体」与「租金」——那两列是"
+            f"量到的那部分，不是全部。"
+        )
+    without = sum(t.calls_without_followup for t in report.tools.values())
+    if without:
+        lines.append(
+            f"    其中 {without} 次调用之后同会话里再没有请求，租金记 0 并单独计数："
+            f"0 是「看不见」，不是「免费」。"
+        )
+    return lines
+
+
+def display_width(text: str) -> int:
+    """一串字在终端里占几格。
+
+    Python 的 `len()` 数的是**字符**，终端数的是**列**：一个汉字占两列。所有
+    `f"{x:>9}"` 对中文都是错的——「量不到」3 个字符会被补到 9 个字符，屏幕上
+    却是 6 + 6 = 12 列，于是它右边那几列整列歪掉。而这一节里**恰好**有一个
+    中文的占位符（量不到），所以这不是理论问题。
+
+    只把 `W`（宽）和 `F`（全角）算两列。`A`（模糊）按一列算——它在中文终端里
+    多数占两列，但它出现在这儿的字符串里的机会是零，为此加一张表不值。
+    """
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def pad_left(text: str, width: int) -> str:
+    """左补空格到 `width` **列**。见 `display_width`。"""
+    return " " * max(0, width - display_width(text)) + text
 
 
 def span_human(seconds: float) -> str:

@@ -444,12 +444,18 @@ async def record_llm_call(
     latency_ms: int = 0,
     streaming: bool = False,
     status: str = "ok",
+    request_bytes: int | None = None,
     seq: int | None = None,
 ) -> dict[str, Any]:
     """落一条 LLM 调用。token 数取自网关的权威计数。
 
     成本在**这里**算而不是由调用方传：让调用方传成本，等于允许两处算法漂移。
     返回 cost breakdown，供网关/报告标注"未定价"。
+
+    `request_bytes` 由网关量（`gateway/app.py` 里那句 `len(await
+    request.body())`）——它是**收到的那份字节**，不是重新序列化一遍的长度；
+    重编码会改掉键序、空格和转义，量出来的就不是账单上的那个量了。None 表示
+    没量到（老库的行），见 `db/models.py` 里这一列的注释。
     """
     cost = compute_cost(
         model,
@@ -476,6 +482,7 @@ async def record_llm_call(
                 latency_ms=latency_ms,
                 streaming=streaming,
                 status=status,
+                request_bytes=request_bytes,
             )
         )
 

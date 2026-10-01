@@ -706,6 +706,65 @@
   <strong>这几行是估算，不是账单</strong>——估的数可能偏大也可能偏小。
   {% endif %}
 </p>
+{% if report.tool_costs and report.tool_costs.tools %}
+{# 这一节报的是**上下文占用**，不是"这个工具花了多少钱"。工具调用本身不花
+   token——钱花在它返回的内容上：那些内容进了上下文，之后的每一次请求都要为它
+   再付一遍。所以表头没有"花费"这一列，也不可能有一个诚实的数填进去。 #}
+<h3>按工具（上下文占用）</h3>
+<table class="grid">
+  <thead><tr><th>工具</th><th class="num">调用</th><th class="num">返回体</th>
+             <th class="num">实测增量</th><th class="num">租金</th></tr></thead>
+  <tbody>
+  {# 不在这里排序：`to_dict()` 已经按租金从大到小排好。 #}
+  {% for t in report.tool_costs.tools %}
+    <tr>
+      <td>{{ t.tool_name }}</td>
+      <td class="num">{{ t.calls }}</td>
+      {# 一次都没量到时写「量不到」，不写 0：0 B 说的是"它返回了空体"，
+         而实际发生的是"这一列存在之前跑的老行没有体量"。见 docs/cost.md。 #}
+      <td class="num nowrap">
+        {% if t.measured_size_calls %}{{ t.total_result_bytes | byte_size }}
+        {% else %}<span class="dim">量不到</span>{% endif %}
+      </td>
+      <td class="num nowrap">
+        {% if t.growth_measured_calls %}{{ t.context_growth_bytes | byte_size }}
+        {% else %}<span class="dim">量不到</span>{% endif %}
+      </td>
+      <td class="num nowrap">
+        {% if t.measured_size_calls %}
+          {{ t.rent_bytes | byte_size }}
+          {% if t.rent_tokens is not none %}
+            <span class="dim">≈{{ t.rent_tokens | tokens }} tok</span>
+          {% endif %}
+        {% else %}<span class="dim">量不到</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  <strong>「返回体」</strong>是工具出口上量到的字节数，数出来的。
+  <strong>「实测增量」</strong>是这次调用之后第一次请求比之前那次大了多少字节——
+  观测量，工具调用之后上下文变小（Agent 自己裁过）是真实发生过的事。
+  <strong>「租金」</strong>是条件数字，不是观测：假设这个工具的返回体在此后每次
+  请求里原样重发，它一共占多少字节。折算用这段范围实测的密度
+  {% if report.tool_costs.bytes_per_token %}
+    {{ '%.2f' | format(report.tool_costs.bytes_per_token) }} 字节/token
+  {% endif %}（量到 {{ report.tool_costs.llm_calls_measured }}/{{ report.tool_costs.llm_calls }} 次调用）。
+  实测的每轮增量比返回体本身大（JSON 转义与消息外壳都要算进去），
+  <strong>所以租金是下界，不是账单。</strong>
+  {% if report.tool_costs.tools | sum(attribute='calls_without_followup') %}
+  <br>其中 {{ report.tool_costs.tools | sum(attribute='calls_without_followup') }} 次调用之后
+  同会话里再没有请求，租金记 0 并单独计数：
+  <strong>0 是「看不见」，不是「免费」</strong>。
+  {% endif %}
+  {% if report.tool_costs.tools | sum(attribute='unmeasured_size_calls') %}
+  <br>另有 {{ report.tool_costs.tools | sum(attribute='unmeasured_size_calls') }} 次调用
+  没量到返回体字节数（这一列存在之前跑的老行，或者根本没出去的调用）。
+  它们不计进「返回体」与「租金」——那两列是量到的那部分，不是全部。
+  {% endif %}
+</p>
+{% endif %}
 {% if report.budget %}
 <h3>预算</h3>
 {% for b in report.budget %}

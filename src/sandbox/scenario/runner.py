@@ -51,13 +51,13 @@ import uvicorn
 from sandbox.clock import clock
 from sandbox.config import REPO_ROOT, settings
 from sandbox.cost import aggregator as cost
-from sandbox.cost.aggregator import BudgetStatus, CostRollup
+from sandbox.cost.aggregator import BudgetStatus, CostRollup, ToolCostReport
 from sandbox.db.engine import init_db
 from sandbox.detectors import run_all
 from sandbox.detectors.base import Finding
 from sandbox.detectors.idempotency import ToolFacts
+from sandbox.formatting import TOOL_COST_TITLE, span_human, tool_cost_lines
 from sandbox.formatting import money as _money
-from sandbox.formatting import span_human
 from sandbox.formatting import tokens as _tokens
 from sandbox.gateway.stub import scripted_upstream
 from sandbox.memory.adapters.file_memory import FileMemoryAdapter
@@ -288,6 +288,11 @@ class ScenarioResult:
     # `get_type_hints()`（pydantic、FastAPI 都会）才当场炸。
     cost: CostRollup | None = None
     session_costs: dict[int, CostRollup] = field(default_factory=dict)
+    # 按工具拆的上下文占用（需求 3.5）。同样是**陈述不是判定**：它不进 findings、
+    # 不影响 ok。里面没有"这个工具花了多少钱"——工具调用不花 token，钱花在它
+    # 返回的那坨内容上，而那个数只能带着假设报（见 `cost/aggregator.py` 的
+    # `by_tool`）。None = 没查，不是"一个工具都没调"。
+    tool_costs: ToolCostReport | None = None
     budget: list[BudgetStatus] = field(default_factory=list)
     # 长时运行的世界时间。None = 没跑到那一步，或者这不是一次长时运行。
     clock: ClockReport | None = None
@@ -358,6 +363,7 @@ class ScenarioResult:
             "call_chain": self.call_chain.to_dict() if self.call_chain else None,
             "cost": self.cost.to_dict() if self.cost else None,
             "session_costs": {str(k): v.to_dict() for k, v in sorted(self.session_costs.items())},
+            "tool_costs": self.tool_costs.to_dict() if self.tool_costs else None,
             "budget": [
                 {
                     "period": b.period,
@@ -875,6 +881,7 @@ class ScenarioRunner:
         # 得到一份少了几次调用的账单，而它看起来同样是个正常的数字。
         result.cost = await cost.for_run(run_id)
         result.session_costs = await cost.by_session(run_id)
+        result.tool_costs = await cost.by_tool(run_id=run_id)
         result.budget = await cost.budget_status()
 
         # 判定与完整报告落库。放在最后——到这一步 `result` 才完整，之前任何
@@ -1006,6 +1013,21 @@ def _run_detectors(
         memory_rules=scenario.memory_rules(),
         loop_field_weights=scenario.loop_field_weights(),
     )
+
+
+def _add_tool_costs(add: Any, report: ToolCostReport | None) -> None:
+    """按工具那一段：只出标题，正文在 `formatting.tool_cost_lines` 里。
+
+    正文不写在这儿，是因为它还有第二个出口（`scripts/cost_report.py` 的跨运行
+    成本报告）。同一句「租金是条件数字，不是账单」写两份，迟早有一份忘了跟着
+    改，而发现这件事的唯一办法是把两份报告并排看。
+    """
+    if report is None or not report.tools:
+        return
+    add("")
+    add(f"  {TOOL_COST_TITLE}:")
+    for line in tool_cost_lines(report):
+        add(line)
 
 
 def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
@@ -1242,6 +1264,7 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
                     f"    {who}  {rollup.llm_calls} 次调用  "
                     f"${_money(rollup.cost_usd)}"
                 )
+        _add_tool_costs(add, result.tool_costs)
 
     if result.budget:
         add("\n--- 预算 ---")

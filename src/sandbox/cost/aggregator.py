@@ -23,9 +23,10 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -34,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sandbox.config import settings
 from sandbox.db.engine import session_scope
-from sandbox.db.models import LlmCall, Session, TestRun
+from sandbox.db.models import LlmCall, Session, TestRun, ToolCall
 from sandbox.gateway.pricing import known_models
 
 Period = Literal["day", "week", "month"]
@@ -395,6 +396,274 @@ async def _with_db[T](
         return await fn(db)
     async with session_scope() as session:
         return await fn(session)
+
+
+# --- 按工具（需求 3.5 / 3.7）--------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ToolCost:
+    """某个工具在一段范围内的账。
+
+    **这里没有"这个工具花了多少钱"。** 工具调用本身不花 token——它是打到出口
+    代理的一次 HTTP 请求；token 花在 LLM 调用上。硬把两者配成一对（"谁发起的
+    这次调用，就算在谁头上"）会得到一个错的数：钱不在那次调用上，在**返回的
+    内容**上——它进了上下文，之后每一次请求都要为它再付一遍。
+
+    所以这个类里是三类东西，各有各的口径：
+
+    * **数出来的**：调用次数、状态分布、返回体字节数、延迟；
+    * **量出来的**：`context_growth_bytes`——这次调用之后第一次请求比之前那次
+      大了多少字节。它是**观测**，可能为负（Agent 自己裁过上下文）；
+    * **标着假设的**：`rent_bytes`——见 `by_tool` 的注释，它是一个条件数字，
+      报告里必须连着假设一起印。
+    """
+
+    tool_name: str
+    calls: int = 0
+    #: 库里 `status` 的原值分布。**不在这里重新分类**：多出来的值原样出现，
+    #: 而不是掉进一个"其他"里消失。
+    by_status: dict[str, int] = field(default_factory=dict)
+    #: 被沙箱自己的策略挡下的次数（ADR 003）。**和 `status="blocked"` 不是一回
+    #: 事**：未声明的工具也是 blocked，但那是被测对象做错了事，不是策略在生效。
+    blocked_by_proxy_calls: int = 0
+    write_calls: int = 0
+    #: Σ 返回体字节数（边界上量到的）。只统计量到的那几次。
+    total_result_bytes: int = 0
+    measured_size_calls: int = 0
+    largest_result_bytes: int = 0
+    latency_ms: int = 0
+    #: 量到的上下文增量：Σ(这次调用之后第一次请求的字节数 − 之前最后一次请求的
+    #: 字节数)。两次请求都在同一个会话里量到才算，**所以它可能为负**。
+    context_growth_bytes: int = 0
+    growth_measured_calls: int = 0
+    #: 条件数字：Σ(返回体字节 × 之后同会话里还剩几次请求)。见 `by_tool`。
+    rent_bytes: int = 0
+    calls_with_followup: int = 0
+    #: 之后一次请求都没有的调用数。它们的租金记 0——**0 是"看不见"，不是"免费"**，
+    #: 所以要单独数出来，报告里得说。
+    calls_without_followup: int = 0
+
+    @property
+    def unmeasured_size_calls(self) -> int:
+        """没量到返回体字节数的调用数（老库的行，或者根本没出去）。"""
+        return self.calls - self.measured_size_calls
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tool_name": self.tool_name,
+            "calls": self.calls,
+            "by_status": dict(self.by_status),
+            "blocked_by_proxy_calls": self.blocked_by_proxy_calls,
+            "write_calls": self.write_calls,
+            "total_result_bytes": self.total_result_bytes,
+            "measured_size_calls": self.measured_size_calls,
+            "unmeasured_size_calls": self.unmeasured_size_calls,
+            "largest_result_bytes": self.largest_result_bytes,
+            "latency_ms": self.latency_ms,
+            "context_growth_bytes": self.context_growth_bytes,
+            "growth_measured_calls": self.growth_measured_calls,
+            "rent_bytes": self.rent_bytes,
+            "calls_with_followup": self.calls_with_followup,
+            "calls_without_followup": self.calls_without_followup,
+        }
+
+
+@dataclass(frozen=True)
+class ToolCostReport:
+    tools: dict[str, ToolCost]
+    llm_calls: int = 0
+    #: 其中记下了请求体字节数的调用数。**密度只由这些行算**——老行没有请求体
+    #: 字节数，把它们的分母（输入 token）算进来，密度会被稀释成一个没有含义的数。
+    llm_calls_measured: int = 0
+    #: 实测密度：Σ请求体字节 ÷ Σ输入token（只算量到过的行）。None = 一次都没量到，
+    #: 于是租金只能按字节报，折算不出 token。
+    bytes_per_token: float | None = None
+
+    def tokens_for(self, byte_count: int) -> int | None:
+        """把字节折成 token。量不到密度就返回 None——**不猜一个数**。"""
+        if not self.bytes_per_token or self.bytes_per_token <= 0:
+            return None
+        return round(byte_count / self.bytes_per_token)
+
+    @property
+    def total_rent_bytes(self) -> int:
+        return sum(t.rent_bytes for t in self.tools.values())
+
+    @property
+    def rent_tokens(self) -> int | None:
+        """全部工具租金折成的 token（量不到密度就是 None）。"""
+        return self.tokens_for(self.total_rent_bytes)
+
+    def to_dict(self) -> dict[str, Any]:
+        """给报告和界面用的形状。
+
+        `tools` 是**列表且按租金从大到小**：报告要回答"哪几个工具在吃上下文"，
+        而字典的顺序不承诺任何东西（前端排序还得自己知道按哪个字段排）。
+
+        `rent_tokens` 由这里**注进去**，不是 `ToolCost` 自己算的：折算密度是整份
+        报告一个数（见 `bytes_per_token`），让每个工具各自拿密度算一遍，等于承认
+        它们可以用不同的密度——而那正是"同一个库里的数互相矛盾"的起点。
+        """
+        tools: list[dict[str, Any]] = []
+        for tool in sorted(self.tools.values(), key=lambda t: -t.rent_bytes):
+            item = tool.to_dict()
+            item["rent_tokens"] = self.tokens_for(tool.rent_bytes)
+            tools.append(item)
+        return {
+            "tools": tools,
+            "llm_calls": self.llm_calls,
+            "llm_calls_measured": self.llm_calls_measured,
+            "bytes_per_token": (
+                round(self.bytes_per_token, 3) if self.bytes_per_token else None
+            ),
+            "total_rent_bytes": self.total_rent_bytes,
+            "rent_tokens": self.rent_tokens,
+        }
+
+
+async def by_tool(
+    *,
+    run_id: str | None = None,
+    since: datetime | None = None,
+    db: AsyncSession | None = None,
+) -> ToolCostReport:
+    """按工具拆：调了多少次、返回了多大、那些返回体在上下文里又待了多久。
+
+    ## 为什么不是"这个工具的 token 成本"
+
+    工具调用不花 token。想归集到 token，只能沿时间线把"产生这次调用的那次 LLM
+    调用"配上去——而那是个**错的**近似：钱不在那次调用上，在返回的内容上，它
+    进了上下文，之后每一次请求都要为它再付一遍。所以这里报的是**上下文占用**：
+
+    * `context_growth_bytes` 是**量出来的**（前后两次请求体的字节差）；
+    * `rent_bytes` 是**条件下的**：假设返回体在此后每一次请求里**原样重发**，
+      它一共占多少字节 = Σ(返回体字节 × 之后同会话里还剩几次请求)。
+
+    第二个数字的前提是"原样重发"。真实情况里 Agent 可能摘要、可能丢历史——
+    所以它是**条件数字，不是观测**，报告里必须连着这句话一起印。两个数之差
+    （实测增量 vs 租金）恰好是这个问题唯一诚实的答案：差额就是"它裁没裁"。
+
+    ## 几条口径
+
+    * **按 (运行, 会话) 分组**。`seq` 是运行内全局单调序号（LLM 调用与工具调用
+      共用一条时间线），所以"之后还剩几次请求"是数出来的，不靠时间戳——这个
+      项目的墙钟会被快照恢复和时间加速拨动。分组必须带会话：一次长时运行里
+      会有多段会话，而上下文是**按会话**从零开始的。
+    * **之后一次请求都没有的调用，租金记 0 并单独计数**（`calls_without_followup`）。
+      0 是"看不见"，不是"免费"。
+    * **密度只由量到过请求体字节的行算**（`LlmCall.request_bytes` 非空）。
+      老行没有这一列，把它们算进来会让密度变成一个混合口径的数。
+    * 未出去的调用（被挡下、参数不合法）没有返回体，**不参与**租金；
+      但它们仍然是"调了多少次"的一部分，也在调用次数里。
+
+    `run_id` 与 `since` 二选一：给 `run_id` 是单次运行的报告，给 `since` 是
+    跨运行（哪些工具的返回体在长期烧钱），都不给就是全部。
+    """
+
+    async def _go(session: AsyncSession) -> ToolCostReport:
+        llm_stmt = select(
+            LlmCall.test_run_id,
+            LlmCall.session_id,
+            LlmCall.seq,
+            LlmCall.request_bytes,
+            LlmCall.input_tokens,
+        )
+        tool_stmt = select(
+            ToolCall.test_run_id,
+            ToolCall.session_id,
+            ToolCall.seq,
+            ToolCall.tool_name,
+            ToolCall.status,
+            ToolCall.is_write,
+            ToolCall.blocked_by_proxy,
+            ToolCall.result_bytes,
+            ToolCall.latency_ms,
+        )
+        if run_id is not None:
+            llm_stmt = llm_stmt.where(LlmCall.test_run_id == run_id)
+            tool_stmt = tool_stmt.where(ToolCall.test_run_id == run_id)
+        elif since is not None:
+            llm_stmt = llm_stmt.join(TestRun, LlmCall.test_run_id == TestRun.id).where(
+                TestRun.started_at >= since
+            )
+            tool_stmt = tool_stmt.join(TestRun, ToolCall.test_run_id == TestRun.id).where(
+                TestRun.started_at >= since
+            )
+
+        # (运行, 会话) → 该会话里的请求时间线。只有这两列加得起来：
+        # `seq` 是运行内全局序号，工具调用与 LLM 调用共用它（见 recorder.py）。
+        timeline: dict[tuple[str, str | None], list[tuple[int, int | None, int]]] = (
+            defaultdict(list)
+        )
+        measured_bytes = 0
+        measured_tokens = 0
+        llm_calls = 0
+        llm_calls_measured = 0
+        for rid, sid, seq, req_bytes, in_tokens in (await session.execute(llm_stmt)).all():
+            timeline[(str(rid), sid)].append((int(seq), req_bytes, int(in_tokens or 0)))
+            llm_calls += 1
+            if req_bytes is not None:
+                llm_calls_measured += 1
+                measured_bytes += int(req_bytes)
+                measured_tokens += int(in_tokens or 0)
+        for rows in timeline.values():
+            rows.sort(key=lambda row: row[0])
+
+        acc: dict[str, ToolCost] = {}
+        for row in (await session.execute(tool_stmt)).all():
+            rid, sid, seq, name, status, is_write, blocked, result_bytes, latency = row
+            key = (str(rid), sid)
+            rows = timeline.get(key, [])
+            seqs = [r[0] for r in rows]
+
+            # 这次调用之后还剩几次请求：第一个 seq 大于它的请求开始，一直到本段
+            # 会话结束。**这就是"原样重发"假设下它被带的次数。**
+            after = bisect_right(seqs, int(seq))
+            remaining = len(seqs) - after
+            before = bisect_left(seqs, int(seq)) - 1
+
+            size = int(result_bytes) if result_bytes is not None else 0
+            cur = acc.get(
+                str(name),
+                ToolCost(tool_name=str(name), by_status={}),
+            )
+            status_dict = dict(cur.by_status)
+            status_dict[str(status)] = status_dict.get(str(status), 0) + 1
+            growth = 0
+            growth_measured = cur.growth_measured_calls
+            if 0 <= after < len(rows) and before >= 0:
+                b_new = rows[after][1]
+                b_old = rows[before][1]
+                if b_new is not None and b_old is not None:
+                    growth = int(b_new) - int(b_old)
+                    growth_measured += 1
+            acc[str(name)] = ToolCost(
+                tool_name=str(name),
+                calls=cur.calls + 1,
+                by_status=status_dict,
+                blocked_by_proxy_calls=cur.blocked_by_proxy_calls + (1 if blocked else 0),
+                write_calls=cur.write_calls + (1 if is_write else 0),
+                total_result_bytes=cur.total_result_bytes + size,
+                measured_size_calls=cur.measured_size_calls
+                + (1 if result_bytes is not None else 0),
+                largest_result_bytes=max(cur.largest_result_bytes, size),
+                latency_ms=cur.latency_ms + int(latency or 0),
+                context_growth_bytes=cur.context_growth_bytes + growth,
+                growth_measured_calls=growth_measured,
+                rent_bytes=cur.rent_bytes + size * remaining,
+                calls_with_followup=cur.calls_with_followup + (1 if remaining else 0),
+                calls_without_followup=cur.calls_without_followup + (0 if remaining else 1),
+            )
+
+        return ToolCostReport(
+            tools=acc,
+            llm_calls=llm_calls,
+            llm_calls_measured=llm_calls_measured,
+            bytes_per_token=(measured_bytes / measured_tokens) if measured_tokens else None,
+        )
+
+    return await _with_db(db, _go)
 
 
 # --- 预算 ---------------------------------------------------------------------

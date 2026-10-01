@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sandbox.cost import aggregator as cost  # noqa: E402
 from sandbox.db.engine import init_db  # noqa: E402
+from sandbox.formatting import TOOL_COST_TITLE, tool_cost_lines  # noqa: E402
 from sandbox.formatting import money as _money  # noqa: E402
 from sandbox.formatting import tokens as _tokens  # noqa: E402
 
@@ -58,6 +59,7 @@ async def _report(period: str, limit: int, as_json: bool) -> int:
     by_scenario = await cost.by_scenario()
     by_agent = await cost.by_agent()
     by_model = await cost.by_model()
+    by_tool = await cost.by_tool()
     statuses = await cost.budget_status()
 
     if as_json:
@@ -70,6 +72,11 @@ async def _report(period: str, limit: int, as_json: bool) -> int:
                     "by_scenario": {k: v.to_dict() for k, v in by_scenario.items()},
                     "by_agent": {k: v.to_dict() for k, v in by_agent.items()},
                     "by_model": {k: v.to_dict() for k, v in by_model.items()},
+                    # 按工具这一段的口径和前四个**不是一个东西**：这里没有"这个
+                    # 工具的 token 成本"，只有"它的返回体在上下文里占了多久"。
+                    # 键名带上 `_context` 就是为了让读 JSON 的人看不出歧义也挑不出
+                    # 错——`by_tool` 看起来太像"按工具的账单"了。
+                    "by_tool_context": by_tool.to_dict(),
                     "budget": [
                         {
                             "period": b.period,
@@ -95,6 +102,11 @@ async def _report(period: str, limit: int, as_json: bool) -> int:
     _section("按场景", by_scenario)
     _section("按 Agent 版本", by_agent)
     _section("按模型", by_model)
+
+    if by_tool.tools:
+        print(f"\n=== {TOOL_COST_TITLE} ===")
+        for line in tool_cost_lines(by_tool):
+            print(line)
 
     print("\n=== 预算 ===")
     if not statuses:

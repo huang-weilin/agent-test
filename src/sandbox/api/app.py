@@ -41,7 +41,7 @@ from sandbox.api import paths, queries
 from sandbox.api.jobs import JobRegistry
 from sandbox.cost import aggregator as cost
 from sandbox.db.engine import init_db
-from sandbox.formatting import money, span_human, tokens
+from sandbox.formatting import byte_size, money, span_human, tokens
 from sandbox.memory.observe import phase_label
 from sandbox.regression import cases, diff
 from sandbox.scenario import identity, loader
@@ -151,6 +151,9 @@ def create_app(
     templates = Jinja2Templates(directory=str(_TEMPLATES))
     templates.env.filters["money"] = money
     templates.env.filters["tokens"] = tokens
+    # 字节数 → 人话，同上：`byte_size` 里有两条规矩（负数照印、按量级换单位），
+    # 在模板里重写一遍就是两份会漂的说法。
+    templates.env.filters["byte_size"] = byte_size
     templates.env.filters["localdt"] = _localdt
     # 秒数 → 人话。与命令行报告共用 `formatting.py` 里那一份，不在模板里另写：
     # 它有一条极易搞错的规矩（不四舍五入成"0 天"——3600 秒印成"0 天"等于说
@@ -425,6 +428,19 @@ def create_app(
                 "by_scenario": await cost.by_scenario(),
                 "by_agent": await cost.by_agent(),
                 "by_model": await cost.by_model(),
+                # 按工具这一格与前四格**不是一个口径**（它是上下文占用，没有
+                # "花了多少"），所以它在页面上也单独一张表，见 cost.html。
+                #
+                # 传 `.to_dict()` 不是传对象：`ToolCostReport.tools` 是个 dict，
+                # 模板里 `{% for t in ... %}` 遍历的是**键**（一串工具名）。
+                # 量过（jinja 3.1.6，见 `_probes/probe_cost_by_tool.py`）：
+                # 那样渲染出来是 `[name=|calls=|size=量不到|rent=yes]`——
+                # 每一格静默空白，不报错，而且 `t.rent_tokens is not none` 对
+                # Undefined 居然是**真**，于是还会多印一个没数的 `≈ tok`。
+                # `.to_dict()` 把它摊成按租金降序的列表（"谁在吃上下文"就得从
+                # 最大的读起），并顺手把每个工具的 `rent_tokens` 算好——那是要
+                # 密度才折得出来的，单个 `ToolCost` 手里没有密度。
+                "by_tool": (await cost.by_tool()).to_dict(),
                 "budget": await cost.budget_status(),
                 "active": app.state.jobs.active,
             },

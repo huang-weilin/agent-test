@@ -325,6 +325,22 @@ class LlmCall(Base):
     seq: Mapped[int] = mapped_column(Integer, default=0)
     model: Mapped[str] = mapped_column(String(128), index=True)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+
+    # 这一次请求的**请求体字节数**（网关收到的那份原始 JSON，逐字节量）。
+    #
+    # 为什么要它：按工具拆成本要回答"这个工具返回的那坨内容在后面的请求里又被
+    # 带了多久"，算出来是个**字节数**。要折成 token 就得知道**这次运行的字节/
+    # token 密度**——而密度因内容而异（2026-10-01 实测：中文 JSON 2.73 字节/
+    # token，纯英文 5.48，差两倍），拿一个全局常数去除等于在报告里编一个数。
+    # 有了这一列，密度是这里量出来的：Σ 请求体字节 ÷ Σ 输入 token。
+    #
+    # 量的是**请求体**而不是某段正文：报告要的正是"这一次请求里装了多少东西"，
+    # 而它天然包含消息外壳、工具定义、转义开销——这些都是真实付费的字节。
+    #
+    # NULL = 这一列存在之前落的账（那时没量过），**不是 0**。密度计算只认
+    # 量到过的行（见 `cost/aggregator.py` 的 `by_tool`）：把 NULL 当 0 塞进
+    # 分子，密度会被老数据稀释成一个没有含义的数。
+    request_bytes: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0)

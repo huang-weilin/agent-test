@@ -239,6 +239,98 @@ async def test_runs_and_cost_pages_render(client: httpx.AsyncClient) -> None:
     assert (await client.get("/cost")).status_code == 200
 
 
+async def test_cost_dashboard_shows_the_per_tool_section(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """成本看板上的按工具表（`app.py` 里 `by_tool` 那一格）。
+
+    `tests/test_cost_by_tool.py` 里的两条场景报告测试证明的是**运行器**接了线、
+    脚本那条证明的是**命令行**接了线。这一条管的是第三个调用点：看板。
+    三处各一条，因为只接一处的话，另外两处里任何一处被删掉都不会有东西变红。
+
+    这一页原来写着一整节「没做的：按工具拆解」，实现之后它变成了一句假话，
+    而**不会有任何东西变红**——所以最后那条断言钉的是那句话不许回来。
+    """
+    from datetime import UTC, datetime
+
+    from sandbox.db.models import LlmCall, TestRun, ToolCall
+
+    # 库里没有工具调用时，整节（含标题）不出现。上面那条冒烟测试只证明这一页
+    # 打得开，证明不了 `{% if by_tool and by_tool.tools %}` 这道守卫在不在。
+    assert "按工具（上下文占用" not in (await client.get("/cost")).text
+
+    ts = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+    db.add(
+        TestRun(
+            id="run-dash-tools",
+            scenario_id="demo",
+            agent_version="a@1",
+            config_hash="h" * 64,
+            started_at=ts,
+        )
+    )
+    # 会话 s1：请求(1) 2000B → 工具(2) 返回 5000B → 请求(3) 7000B。
+    # 增量 = 5000B（实测），租金 = 5000 × 之后还剩 1 次请求 = 5000B（条件数字）。
+    # 这两个数**恰好相等是故意的**：它们长得一样但口径不同，页面上必须靠
+    # 表头和说明句分开，而不是靠数值碰巧不同。
+    db.add(
+        LlmCall(
+            id="c1", test_run_id="run-dash-tools", session_id="s1", seq=1,
+            model="stub-model", input_tokens=400, output_tokens=1,
+            status="ok", request_bytes=2000, ts=ts,
+        )
+    )
+    db.add(
+        ToolCall(
+            id="t1", test_run_id="run-dash-tools", session_id="s1",
+            session_sequence_id="s1-2", seq=2, tool_name="list_orders",
+            args_json="{}", arg_hash="0" * 64, fingerprint="1" * 64,
+            result_bytes=5000, status="ok", is_write=False, latency_ms=3, ts=ts,
+        )
+    )
+    # 第二个工具没有返回体字节数（老库的行、或被挡下的调用）——它那一行必须
+    # 印「量不到」，不能印 `0 B`。`0 B` 说的是"它返回了空体"。
+    db.add(
+        ToolCall(
+            id="t2", test_run_id="run-dash-tools", session_id="s1",
+            session_sequence_id="s1-4", seq=4, tool_name="create_payment",
+            args_json="{}", arg_hash="2" * 64, fingerprint="3" * 64,
+            result_bytes=None, status="blocked", is_write=True, latency_ms=1, ts=ts,
+        )
+    )
+    db.add(
+        LlmCall(
+            id="c2", test_run_id="run-dash-tools", session_id="s1", seq=3,
+            model="stub-model", input_tokens=1400, output_tokens=1,
+            status="ok", request_bytes=7000, ts=ts,
+        )
+    )
+    await db.commit()
+
+    page = (await client.get("/cost")).text
+    assert "按工具（上下文占用" in page
+    table, _, rest = page.partition('<h2>按工具')[2].partition('<p class="note">')
+    note = rest.partition("</p>")[0]
+
+    assert "list_orders" in table
+    assert "create_payment" in table
+    # 5000 字节按这个项目 `byte_size` 的口径是十进制 5.0 KB（不是 4.9）。
+    assert "5.0 KB" in table
+    # 量到的工具 vs 没量到的工具，在同一张表里各印各的。
+    assert "量不到" in table
+    assert "0 B" not in table
+    # 密度 = Σ请求体 ÷ Σ输入 token（只算量到过的行）= 9000 / 1800 = 5 B/tok，
+    # 于是 5000 B 的租金折成 1,000 tok。这一格是**估的**，所以它带着 ≈。
+    assert "≈1,000 tok" in table
+
+    # 「租金是条件数字」那句话必须在。它不能只活在文档里。
+    assert "租金是下界，不是账单" in note
+    assert "量不到" in note
+
+    # 那一节「没做的：按工具拆解」实现了之后就成了假话，钉住它不许回来。
+    assert "没做的" not in page
+
+
 async def test_html_is_escaped(client: httpx.AsyncClient, scenarios: Path) -> None:
     """模板必须自动转义。
 
@@ -2342,3 +2434,86 @@ async def test_json_api_gives_null_for_a_missing_verdict(
     data = (await client.get("/api/regression")).json()
     row = next(c for c in data if c["id"] == case_id)
     assert row["baseline_verdict_ok"] is None
+
+
+# --- 按工具（上下文占用）--------------------------------------------------------
+
+
+def _tool_costs_snapshot() -> dict:
+    """按工具那一格的快照。**问聚合器要形状，不手写字典**——理由和上面 `_COST`
+    那段一样：手写的夹具和被测代码会用同一个错键，而页面会一直绿着什么都不显。"""
+    from sandbox.cost.aggregator import ToolCost, ToolCostReport
+
+    return ToolCostReport(
+        tools={
+            # 量到了：应当印出字节数和折算。
+            "list_orders": ToolCost(
+                tool_name="list_orders",
+                calls=5,
+                by_status={"ok": 5},
+                total_result_bytes=7502,
+                measured_size_calls=5,
+                largest_result_bytes=1660,
+                latency_ms=25,
+                context_growth_bytes=10937,
+                growth_measured_calls=5,
+                rent_bytes=24081,
+                calls_with_followup=5,
+            ),
+            # 一次都没量到：应当印「量不到」，**不是** `0 B`。
+            "get_order": ToolCost(tool_name="get_order", calls=2, by_status={"ok": 2}),
+        },
+        llm_calls=6,
+        llm_calls_measured=6,
+        bytes_per_token=3.288,
+    ).to_dict()
+
+
+async def test_run_page_shows_the_per_tool_context_section(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """运行页上的按工具表。
+
+    三条断言各自盯一件事：表在、量到的那些数在、**量不到的那一行印的是「量不到」
+    而不是 `0 B`**。最后一条是这一节最容易写错的地方：`0 B` 说的是"这个工具返回了
+    空体"，而实际发生的是"这一行没有体量记录"。
+    """
+    report = _diff_report(session_diff=None)
+    report["cost"] = _COST
+    report["tool_costs"] = _tool_costs_snapshot()
+    await _seed_diff_run(db, "run-tools", report)
+
+    page = (await client.get("/runs/run-tools")).text
+    assert "按工具（上下文占用）" in page
+    # 切到说明段结束为止：这一段里只有那一个 `</p>`（表格自己的收尾是
+    # `</table>`），所以这个边界就是这一节的全部。
+    panel = page.split("按工具（上下文占用）")[1].split("</p>")[0]
+
+    assert "list_orders" in panel
+    assert "7.5 KB" in panel  # 7502 字节
+    assert "10.9 KB" in panel  # 10937 字节的实测增量
+    assert "24.1 KB" in panel  # 租金
+    assert "7,324" in panel  # 租金折算的 token（24081 ÷ 3.288）
+
+    assert "get_order" in panel
+    assert "量不到" in panel
+    assert "0 B" not in panel
+
+
+async def test_run_page_without_the_per_tool_snapshot_still_renders(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """老快照里没有这一格（这一节是后加的），页面不能因此出事。
+
+    也不能印一个空表——"这一节没有"和"这一节是空的"在页面上必须是同一个样子，
+    因为读的人分不出，而我们确实分不出（老快照真的没存过）。
+    """
+    # 和上一条**只差一个键**：有成本那一格、没有按工具那一格。
+    report = _diff_report(session_diff=None)
+    report["cost"] = _COST
+    await _seed_diff_run(db, "run-no-tools", report)
+
+    resp = await client.get("/runs/run-no-tools")
+    assert resp.status_code == 200
+    assert "<h2>成本</h2>" in resp.text
+    assert "按工具（上下文占用）" not in resp.text

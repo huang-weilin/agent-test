@@ -122,6 +122,65 @@ async def test_llm_call_is_recorded_with_gateway_authoritative_counts(client, db
     assert rows[0].test_run_id == created["run_id"]
 
 
+async def test_request_bytes_is_the_body_we_received_not_a_reserialization(client, db) -> None:
+    """`request_bytes` 量的是**收到的那份字节**。
+
+    按工具的租金要折算 token，用的就是这个数。自己把 payload `json.dumps` 一遍再取
+    长度会得到另一个数——键序、空格、转义都变了——于是"报告里的字节数"和"Agent
+    真正发出来的"永远对不上，而两边看起来都合理。
+
+    这条测试的**输入里故意留着多余的空格**：重新序列化一遍，那个长度就变了。
+    """
+    created = await _register(client)
+    scripted_upstream.register(created["run_id"], [{"content": "好的"}])
+
+    # 注意末尾那几个空格：它们在 JSON 里没有意义，但它们是**发出来的字节**。
+    raw = '{"model":   "stub-model",   "messages": [{"role": "user", "content": "帮我下单"}]}'
+    resp = await client.post(
+        "/v1/chat/completions",
+        content=raw.encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+
+    row = (await db.execute(select(LlmCall))).scalars().one()
+    assert row.request_bytes == len(raw.encode("utf-8"))
+    # 对照：重新序列化会得到另一个长度。没有这一句，"等于 len(raw)"可能只是
+    # 因为两种写法碰巧同长。
+    import json as _json  # noqa: PLC0415
+
+    assert len(_json.dumps(_json.loads(raw))) != len(raw)
+
+
+async def test_streaming_request_bytes_is_what_the_caller_sent(client, db) -> None:
+    """流式那条路也一样，而且这里还多一层：网关会往请求里补 `include_usage`。
+
+    记下来的必须是**调用方发的那份**，不是补过字段之后的——补过的那份是网关自己
+    造的东西，拿它当"Agent 发出的字节"是在报告里写一句不成立的话。
+    """
+    created = await _register(client)
+    scripted_upstream.register(created["run_id"], [{"content": "好的"}])
+
+    # 手写这一串、不走 `json.dumps`：要的就是"调用方发来的那份字节"里
+    # 没有 `stream_options`，而网关补完之后长度会变。
+    raw = (
+        '{"model": "stub-model", "messages": [{"role": "user", "content": "帮我下单"}],'
+        ' "stream": true}'
+    )
+    resp = await client.post(
+        "/v1/chat/completions",
+        content=raw.encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    # 先说清这一局真的走了"补字段"那条路：没有它，下面那条断言的对照就不成立。
+    assert resp.headers["X-Sandbox-Stream-Options-Added"] == "include_usage"
+
+    row = (await db.execute(select(LlmCall))).scalars().one()
+    assert row.request_bytes == len(raw.encode("utf-8"))
+    assert "stream_options" not in raw  # 补过的那份比这份长
+
+
 async def test_budget_ceiling_blocks_and_leaves_a_finding(client, db) -> None:
     """熔断必须发生在放行之前，且必须留痕。
 
