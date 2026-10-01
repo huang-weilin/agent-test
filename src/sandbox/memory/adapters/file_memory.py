@@ -26,6 +26,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sandbox.config import settings
 from sandbox.memory.observe import MemoryEntry
@@ -173,7 +174,7 @@ class FileMemoryAdapter:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(blob)
 
-    def _guard(self, doc: dict, *, allow_create: bool) -> None:
+    def _guard(self, doc: dict[str, Any], *, allow_create: bool) -> None:
         if doc.get("adapter") != ADAPTER_NAME:
             raise RestoreRefused(
                 f"快照的适配器是 {doc.get('adapter')!r}，不能喂给 {ADAPTER_NAME!r}。"
@@ -199,7 +200,7 @@ class FileMemoryAdapter:
             )
 
 
-def _parse(payload: bytes) -> dict:
+def _parse(payload: bytes) -> dict[str, Any]:
     try:
         doc = json.loads(payload.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:

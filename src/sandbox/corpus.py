@@ -308,7 +308,11 @@ def _parse_expectations(
                     note=group.get("note", ""),
                 )
             )
-        fires = bool(group) and DetectorVerdict(group["verdict"]) in (
+        # 判 `is not None` 而不是真假：`_verdict_of` 要么给 None，要么给一个
+        # **一定带 verdict 的**字典（写了对象却没写 verdict 它当场就抛了），
+        # 所以空字典到不了这里。写成 `bool(group)` 的话，万一哪天它真返回了 `{}`，
+        # 这一行会安静地算成"这一族没张口"——**统计里少一条样本，而结果看起来完好**。
+        fires = group is not None and DetectorVerdict(group["verdict"]) in (
             DetectorVerdict.FAIL,
             DetectorVerdict.WARNING,
         )

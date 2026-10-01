@@ -19,8 +19,8 @@ import json
 from sqlalchemy import select
 
 from sandbox.db.engine import session_scope
-from sandbox.db.models import DetectorFinding, DetectorVerdict, Session, ToolCall
-from sandbox.detectors.base import CallView, Confidence, Finding
+from sandbox.db.models import Confidence, DetectorFinding, DetectorVerdict, Session, ToolCall
+from sandbox.detectors.base import CallView, Finding
 
 #: 只有边界当场才判得出来的那两条结论。**这是一张白名单，不是"库里所有的结论"。**
 #:

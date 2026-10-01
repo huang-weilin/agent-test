@@ -36,6 +36,10 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
     "mypy>=1.13",
+    # yaml 是运行期依赖，但它的类型存根是分开一包的（PyYAML 自己没有）。没有它
+    # 时 mypy 在三个文件上报 `import-untyped`——而那三个文件正好都在读场景和
+    # 工具库，是"外部输入进来"的地方。
+    "types-PyYAML>=6.0",
 ]
 
 [build-system]
@@ -55,7 +59,18 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["sandbox"]
+# 检查的是**源码树**，不是"已安装的那个包"。
+#
+# 原来写的是 `packages = ["sandbox"]`，那是让 mypy 去 site-packages 里找一个装了
+# 的包来检查——而包里没有 `py.typed`，于是它**一条都不检查**，只打一句
+# "cannot be type checked due to missing py.typed marker" 就退出。这行配置从
+# 第一次提交（4b290d6）就在那儿，到这笔账关掉为止一次都没跑起来过——中间的
+# 三十五个提交里，没有任何一个会因为它没生效而变红（它不进测试，也没人手动跑）。
+#
+# 写 `files` 就没有这回事：直接按源码树检查，`sandbox.*` 的导入也在这里面解析。
+# `tests/` 不进去：那是被执行的东西，而且它有自己的一套（夹具直造输入，很多
+# 参数故意写宽）。要收也是单独一片，不能顺手带进来把门槛抬到没人愿意修。
+files = ["src/sandbox"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -139,7 +139,7 @@ class Settings(BaseSettings):
     egress_default_policy: Literal["deny", "allow"] = "deny"
     # 真实凭据注入规则。默认空列表 = 不注入任何真实凭据。
     # 每条规则需含 host（精确匹配）、reason（审计用），且禁止路径正则。
-    credential_injection_rules: list[dict] = Field(default_factory=list)
+    credential_injection_rules: list[dict[str, Any]] = Field(default_factory=list)
     # 工具的真实后端（mock 目标系统）。代理是唯一知道这个地址的地方——
     # 被测 Agent 只应知道代理的地址，否则它可以绕过代理直连后端。
     tool_upstream_base_url: str = "http://127.0.0.1:4102"

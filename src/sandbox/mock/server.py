@@ -150,8 +150,9 @@ async def create_payment(payload: dict[str, Any]) -> Any:
             ),
         }
 
+    charge_id = f"ch_{uuid.uuid4().hex[:12]}"
     charge = {
-        "charge_id": f"ch_{uuid.uuid4().hex[:12]}",
+        "charge_id": charge_id,
         "order_id": order_id,
         "amount": amount,
         "idempotency_key": idem_key,
@@ -162,7 +163,9 @@ async def create_payment(payload: dict[str, Any]) -> Any:
     }
     _state.charges.append(charge)
     if idem_key:
-        _state.idempotency_index.setdefault(str(idem_key), charge["charge_id"])
+        # 用局部变量而不是 `charge["charge_id"]`：那张流水表是混合值的字典，
+        # 从里面取出来的东西类型上是 `object`，而索引表要的是字符串。
+        _state.idempotency_index.setdefault(str(idem_key), charge_id)
     order["status"] = "paid"
 
     return {

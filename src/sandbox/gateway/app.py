@@ -46,8 +46,8 @@ from sandbox.gateway.stream import (
     with_usage_option,
 )
 from sandbox.gateway.stub import scripted_upstream
-from sandbox.runtime import RunContext, runs
-from sandbox.trace.recorder import record_finding
+from sandbox.runtime import runs
+from sandbox.trace.recorder import RunContext, record_finding
 
 log = structlog.get_logger(__name__)
 
@@ -93,7 +93,18 @@ async def _call_real_upstream(payload: dict[str, Any]) -> dict[str, Any]:
 
     if resp.status_code >= 400:
         raise UpstreamError(resp.status_code, resp.text[:2000])
-    return resp.json()
+    data = resp.json()
+    # 调用方拿到它第一件事就是 `response.get("usage")`——这里不核一遍的话，
+    # 上游回一个顶层是数组的 JSON 会在那儿炸成"list 没有 get"，一句话都指不到
+    # 上游身上。（真实上游永远回对象，所以这条分支是防御，不是常态。）
+    if not isinstance(data, dict):
+        # 状态码用 502，**不是照抄上游回的那个**（它是 200）：这一条报的是
+        # "网关没能从上游拿到能用的东西"。照抄的话会把一个错误响应装成 200
+        # 发出去，客户端看到的是"成功但解析不了"，连该怪谁都不知道。
+        raise UpstreamError(
+            502, f"上游返回的 JSON 顶层不是对象：{type(data).__name__}"
+        )
+    return data
 
 
 def _error(status: int, message: str, err_type: str = "sandbox_error") -> JSONResponse:

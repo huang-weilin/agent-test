@@ -73,10 +73,14 @@ def _localdt(value: datetime | str | None, fmt: str = "%m-%d %H:%M:%S") -> str:
         return "—"
     if isinstance(value, str):
         try:
-            value = datetime.fromisoformat(value)
+            # 存进另一个名字而不是就地覆盖 `value`：就地覆盖时它的类型是
+            # "进来那个联合类型"，后面 `value.astimezone()` 在类型检查里就
+            # 说不清了（运行时没事，因为认不出来那条路已经 return 了）。
+            moment = datetime.fromisoformat(value)
         except ValueError:
             # 认不出来就原样印，不猜。猜错的时间比不显示的时间更坏。
             return value
+        return moment.astimezone().strftime(fmt)
     return value.astimezone().strftime(fmt)
 
 

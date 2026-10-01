@@ -21,6 +21,12 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # 只在类型检查时引：`snapshot.py` 里定义协议，而适配器（`adapters/file_memory.py`）
+    # 反过来要 import 本模块的 `MemoryEntry`——真 import 会成环。
+    from sandbox.memory.snapshot import MemoryAdapter
 
 #: 会话边界上的两个观测点。`start` 是这段会话**开始时**记忆的样子（恢复之后、
 #: Agent 跑起来之前），`end` 是 Agent 退出时（下一段会话恢复之前）。
@@ -123,7 +129,7 @@ def chronological(observations: list[MemoryObservation]) -> list[MemoryObservati
 
 
 def observe_memory(
-    adapter, *, ordinal: int, phase: str, horizon: int | None = None
+    adapter: MemoryAdapter, *, ordinal: int, phase: str, horizon: int | None = None
 ) -> MemoryObservation:
     """在会话边界上拍一张记忆切面。
 

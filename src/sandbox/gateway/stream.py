@@ -35,8 +35,7 @@ from sandbox.gateway.sse import (
     parse_frame,
 )
 from sandbox.gateway.stub import scripted_upstream
-from sandbox.runtime import RunContext
-from sandbox.trace.recorder import record_llm_call
+from sandbox.trace.recorder import RunContext, record_llm_call
 
 log = structlog.get_logger(__name__)
 

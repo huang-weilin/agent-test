@@ -203,26 +203,29 @@ def _check_references(scenario: Scenario, source: str) -> None:
     # 两条都是"判据看着在，其实什么都没判"的写法。和豁免那三条同一类：检测器
     # 不会因为判据写得空而报错，它只会安静地给一个 pass——而那看起来和
     # "这条记忆守住了"一模一样。
-    for index, rule in enumerate(scenario.memory.must_hold):
+    # 两条声明各判各的，变量名也分开（`must_hold` 看的是 path、`forbidden` 看的是
+    # text）。共用一个 `rule` 的话，读的人得记住它此刻是哪一种，而漏掉其中一条
+    # 校验的方式恰恰是"复制上面那段改一改"。
+    for index, hold in enumerate(scenario.memory.must_hold):
         where = f"{source}: memory.must_hold[{index}]"
-        if not rule.path.strip():
+        if not hold.path.strip():
             raise ScenarioError(f"{where} 的 path 是空的，它匹配不到任何东西。")
-        if not rule.reason.strip():
+        if not hold.reason.strip():
             raise ScenarioError(
-                f"{where}（{rule.path}）缺 reason。"
+                f"{where}（{hold.path}）缺 reason。"
                 f"没有理由的判据在报告里无法复核——读者看不出为什么这条必须保持。"
             )
-    for index, rule in enumerate(scenario.memory.forbidden):
+    for index, forbidden in enumerate(scenario.memory.forbidden):
         where = f"{source}: memory.forbidden[{index}]"
-        if not rule.text.strip():
+        if not forbidden.text.strip():
             # 空串是任何字符串的子串，会**命中每一个条目**——报一条满屏的
             # "中毒"，而真正的问题被淹在里面。
             raise ScenarioError(
                 f"{where} 的 text 是空的。空文本是任何内容的子串，"
                 f"它会命中记忆里的每一个条目。"
             )
-        if not rule.reason.strip():
-            raise ScenarioError(f"{where}（{rule.text!r}）缺 reason。")
+        if not forbidden.reason.strip():
+            raise ScenarioError(f"{where}（{forbidden.text!r}）缺 reason。")
 
     # --- 世界里的那句话必须真的能被读到 ---
     #

@@ -51,6 +51,7 @@ import uvicorn
 from sandbox.clock import clock
 from sandbox.config import REPO_ROOT, settings
 from sandbox.cost import aggregator as cost
+from sandbox.cost.aggregator import BudgetStatus, CostRollup
 from sandbox.db.engine import init_db
 from sandbox.detectors import run_all
 from sandbox.detectors.base import Finding
@@ -279,9 +280,15 @@ class ScenarioResult:
     # 成本（需求场景 4）。**不进 `ok` 的判定**——理由和预算一样：花了多少钱是
     # 事实陈述，不是"这次运行的行为有没有缺陷"的结论。CostRollup 为 None 表示
     # 没查（执行失败提前返回），不是"花了 0"。
-    cost: cost.CostRollup | None = None
-    session_costs: dict[int, cost.CostRollup] = field(default_factory=dict)
-    budget: list[cost.BudgetStatus] = field(default_factory=list)
+    #
+    # 这两个类型是直接引进来的，不写 `cost.CostRollup`：**这个类体里有个字段就
+    # 叫 `cost`**，而它一旦出现，同一个类体里再写 `cost.` 指的就是那个字段不是
+    # 模块了。运行时因为 `from __future__ import annotations` 恰好没事，所以它
+    # 只在类型检查里错——**正是那种"不响"的错**：等哪天有人对这类调
+    # `get_type_hints()`（pydantic、FastAPI 都会）才当场炸。
+    cost: CostRollup | None = None
+    session_costs: dict[int, CostRollup] = field(default_factory=dict)
+    budget: list[BudgetStatus] = field(default_factory=list)
     # 长时运行的世界时间。None = 没跑到那一步，或者这不是一次长时运行。
     clock: ClockReport | None = None
     # 主动行为审计的授权对照。None = 这次运行没有无人值守的会话。
@@ -1016,50 +1023,57 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
         return "\n".join(lines)
 
     add("\n--- 会话 ---")
-    for s in result.sessions:
-        mark = "ok" if s.premise_held else "!!"
-        restored = f" ← 恢复到 {s.restored_from}" if s.restored_from else ""
-        timeout = " [超时强杀]" if s.timed_out else ""
-        killed = " [已被熔断]" if s.killed else ""
+    for session in result.sessions:
+        mark = "ok" if session.premise_held else "!!"
+        restored = f" ← 恢复到 {session.restored_from}" if session.restored_from else ""
+        timeout = " [超时强杀]" if session.timed_out else ""
+        killed = " [已被熔断]" if session.killed else ""
         # 无人值守单独标出来。少了它，一份长时运行的报告会把"夜里它自己动的手"
         # 读成"用户让它做的事"——同一串调用，两种完全不同的行为。
-        unattended = " [无人值守]" if s.autonomous else ""
+        unattended = " [无人值守]" if session.autonomous else ""
         add(
-            f"  {mark} #{s.ordinal} {s.name}{restored}{timeout}{killed}{unattended}"
-            f"  退出码 {s.exit_code}  {s.elapsed_s:.1f}s"
+            f"  {mark} #{session.ordinal} {session.name}{restored}{timeout}{killed}{unattended}"
+            f"  退出码 {session.exit_code}  {session.elapsed_s:.1f}s"
         )
         add(
-            f"       记忆视野 ≤ 会话 {s.memory_horizon_ordinal}"
-            f" / 工具调用 {s.tool_calls} 次"
+            f"       记忆视野 ≤ 会话 {session.memory_horizon_ordinal}"
+            f" / 工具调用 {session.tool_calls} 次"
         )
-        if s.virtual_started_at:
-            gap = f"，距上一段过了 {span_human(s.after_gap_s)}" if s.after_gap_s else ""
-            add(f"       世界时间 {s.virtual_started_at}{gap}")
-            if not s.clock_matched:
+        if session.virtual_started_at:
+            gap = (
+                f"，距上一段过了 {span_human(session.after_gap_s)}"
+                if session.after_gap_s
+                else ""
+            )
+            add(f"       世界时间 {session.virtual_started_at}{gap}")
+            if not session.clock_matched:
                 add(
-                    f"       !! 时钟对不上：场景声明世界走了 {span_human(s.declared_offset_s)}，"
-                    f"实际走了 {span_human(s.observed_offset_s)}"
+                    f"       !! 时钟对不上：场景声明世界走了 "
+                    f"{span_human(session.declared_offset_s)}，"
+                    f"实际走了 {span_human(session.observed_offset_s)}"
                 )
-        consumed = f"       脚本消费 {s.script_steps_consumed}/{s.script_steps_declared}"
-        if s.killed:
-            consumed += f"（熔断所致，前提成立）\n       熔断原因：{s.kill_reason}"
-        elif not s.premise_held:
+        consumed = (
+            f"       脚本消费 {session.script_steps_consumed}/{session.script_steps_declared}"
+        )
+        if session.killed:
+            consumed += f"（熔断所致，前提成立）\n       熔断原因：{session.kill_reason}"
+        elif not session.premise_held:
             consumed += "   这一段没跑完，前提未成立 "
         add(consumed)
         # 出岔子的那几段把 Agent 输出印出来——崩了要看 traceback，卡住了要看它
         # 停在哪一行，而在此之前它抓了 2000 字符**从来没给任何人看过**。
         # 正常结束的会话不印：那几千字会把报告淹掉，而它们什么都没解释。
-        if s.stdout_tail and not s.ended_normally:
+        if session.stdout_tail and not session.ended_normally:
             add(f"       --- Agent 输出（末尾 {_STDOUT_TAIL_CHARS} 字符）---")
-            for line in s.stdout_tail.strip().splitlines():
+            for line in session.stdout_tail.strip().splitlines():
                 add(f"       {line}")
 
     # 调用链紧跟在会话表后面：会话表说"这一段跑了多久、调了几次"，链说"那几次
     # 是按什么顺序发生的、哪几次没成功"。两者都是**看**的结果，判定在下面。
     if result.call_chain is not None:
-        ch = result.call_chain
+        chain_report = result.call_chain
         add("\n--- 调用链（每段会话里，调用按发生顺序）---")
-        for chain in ch.chains:
+        for chain in chain_report.chains:
             add(f"  {chain.headline}")
             for node in chain.nodes:
                 add(f"     {node.line()}")
@@ -1073,7 +1087,7 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
             if chain.omitted_steps:
                 add(
                     f"     还有 {chain.omitted_steps} 种没成功的调用没列出来"
-                    f"（每段会话最多列 {ch.step_limit} 种）。"
+                    f"（每段会话最多列 {chain_report.step_limit} 种）。"
                 )
         add(
             "  这一节是陈述，不是判定：目标系统回了个错不等于被测对象做错了事，所以\n"
@@ -1084,12 +1098,12 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
     if result.clock is not None:
         # 两个时间并列给。只给虚拟时间，读的人会以为跑一次要三天；只给真实
         # 耗时，就看不出这次到底模拟了多久。
-        c = result.clock
+        world_clock = result.clock
         add("\n--- 世界时间（长时运行，需求场景 6）---")
-        add(f"  世界从 {c.started_at} 走到 {c.ended_at}")
+        add(f"  世界从 {world_clock.started_at} 走到 {world_clock.ended_at}")
         add(
-            f"  模拟跨度 {span_human(c.virtual_elapsed_s)}，"
-            f"真实耗时 {c.real_elapsed_s:.1f}s（约 {c.speed:.0f} 倍）"
+            f"  模拟跨度 {span_human(world_clock.virtual_elapsed_s)}，"
+            f"真实耗时 {world_clock.real_elapsed_s:.1f}s（约 {world_clock.speed:.0f} 倍）"
         )
         add(
             "  这段时间不是等出来的：引擎把目标系统的时钟往前拨，世界该变的都\n"
@@ -1099,9 +1113,9 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
     if result.autonomy is not None:
         # 授权对照表随报告一起给出。"未经授权"这四个字没有它就没法复核：读的人
         # 得自己知道当时允许了什么，才能判断哪一条算越权。
-        a = result.autonomy
-        allowed = "、".join(a.unattended_allowlist) or "（无）"
-        sessions = "、".join(f"#{o}" for o in a.autonomous_ordinals)
+        autonomy = result.autonomy
+        allowed = "、".join(autonomy.unattended_allowlist) or "（无）"
+        sessions = "、".join(f"#{n}" for n in autonomy.autonomous_ordinals)
         add("\n--- 自主行为（需求场景 6）---")
         add(f"  无人值守的会话：{sessions}")
         add(f"  被授权无人值守运行的工具：{allowed}")
@@ -1115,15 +1129,19 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
     # 混在一起的话，"记忆里动过一个文件"会被读成"记忆出了问题"。
     add("\n--- 记忆观测（会话边界上看到的，不是判定）---")
     if result.memory:
-        for o in result.memory:
+        for observation in result.memory:
             # 时点的说法从 `phase_label` 来（它也是检测结论和界面用的那一个）：
             # 各拼一份的话，报告里会出现"会话 0开始时"和"会话 0 开始时"两种写法。
-            when = phase_label(o["ordinal"], o["phase"])
-            horizon = "不知道" if o["horizon"] is None else f"≤ 会话 {o['horizon']}"
-            add(f"  {when}  记忆视野 {horizon}  条目 {o['entries']}")
+            when = phase_label(observation["ordinal"], observation["phase"])
+            horizon = (
+                "不知道"
+                if observation["horizon"] is None
+                else f"≤ 会话 {observation['horizon']}"
+            )
+            add(f"  {when}  记忆视野 {horizon}  条目 {observation['entries']}")
             for label, key in (("新出现", "added"), ("消失", "removed"), ("内容变了", "changed")):
-                if o[key]:
-                    add(f"       {label}：{'、'.join(o[key])}")
+                if observation[key]:
+                    add(f"       {label}：{'、'.join(observation[key])}")
     else:
         add("  一次会话边界都没走到，没有观测。多半是执行失败提前退出了。")
     add(
@@ -1133,11 +1151,11 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
 
     # 跨会话差异紧接着记忆观测：两节都是"看"的结果，判定在下面。
     if result.session_diff is not None:
-        d = result.session_diff
+        diff = result.session_diff
         add("\n--- 跨会话差异（同一场景的两段会话，逐项对齐）---")
-        for note in d.notes:
+        for note in diff.notes:
             add(f"  {note}")
-        for pair in d.pairs:
+        for pair in diff.pairs:
             add(f"  {pair.headline}")
             for line in pair.background:
                 add(f"     · {line}")
@@ -1148,7 +1166,7 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
             if pair.omitted:
                 add(
                     f"     还有 {pair.omitted} 条差异没列出来"
-                    f"（每对会话最多列 {d.limit} 条）。"
+                    f"（每对会话最多列 {diff.limit} 条）。"
                 )
         add(
             "  这一节是陈述，不是判定：它不进检测结论，也不影响通过与否。同一个场景\n"
@@ -1159,22 +1177,22 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
     add("\n--- 检测结论 ---")
     if not result.findings:
         add("  （无）")
-    for f in result.findings:
+    for finding in result.findings:
         flag = {"pass": "  ", "fail": "!!", "warning": " ?", "inconclusive": ".."}[
-            f.verdict.value
+            finding.verdict.value
         ]
-        add(f"  {flag} [{f.verdict.value:<12}] {f.detector}")
-        add(f"       {f.summary}")
+        add(f"  {flag} [{finding.verdict.value:<12}] {finding.detector}")
+        add(f"       {finding.summary}")
 
     add("\n--- 汇总（四态，inconclusive 不并入 pass）---")
-    s = result.summary
+    summary = result.summary
     add(
-        f"  通过 {s.get('pass', 0):.0f} / 失败 {s.get('fail', 0):.0f} / "
-        f"警告 {s.get('warning', 0):.0f} / 未覆盖 {s.get('inconclusive', 0):.0f}"
+        f"  通过 {summary.get('pass', 0):.0f} / 失败 {summary.get('fail', 0):.0f} / "
+        f"警告 {summary.get('warning', 0):.0f} / 未覆盖 {summary.get('inconclusive', 0):.0f}"
     )
     add(
-        f"  覆盖率 {s.get('coverage_ratio', 0):.0%}"
-        f"（已覆盖部分的失败率 {s.get('failure_rate_among_covered', 0):.0%}）"
+        f"  覆盖率 {summary.get('coverage_ratio', 0):.0%}"
+        f"（已覆盖部分的失败率 {summary.get('failure_rate_among_covered', 0):.0%}）"
     )
     # 地面真值单独列出来，且和检测结论分开——检测器说 pass 而钱扣了两次，
     # 正是这个工具要抓的失效方式，两者放在同一行会看不出区别。
@@ -1187,33 +1205,33 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
 
     if result.cost is not None:
         add("\n--- 成本（陈述，不参与通过与否）---")
-        c = result.cost
+        total = result.cost
         add(
-            f"  {c.llm_calls} 次 LLM 调用，"
-            f"{_tokens(c.input_tokens)} in / {_tokens(c.output_tokens)} out，"
-            f"${_money(c.cost_usd)}"
+            f"  {total.llm_calls} 次 LLM 调用，"
+            f"{_tokens(total.input_tokens)} in / {_tokens(total.output_tokens)} out，"
+            f"${_money(total.cost_usd)}"
         )
-        if c.is_lower_bound:
+        if total.is_lower_bound:
             # 金额不全的时候必须说出来。只印 `$0.0000` 的话，读报告的人会以为
             # 这次运行不要钱——而实际上是我们没有这个模型的单价，一个字都没算。
             add(
-                f"  !! 注意：其中 {c.unpriced_calls} 次调用的模型不在定价表中，"
+                f"  !! 注意：其中 {total.unpriced_calls} 次调用的模型不在定价表中，"
                 f"成本按 0 计。上面的金额是下界，不是账单。"
             )
-        if c.tokens_are_estimated:
+        if total.tokens_are_estimated:
             # 上面那几个数字里有几个是估的。**这不是检测结论**，是"这段陈述有多
             # 可信"——
             # 估的数可能偏大也可能偏小（所以它不等于"下界"），但把它当账单读的
             # 人和知道它是估的人，会做出不同的决定。
             add(
-                f"  !! 注意：其中 {c.estimated_calls} 次调用没拿到上游的用量"
+                f"  !! 注意：其中 {total.estimated_calls} 次调用没拿到上游的用量"
                 f"（流式请求未带 usage 帧，或被中途断开），token 数是网关按看到的"
                 f"内容估的。这几行不是账单。"
             )
-        if c.cache_read_tokens or c.cache_write_tokens:
+        if total.cache_read_tokens or total.cache_write_tokens:
             add(
-                f"  缓存读 {_tokens(c.cache_read_tokens)}"
-                f" / 写 {_tokens(c.cache_write_tokens)}"
+                f"  缓存读 {_tokens(total.cache_read_tokens)}"
+                f" / 写 {_tokens(total.cache_write_tokens)}"
             )
         # 只有多会话或者有"没归到会话"的调用时才逐会话列——单会话时上面那行
         # 就是它自己的数，再列一遍是重复。
@@ -1227,14 +1245,14 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
 
     if result.budget:
         add("\n--- 预算 ---")
-        for b in result.budget:
-            period = {"day": "本日", "week": "本周", "month": "本月"}[b.period]
-            mark = "!!" if b.exceeded else "ok"
+        for budget_status in result.budget:
+            period = {"day": "本日", "week": "本周", "month": "本月"}[budget_status.period]
+            mark = "!!" if budget_status.exceeded else "ok"
             add(
-                f"  {mark} {period}已花 ${_money(b.spent_usd)}"
-                f" / 预算 ${_money(b.ceiling_usd)}（{b.ratio:.0%}）"
+                f"  {mark} {period}已花 ${_money(budget_status.spent_usd)}"
+                f" / 预算 ${_money(budget_status.ceiling_usd)}（{budget_status.ratio:.0%}）"
             )
-        if any(b.exceeded for b in result.budget):
+        if any(row.exceeded for row in result.budget):
             add(
                 "     超预算不会让本次运行算作不通过——那是累计花费，和被测\n"
                 "     Agent 这一次做没做错事无关。两者压成同一个结论的话，一次\n"
@@ -1242,19 +1260,19 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
             )
 
     if result.expectation is not None:
-        e = result.expectation
+        scored = result.expectation
         add("\n--- 预期 ---")
-        for expectation, finding in e.matched:
+        for expectation, finding in scored.matched:
             add(f"  命中  {expectation.detector}/{expectation.verdict.value}：{finding.summary}")
-        for expectation in e.missing:
+        for expectation in scored.missing:
             code = f"/{expectation.reason_code}" if expectation.reason_code else ""
             add(
                 f"  未命中 {expectation.detector}/{expectation.verdict.value}{code}"
                 f"{'：' + expectation.note if expectation.note else ''}"
             )
-        for finding in e.unexpected:
+        for finding in scored.unexpected:
             add(f"  意外  [{finding.verdict.value}] {finding.detector}：{finding.summary}")
-        for finding in e.uncovered:
+        for finding in scored.uncovered:
             add(f"  未覆盖 [{finding.verdict.value}] {finding.detector}：{finding.summary}")
 
     if not result.premises_held:

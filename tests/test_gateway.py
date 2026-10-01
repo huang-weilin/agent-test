@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -181,6 +183,126 @@ async def test_real_mode_without_key_refuses_instead_of_falling_back(client, mon
     assert resp.status_code == 500
     assert "拒绝静默降级" in resp.json()["error"]["message"]
     assert created["run_id"]
+
+
+# --- 真实上游那一条路 ---------------------------------------------------------
+#
+# 上面那条之外，测试里的 `upstream_mode` 一直是 stub，所以真正做转发的
+# `_call_real_upstream` 平时一条断言都没有——而它是**唯一会把真实密钥拼进
+# 请求**的地方。下面两条盯的是上游回来的东西形状不对时会怎样：边界上的输入
+# 不受我们控制，而这条路要等配了真钥匙才有人走，那时候再发现就晚了。
+
+
+def _fake_reply() -> dict[str, Any]:
+    """一份像上游会回的对象。形状照着 OpenAI 的来，不是自己编的。"""
+    return {
+        "id": "chatcmpl-fake",
+        "object": "chat.completion",
+        "model": "fake-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "上游原样回来的那句话"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    }
+
+
+class _FakeResponse:
+    status_code = 200
+    text = "（假的响应体，这两条测试都不看它）"
+
+    def __init__(self, body: Any) -> None:
+        self._body = body
+
+    def json(self) -> Any:
+        return self._body
+
+
+class _FakeClient:
+    def __init__(self, http: _FakeHttp) -> None:
+        self._http = http
+
+    async def __aenter__(self) -> _FakeClient:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def post(self, url: str, **kwargs: Any) -> _FakeResponse:
+        self._http.sent.append({"url": url, **kwargs})
+        return _FakeResponse(self._http.body)
+
+
+class _FakeHttp:
+    """替掉网关模块里的 `httpx`。
+
+    **只实现 `_call_real_upstream` 真正用到的那两个方法**（`AsyncClient` 和
+    `post`）。多出来的部分没人验，会自己长出和真 httpx 不一样的脾气，而那种
+    差异只在出事那天才显形。
+    """
+
+    def __init__(self, body: Any) -> None:
+        self.body = body
+        self.sent: list[dict[str, Any]] = []
+
+    def AsyncClient(self, **_kwargs: Any) -> _FakeClient:
+        return _FakeClient(self)
+
+
+def _fake_upstream(monkeypatch: pytest.MonkeyPatch, body: Any) -> _FakeHttp:
+    fake = _FakeHttp(body)
+    monkeypatch.setattr(gateway_app, "httpx", fake)
+    return fake
+
+
+async def test_real_mode_passes_an_object_reply_through(client, monkeypatch) -> None:
+    """对照：上游回一个正常的对象时，这一趟必须成功。
+
+    没有这一条的话，下面那条「顶层不是对象要报错」可能只是因为**这条路整个
+    走不通**才红——一个永远报错的函数能通过所有「它报错了」的断言。
+    """
+    monkeypatch.setattr(settings, "upstream_mode", "real")
+    monkeypatch.setattr(settings, "upstream_api_key", "test-key-not-real")
+    fake = _fake_upstream(monkeypatch, _fake_reply())
+
+    await _register(client)
+    resp = await client.post("/v1/chat/completions", json=_chat_body())
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["choices"][0]["message"]["content"] == "上游原样回来的那句话"
+    assert len(fake.sent) == 1
+    assert fake.sent[0]["url"].endswith("/chat/completions")
+
+
+async def test_real_mode_with_a_non_object_reply_reports_an_upstream_error(
+    client, monkeypatch
+) -> None:
+    """上游回的 JSON 顶层不是对象：报 502，而且那句话指向上游。
+
+    不核这一下的后果很具体：结算那一步会拿它去 `response.get("usage")`，
+    炸成「list 没有 get」——那是个 500，一个字都没提到上游。读日志的人会去
+    查网关，而问题在上游。状态码也必须是 502 而不是照着上游的 200 抄：
+    抄了的话，客户端收到的是一个"成功但解析不了"的 200。
+    """
+    monkeypatch.setattr(settings, "upstream_mode", "real")
+    monkeypatch.setattr(settings, "upstream_api_key", "test-key-not-real")
+    _fake_upstream(monkeypatch, [{"order_id": "A1"}])
+
+    await _register(client)
+    resp = await client.post("/v1/chat/completions", json=_chat_body())
+
+    assert resp.status_code == 502, resp.text
+    error = resp.json()["error"]
+    assert error["type"] == "upstream_error"
+    assert "顶层不是对象" in error["message"]
+    # 这一趟的预扣要还回去。新加的这条岔路也在那个 `except` 下面，但"也在
+    # 下面"是读出来的，这条断言是量出来的：少了它，预算会随着每次形状不
+    # 对的上游响应慢性泄漏。
+    snapshot = (await client.get("/_sandbox/runs")).json()["runs"][0]
+    assert snapshot["used"] == 0, "预扣未归还，预算泄漏了"
 
 
 # 流式那一族在 `tests/test_gateway_stream.py`。这里原本只有一条断言——501

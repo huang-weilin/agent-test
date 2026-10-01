@@ -36,13 +36,37 @@ class MemoryAdapter(Protocol):
     `capture`/`restore` 必须**对称**：restore(capture()) 应当是个恒等操作。
     这条不做成断言而是写在这里，是因为破坏它的方式往往很隐蔽——比如 capture
     时漏掉了隐藏文件，restore 就会把它们删掉。
+
+    **这份协议是一份会被人照着实现的契约**（第二个适配器——LangGraph
+    checkpointer——就按它写），所以它的每个成员都要和真实调用点一致。写这份
+    文档的这次核对里就抓到一处不一致：`restore` 的 `allow_create` 一直在被
+    调用方传（`trace/recorder.py` 的 `restore_snapshot`），而协议上没有它。
+    照着协议实现的适配器会在**回滚记忆的那一刻**炸掉一个 `TypeError`，
+    而那正是最不能出岔子的地方。现在它写在协议里，`pyproject.toml` 里
+    `strict = true` 的 mypy 会替后来的人盯着。
     """
 
-    name: str
+    @property
+    def name(self) -> str:
+        """适配器的名字。进快照的元数据，也进报告。
+
+        是只读属性不是字段：适配器本身是不可变的（`FileMemoryAdapter` 是
+        frozen dataclass），协议里写成可写字段会逼实现方把它改成可写的。
+        """
+        ...
 
     def capture(self) -> bytes: ...
 
-    def restore(self, payload: bytes) -> None: ...
+    def restore(self, payload: bytes, *, allow_create: bool = False) -> None:
+        """把载体覆盖成快照里的状态。
+
+        `allow_create` 默认 False：目标还不存在时拒绝恢复。这个默认是对的——
+        "目录不在那儿"最常见的原因是路径搞错了，而那时恢复等于在别的地方
+        凭空造一份记忆出来。跑场景的时候执行器会传 True，因为那个目录是它
+        自己开出来、自己注入给 Agent 的：它知道路径是对的，"还没有"只是
+        因为 Agent 这次一个字都没往记忆里写。
+        """
+        ...
 
     def entry_count(self) -> int: ...
 

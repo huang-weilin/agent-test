@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -377,11 +378,18 @@ def _bucket_label(period: Period, moment: datetime) -> str:
     return moment.strftime("%Y-%m")
 
 
-async def _with_db(db: AsyncSession | None, fn: Any) -> Any:
+async def _with_db[T](
+    db: AsyncSession | None, fn: Callable[[AsyncSession], Awaitable[T]]
+) -> T:
     """复用调用方的事务，没有就自己开一个。
 
     复用是必要的，不是省事：`by_session` 内部要连着查两次，各开一个事务的话，
     两次之间新落进来的调用会让"各会话之和"与"运行总额"对不上。
+
+    **类型参数不是装饰**：原来两个位置都是 `Any`，于是九个查询函数全都顶着
+    `no-any-return`——`-> CostRollup` 的函数返回一个 `Any`，类型检查器就再也
+    帮不上忙了（这正是"mypy 跑起来"要抓的那一类）。`_T` 一上，它们各自
+    对上了自己的返回类型，一个改动修掉九条。
     """
     if db is not None:
         return await fn(db)

@@ -124,10 +124,13 @@ class MemoryDetector:
         ordered = chronological(list(observations))
         findings: list[Finding] = []
         if not self.rules.empty:
-            for rule in self.rules.must_hold:
-                findings.append(self._drift(rule, ordered))
-            for rule in self.rules.forbidden:
-                findings.append(self._poison(rule, ordered))
+            # 两条声明各走各的检测器，变量名也跟着分开：同一个 `rule` 先当
+            # "必须还在"再当"不许出现"，读代码的人要在脑子里记两种意思，
+            # 而它们的字段本来就不一样（`path` 对 `text`）。
+            for declared in self.rules.must_hold:
+                findings.append(self._drift(declared, ordered))
+            for forbidden in self.rules.forbidden:
+                findings.append(self._poison(forbidden, ordered))
         findings.append(self._rollup(ordered, findings))
         return findings
 
