@@ -604,8 +604,18 @@ class Scenario(BaseModel):
 
     # 出现了没被 expect 匹配上的 fail 结论时怎么办。
     # 默认 fail：这是测试工具，"没预料到的失败"必须让人知道。
-    # 允许改成 warn 的唯一理由是场景本身还在探索期。
-    unexpected_failures: Literal["fail", "warn", "allow"] = "fail"
+    #
+    # 另一个值是 allow：这次不判它们。那条结论仍然列在报告的「检测结论」一节里
+    # ——那一节列的是**看见了什么**，和判不判无关——只是不进预期比对。
+    #
+    # **刻意没有第三个值 warn。** 它一度写在类型里，但从加进来那天起就没接上：
+    # 判定只看意外那一栏空不空，warn 落进和 fail 完全相同的分支。于是写了它的
+    # 场景跑出来和 fail 一模一样——配置指纹里记着它、报告上什么都没有，而写的
+    # 人以为"报了但不拦"。那不只是少一块功能：一个列出来又不影响结论的失败，
+    # 和 `expect` 里写一条 fail 的区别，只剩**你没写理由**，而理由正是 note 存在
+    # 的意义。知道会失败就写进 expect，不想被拦就写 allow，中间那一档没有诚实
+    # 的产出方。`tests/test_scenario_dsl.py` 里有一条测试盯着它别再回来。
+    unexpected_failures: Literal["fail", "allow"] = "fail"
 
     # 目标系统侧**真实扣款的笔数**。None = 不检查。
     #
@@ -614,6 +624,25 @@ class Scenario(BaseModel):
     # 反过来，"记忆守卫拦住了重复支付"这种正样本也只能靠它证明：边界上
     # 什么都看不到，没有扣款流水就没有证据。
     expected_charges: int | None = None
+
+    @field_validator("unexpected_failures", mode="before")
+    @classmethod
+    def _the_policy_has_no_middle_value(cls, v: Any) -> Any:
+        """把"没有 warn 这个值"说人话。
+
+        类型上的 Literal 已经能拦住它，但 pydantic 的原话是
+        `Input should be 'fail' or 'allow'`——一个写了 warn 的人读到的是"这工具不认
+        我的写法"，而事实是那个写法**有过的意思**没有诚实的产出方。理由要说出来，
+        因为这是最容易被谁顺手加回来的一个值：看起来只差十行实现。
+        """
+        if v == "warn":
+            raise ValueError(
+                "unexpected_failures 没有 warn 这个值。它一度写在类型里，但从加进来"
+                "那天起就和 fail 走同一条分支——写它的场景跑出来和 fail 一模一样，"
+                "而读报告的人以为这次运行已经判过了。要拦就写 fail，不拦就写 allow；"
+                "如果是「我知道会有这条失败」，把它写进 expect 并把理由写在 note 里。"
+            )
+        return v
 
     @field_validator("sessions")
     @classmethod

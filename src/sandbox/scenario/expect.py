@@ -6,7 +6,8 @@
   `missing`    **预期没命中**。两种可能：被测 Agent 这次没犯那个错，或者检测器坏了。
                分不清，所以不能算通过，也不能算失败，只能报"未达成"。
   `unexpected` 出现了没被任何预期覆盖的 fail 结论。默认按失败处理——这是测试工具，
-               没预料到的问题必须让人知道。
+               没预料到的问题必须让人知道。场景可以声明 `allow` 让这一批不参与判定
+               （结论本身仍然列在报告的「检测结论」一节里，那一节是"看见了什么"）。
 
 **`missing` 为什么不直接算失败？** 因为一次"检测器没报出循环"的运行，和一个
 "Agent 这次真的没循环"的运行，在数据上无法区分——除非场景里写了脚本化的上游
@@ -93,18 +94,17 @@ def match_expectations(
     return matched, missing, remaining
 
 
-def evaluate(
-    scenario: Scenario,
-    findings: list[Finding],
-    *,
-    unexpected_failures: str | None = None,
-) -> ExpectResult:
-    """比对预期与实际结论。"""
+def evaluate(scenario: Scenario, findings: list[Finding]) -> ExpectResult:
+    """比对预期与实际结论。
+
+    策略只有场景声明这一个来源。这里曾经有一个调用方覆盖的参数，但从加进来那天
+    起就没有任何调用方——同一个旋钮两个来源，迟早出现"报告按场景判、代码按参数
+    判"，而配置指纹里记的是场景那一份。
+    """
     matched, missing, remaining = match_expectations(scenario.expect, findings)
 
-    policy = unexpected_failures or scenario.unexpected_failures
     unexpected: list[Finding] = []
-    if policy != "allow":
+    if scenario.unexpected_failures != "allow":
         unexpected = [f for f in remaining if f.verdict == DetectorVerdict.FAIL]
 
     uncovered = [f for f in remaining if f.verdict == DetectorVerdict.INCONCLUSIVE]

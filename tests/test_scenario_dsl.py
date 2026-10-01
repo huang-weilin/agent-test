@@ -22,7 +22,7 @@ from sandbox.detectors.base import Finding
 from sandbox.scenario import identity
 from sandbox.scenario.expect import ExpectResult, evaluate
 from sandbox.scenario.loader import ScenarioError, load_all, load_scenario
-from sandbox.scenario.runner import ScenarioResult, SessionOutcome
+from sandbox.scenario.runner import ScenarioResult, SessionOutcome, render
 from sandbox.scenario.spec import Expectation, Scenario
 
 # --- 构造辅助 -----------------------------------------------------------------
@@ -137,6 +137,30 @@ def test_unknown_fields_are_rejected(tmp_path: Path) -> None:
     # 打错字段名如果能静默通过，场景作者会以为它生效了。
     with pytest.raises(ScenarioError):
         load_scenario(_write(tmp_path, _scenario_dict(typo_field=1)))
+
+
+def test_the_warn_policy_is_not_a_value(tmp_path: Path) -> None:
+    """`unexpected_failures: warn` 曾经是个合法值，而它和 fail 一模一样。
+
+    它从加进来那天起就没接上：判定只看意外那一栏空不空，warn 落进和 fail 完全
+    相同的分支。所以写了它的场景跑出来和 fail 一模一样——配置指纹里记着它、
+    报告上什么都没有，而写的人以为"报了但不拦"。现在它在加载时就被拒。
+
+    **这条测试红了，就说明有人把 warn 加回了类型里。** 加回去之前先回答那个问题：
+    谁是它的诚实产出方？知道会失败就写 `expect`（note 里写为什么），不想被拦就
+    写 `allow`，中间那一档的意思自相矛盾。
+    """
+    data = _scenario_dict(unexpected_failures="warn")
+    with pytest.raises(ScenarioError, match="没有 warn"):
+        load_scenario(_write(tmp_path, data))
+
+
+def test_an_unknown_policy_is_rejected(tmp_path: Path) -> None:
+    # 认不出来的取值静默通过的话，写错的人会以为它生效了——而它落进的其实是
+    # "不是 allow 就是 fail"那条路，也就是默认那一个。
+    data = _scenario_dict(unexpected_failures="banana")
+    with pytest.raises(ScenarioError, match="unexpected_failures"):
+        load_scenario(_write(tmp_path, data))
 
 
 def test_duplicate_tool_names_are_rejected(tmp_path: Path) -> None:
@@ -424,6 +448,68 @@ def test_unexpected_failures_can_be_downgraded_per_scenario() -> None:
     scenario = _scenario_model([], unexpected_failures="allow")
     result = evaluate(scenario, [_finding("loop.strict", DetectorVerdict.FAIL)])
     assert result.ok
+
+
+# --- 报告：预期那一节 -------------------------------------------------------------
+
+
+def _result(scenario: Scenario, findings: list[Finding]) -> ScenarioResult:
+    return ScenarioResult(
+        scenario_id=scenario.id,
+        run_id="r",
+        sessions=[_outcome()],
+        findings=findings,
+        expectation=evaluate(scenario, findings),
+    )
+
+
+def _section(text: str, title: str) -> str:
+    """报告里某一节的内容（报表用 `--- 标题 ---` 分段，到下一节为止）。"""
+    return text.split(f"--- {title} ---")[1].split("\n--- ")[0]
+
+
+def test_the_expectation_section_keeps_its_four_columns_apart() -> None:
+    """四个栏位各有各的说法，一个都不能少——尤其是最后两个。
+
+    「意外」是 fail，「未覆盖」是 inconclusive。把它们并成一栏（都是"没被预期
+    覆盖的结论"）看着更简洁，实际是把"没测到"读成了"有问题"，反过来也一样。
+    这一节此前没有任何渲染测试：合并了两栏也不会有条红的。
+    """
+    scenario = _scenario_model([{"detector": "idempotency", "verdict": "pass"}])
+    text = render(
+        _result(
+            scenario,
+            [
+                _finding("idempotency", DetectorVerdict.PASS, summary="只付了一次"),
+                _finding("loop.strict", DetectorVerdict.FAIL, summary="停不下来"),
+                _finding(
+                    "loop.cross_session", DetectorVerdict.INCONCLUSIVE, summary="只有一段会话"
+                ),
+            ],
+        )
+    )
+    section = _section(text, "预期")
+    assert "命中  idempotency/pass" in section
+    assert "意外  [fail] loop.strict：停不下来" in section
+    assert "未覆盖 [inconclusive] loop.cross_session：只有一段会话" in section
+    assert "未命中" not in section
+
+
+def test_an_allow_policy_stops_judging_not_reporting() -> None:
+    """`allow` 的意思是"这次不判"，不是"这次不看"。
+
+    那条结论仍然出现在「检测结论」一节里。两节的读法不一样：检测结论列的是
+    **看见了什么**，预期一节判的是**该不该看见**。把 allow 实现成"从报告里
+    拿掉"，一个真实的 Agent 缺陷会因为场景里写了一个词而消失。
+    """
+    scenario = _scenario_model([], unexpected_failures="allow")
+    finding = _finding("loop.strict", DetectorVerdict.FAIL, summary="停不下来")
+    result = _result(scenario, [finding])
+
+    assert result.ok
+    text = render(result)
+    assert "loop.strict" in _section(text, "检测结论")
+    assert "意外" not in _section(text, "预期")
 
 
 def test_reason_code_is_part_of_the_match() -> None:
