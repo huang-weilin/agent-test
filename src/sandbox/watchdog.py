@@ -9,9 +9,49 @@
 所以 `RunRegistry.kill()` 会同时做两件事：置位熔断标记（带内表现）+
 通知带外处理器（真正杀进程）。
 
-**代价要讲清楚。** 每次工具调用后重扫一遍该运行的整条轨迹，是 O(n²)。
-walking skeleton 的量级（几十次调用）完全没问题；真实场景要改成只扫滑动窗口。
-这个取舍是有意的：先证明"熔断能止损"这件事成立，再优化它的常数。
+**代价要讲清楚，而且要**量**出来讲。** 每次工具调用后重扫一遍该运行的整条轨迹，
+所以代价随调用次数超线性地涨。这句话原先写的是"几十次调用完全没问题"——那是
+**没量过就写下的**。2026-10-01 量到的（`../_probes/measure_watchdog_scan.py`、
+`../_probes/measure_watchdog_breakdown.py`，本机 SQLite）：
+
+| 调用次数 | 读整条轨迹 | 跑一遍检测器 | 落一条结论 | 整个运行累计 |
+|---|---|---|---|---|
+| 40 | 3.7 ms | 5.8 ms | 10.5 ms | 1.1 s |
+| 80 | 4.8 ms | 33.0 ms | 10.7 ms | 3.1 s |
+| 160 | 7.8 ms | 163.9 ms | 11.5 ms | 12.4 s |
+| 320 | 14.1 ms | 649.7 ms | 10.1 ms | **80.8 s** |
+
+读是线性的，**检测器每翻一倍调用涨 4~5 倍**（n=320 时 51,040 次参数相似度比较
+= C(320,2)，每次约 34 µs），而**落一条结论是常数 10 ms**——一次扫描落两条，
+于是它在小运行里就是全部开销。
+
+**这笔时间记在被测会话的墙钟上。** 看门狗是在出口代理的请求处理里 `await` 的
+（`proxy/app.py`），而 Agent 正阻塞在这个请求上；单会话超时（`runner`）量的是
+Agent 进程活了多久，两者之间没有任何东西把我们的开销摘出来。更糟的是它在轨迹里
+**看不见**：`tool_call.latency_ms` 在 `enforce` 之前就量完了，所以一次因为看门狗
+太慢而超时的运行，报告里长得和"Agent 自己慢"一模一样。这一片把两处**精确**的
+浪费去掉了（见下），但"谁的错分开写"这条还没接上——**它是记在案的债**。
+
+这一片改掉的两处，都不改变任何判定：
+
+1. `_cluster` 里 `normalize_args` 挪出双重循环。它只依赖单条调用，原先每比较
+   一对就重算两边——n=320 时是 102,080 次，实际只需要 320 次。
+2. `inspect_run` 同一个 `(检测器, 四态)` 只落一行。n−1 次扫描给出的是同一个
+   结论，原先照单全收——320 次调用会在库里留下 640 行副本。
+
+**为什么"改成只扫滑动窗口"不是一句能顺手写下的建议。** 那是原先挂在这段末尾的
+补救办法，看着显然，量一下就知道它会**静默地少报**（`../_probes/check_sliding_window.py`）：
+
+  * 跨会话那一层要的是"同一个操作出现在两个会话里"。只看最后 3 次调用时，
+    轨迹里只剩一个会话——量到的结论从 `loop.cross_session/warning` 变成
+    `inconclusive`。它没报错，只是不判了。
+  * 近似层那个"翻了很多页还没停"的 warning 判的是**整段有多长**
+    （`monotonic_warn_after = 8`）。12 页的遍历报 warning；只看最后 7 次调用时
+    同一段轨迹报的是 **pass**。整段没变，窗口大小把它判没了。
+
+两处都不是实现细节，是"这个检测器看的是什么"。要动它，得先回答"窗口里那份
+结论还算不算数"——那是检测器行为变更，得单独做、单独测。所以这里只写下欠账
+的数目，不顺手改。
 """
 
 from __future__ import annotations
@@ -72,11 +112,18 @@ async def inspect_run(
         calls, active.exemptions if active else ExemptionSet()
     )
 
-    ctx = active.ctx if active else None
-    if ctx is None:
+    if active is None:
         return findings
+    ctx = active.ctx
 
     for finding in findings:
+        # **同一个结论只落一行。** 这个函数每次工具调用都要跑一遍，而它在
+        # n−1 次扫描里给出的是同一个结论——照单全收的话，一次 320 次调用的运行
+        # 会往库里写 640 行副本。见 `ActiveRun.recorded_conclusions`。
+        key = (finding.detector, finding.verdict.value)
+        if key in active.recorded_conclusions:
+            continue
+        active.recorded_conclusions.add(key)
         await record_finding(
             ctx,
             detector=finding.detector,

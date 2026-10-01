@@ -140,6 +140,86 @@ async def test_an_exemption_for_another_layer_does_not_stop_the_kill(temp_db: st
     assert await enforce(run_id) is not None
 
 
+# --- 账本：一个结论一行，不是扫一次一行 ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_scan_does_not_record_the_same_conclusion_again(
+    temp_db: str,
+) -> None:
+    """扫三遍，库里那两条结论各只有一行。
+
+    看门狗每次工具调用后重扫一遍（`proxy/app.py`），而轨迹在两次调用之间不会
+    平白多出一个结论。照单全收的话，一次 n 次调用的运行会往 `detector_finding`
+    里写 O(n) 行——量于 2026-10-01，那是 **2 行/次调用**（开发库里当时 4,320 行，
+    全部是副本）。那张表的名字是"检测器结论"，一行就该是一个结论。
+
+    代价也不只是难看：落一行是常数 10 ms（量法见
+    `../_probes/measure_watchdog_breakdown.py`），一次扫描落两条，于是**在小运行
+    里它就是看门狗的全部开销**。
+    """
+    ctx = await start_run(scenario_id="wd-dedup", agent_version="v1", declared_writes=set())
+    for i in range(5):
+        await record_tool_call(ctx, tool_name="get_order", args={"order_id": f"A{i}"})
+    runs.register(ctx, tools={"get_order": "/tools/get_order"}, exemptions=None)
+
+    for _ in range(3):
+        await enforce(ctx.run_id)
+
+    rows = await _findings_of(ctx.run_id)
+    seen = [(f.detector, f.verdict) for f in rows]
+
+    assert len(seen) == len(set(seen)), f"同一结论落了多行：{seen}"
+    assert len(seen) == 2, f"五次不同的调用应当只有两条结论，实际 {seen}"
+    assert runs.get(ctx.run_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_conclusion_that_changes_gets_its_own_row(temp_db: str) -> None:
+    """去重去的是**重复**，不是**变化**：同一个检测器改判时，两行都在。
+
+    这一条守的是去重键里那个**四态**。只用检测器做键的话，先落的
+    `loop.approximate/pass` 会把后来的 `loop.approximate/warning` 吃掉——
+    而后者正是"翻了很多页还没停"那条要人来看一眼的结论。报告那边照旧会印出
+    warning（它自己重跑一遍检测器），于是库里和报告里说的不是一件事，
+    且没有任何地方会红。
+
+    形状是这么挑的：`monotonic_warn_after = 8` 判的是**簇有多长**，而页码
+    1000 起步时数字相似度衰减得很慢（1000 与 1008 差 0.8%），整段会落进同一个
+    簇——于是同一段轨迹在 7 次调用时是 pass、9 次时是 warning。
+    """
+    ctx = await start_run(
+        scenario_id="wd-flip", agent_version="v1", declared_writes=set()
+    )
+    runs.register(ctx, tools={"list_orders": "/tools/list_orders"}, exemptions=None)
+
+    # 7 页：簇 7 < 8，判为正常遍历 → pass。
+    for i in range(7):
+        await record_tool_call(ctx, tool_name="list_orders", args={"page": 1000 + i})
+    await enforce(ctx.run_id)
+    first = sorted(
+        (f.detector, f.verdict)
+        for f in await _findings_of(ctx.run_id)
+        if f.detector == "loop.approximate"
+    )
+    assert first == [("loop.approximate", DetectorVerdict.PASS.value)], first
+
+    # 再翻 2 页：簇 9 ≥ 8，同一条路改判 warning。
+    for i in range(7, 9):
+        await record_tool_call(ctx, tool_name="list_orders", args={"page": 1000 + i})
+    await enforce(ctx.run_id)
+
+    rows = sorted(
+        (f.detector, f.verdict)
+        for f in await _findings_of(ctx.run_id)
+        if f.detector == "loop.approximate"
+    )
+    assert rows == [
+        ("loop.approximate", DetectorVerdict.PASS.value),
+        ("loop.approximate", DetectorVerdict.WARNING.value),
+    ], f"先前的 pass 被后来的 warning 吃掉了，或反过来：{rows}"
+
+
 def test_the_killable_set_is_what_the_docs_say() -> None:
     """只有会一直烧钱的那两层杀进程。越权会让人赔钱，但它不会自己一直发生。"""
     assert {"loop.strict", "loop.ping_pong"} == KILL_ON_DETECTORS

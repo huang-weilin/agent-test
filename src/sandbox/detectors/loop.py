@@ -289,15 +289,31 @@ class LoopDetector:
         return findings
 
     def _cluster(self, group: list[CallView]) -> list[list[CallView]]:
-        """贪心聚类：与簇代表相似就并入。簇代表用第一个成员，避免漂移。"""
+        """贪心聚类：与簇代表相似就并入。簇代表用第一个成员，避免漂移。
+
+        **规范化在循环外做一次。** 它只依赖单条调用，而这里原先是在双重循环里
+        现算的：每一对比较都把两边 `normalize_args` 各跑一遍。量于 2026-10-01，
+        n=320 时那是 51,040 次比较 × 2 = **102,080 次**，而真正需要的只有 320 次
+        ——单这一项占掉 `_cluster` 的 18%（`../_probes/profile_loop_detector.py`）。
+
+        改的是**算几次**，不是**算出什么**：`normalize_args` 是纯函数，
+        同样的调用参数永远给同样的结果。判定的等价性由
+        `tests/test_loop_cluster.py` 里那份独立的朴素实现钉住。
+
+        剩下的那份开销是真算法开销：贪心聚类要拿每条调用去比每个簇的代表，
+        参数两两不同时簇数就是 n，于是 C(n,2) 次比较。这一片**没有**动它——
+        见模块文档末尾那段「为什么"改成滑动窗口"不是一句能顺手写下的建议」。
+        """
+        # 每条调用的规范化参数只算一次。列表下标与 `group` 一一对应。
+        normalized = [normalize_args(call.args) for call in group]
         clusters: list[list[CallView]] = []
-        for call in group:
+        rep_index: list[int] = []  # 每个簇的代表在 group 里的下标
+        for index, call in enumerate(group):
             placed = False
-            for cluster in clusters:
-                rep = cluster[0]
+            for slot, cluster in enumerate(clusters):
                 sim = args_similarity(
-                    normalize_args(rep.args),
-                    normalize_args(call.args),
+                    normalized[rep_index[slot]],
+                    normalized[index],
                     key_weights=self.key_weights,
                 )
                 if sim.score >= self.similarity_threshold:
@@ -306,6 +322,7 @@ class LoopDetector:
                     break
             if not placed:
                 clusters.append([call])
+                rep_index.append(index)
         return clusters
 
     def _judge_approximate(
