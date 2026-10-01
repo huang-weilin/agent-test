@@ -31,13 +31,13 @@ PYTHONUTF8=1 agents/react_demo/.venv/Scripts/python.exe -m pip install \
 
 ## 跑
 
-单独跑它意义不大——它需要一个网关和一套 mock 工具在后面。日常用演示脚本：
+单独跑它意义不大——它需要一个网关和一套 mock 工具在后面。日常从仓库根目录用引擎跑：
 
 ```bash
-# 在仓库根目录，脚本会起服务、申请运行、签发令牌、拉起本 Agent、再出报告
-.venv/Scripts/python.exe scripts/run_walking_skeleton.py --scenario clean
-.venv/Scripts/python.exe scripts/run_walking_skeleton.py --scenario duplicate
-.venv/Scripts/python.exe scripts/run_walking_skeleton.py --scenario loop
+# 引擎会起三个服务、开运行、签发令牌、拉起本 Agent（独立进程、独立 venv）、再出报告
+.venv/Scripts/python.exe scripts/run_scenario.py scenarios/clean.yaml
+.venv/Scripts/python.exe scripts/run_scenario.py scenarios/duplicate.yaml
+.venv/Scripts/python.exe scripts/run_scenario.py scenarios/loop.yaml
 ```
 
 要手工跑，就自己起三个服务（`uvicorn sandbox.gateway.app:app --port 4100` 等），
