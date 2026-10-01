@@ -47,6 +47,7 @@ from sandbox.runtime import runs
 from sandbox.scenario import identity
 from sandbox.scenario.loader import ScenarioError, load_scenario, parse_scenario
 from sandbox.scenario.runner import registration_payload
+from tests.control_pairs import assert_only_differs, entry_for
 
 SCENARIOS = REPO_ROOT / "scenarios"
 BLOCKED = SCENARIOS / "autonomous_night_generic_egress_blocked.yaml"
@@ -702,20 +703,18 @@ async def test_the_declared_schema_is_checked_on_the_open_route(
 def test_the_controlled_pair_differs_in_exactly_one_bit() -> None:
     """脚本、任务、工具、会话形状、判据一字不差，唯一变量是那份放行名单。
 
-    与固定目标那一对同一个口径（见 tests/test_egress.py），多抹掉的一样东西：
-    名单本身不同正是这一组的全部内容。
+    与固定目标那一对共用账本里同一个口径（`tests/control_pairs.py`）：声明的差别
+    也是名单上那一条的三个字段。
     """
     blocked = load_scenario(BLOCKED)
     allowed = load_scenario(ALLOWED)
 
-    def subject(scenario: Any) -> dict[str, Any]:
-        payload = scenario.model_dump(mode="json")
-        for key in ("id", "description", "expect", "expected_charges"):
-            payload.pop(key)
-        payload["world"]["egress"] = None
-        return payload
-
-    assert subject(blocked) == subject(allowed), "两个场景除了出口名单之外还有别的差别"
+    assert_only_differs(
+        entry_for(
+            "autonomous_night_generic_egress_allowed",
+            "autonomous_night_generic_egress_blocked",
+        )
+    )
 
     # 名单落在 world 那一节：换了它 = 换了这次测试面对的世界。
     assert identity.changed_sections(

@@ -20,7 +20,7 @@ import pytest
 
 from sandbox.scenario import identity
 from sandbox.scenario.loader import parse_scenario
-from sandbox.scenario.spec import Scenario, WorldDecl
+from sandbox.scenario.spec import Scenario, SessionSpec, WorldDecl
 from sandbox.trace.recorder import CONFIG_SCHEME, compute_config_hash
 
 # 底本。六个节各有一个可以单独改动的地方，下面的变体各自只动一处。
@@ -121,6 +121,29 @@ def test_reformatting_is_not_a_config_change() -> None:
         == []
     )
     assert _hash(_scenario()) == _hash(_scenario(REFORMATTED))
+
+
+def test_renaming_a_session_is_not_a_test_change() -> None:
+    """给会话改个叫法，这次运行一个字节都没变。
+
+    会话名是报告里那句话的标签，不是被测对象拿到的东西。它留在指纹里的时候，
+    改它会让回归报告说出"改的是测试本身，两次运行比的不是同一套测试"——而那句
+    话会把真信号盖住：用户恰好在同一次重跑里改过 Prompt 的话，报告已经在说
+    "比不了"，他就不会再去查那个 Prompt 了。
+
+    两半都得有：**改名不许报**，而同一个会话里的脚本动一下**必须报**（否则
+    上面那句"不报"只是因为这一节根本不看东西）。
+    """
+    renamed = _scenario(BASE.replace("- name: 第一次", "- name: 换个叫法"))
+    assert _hash(_scenario()) == _hash(renamed), "改个会话名叫法不该换指纹"
+    assert (
+        identity.changed_sections(identity.sections(_scenario()), identity.sections(renamed))
+        == []
+    )
+
+    assert identity.changed_sections(
+        identity.sections(_scenario()), identity.sections(_mutated("改了脚本"))
+    ) == ["script"], "同一节里的脚本动了必须报出来"
 
 
 def test_survives_a_round_trip_through_the_database() -> None:
@@ -233,6 +256,53 @@ def test_the_world_is_a_test_section_not_an_agent_section() -> None:
     """
     assert "world" in identity.TEST_SECTIONS
     assert "world" not in ("prompt", "tools", "agent")
+
+
+def test_every_scenario_field_enters_the_fingerprint_or_is_listed_as_prose() -> None:
+    """场景模型上的每个顶层字段，要么进指纹，要么在散文名单里。
+
+    这条盯的是**以后**：往 `Scenario` 上加一个字段（比如给循环权重找个新家），
+    忘了把它接进 `sections()` 的话，症状是"配置没变，但结论变了"——最该被看到
+    的信号直接消失，而用户会去查一个没动过的文件。这里比的是两张表，所以红的
+    时候不用猜是谁漏了。
+
+    两个方向都要成立：少一个字段（漏接线）报错，多一个名字（`SECTION_SOURCES`
+    里写了一个模型上已经没有的字段）也报错——后者会让这张表慢慢变成小说。
+    """
+    declared = {name for names in identity.SECTION_SOURCES.values() for name in names}
+    assert declared | set(identity.PROSE_FIELDS) == set(Scenario.model_fields), (
+        "这些字段既没进指纹也不在散文名单里："
+        f"{sorted(set(Scenario.model_fields) - declared - set(identity.PROSE_FIELDS))}；"
+        f"这些名字在表里但模型上没有了：{sorted(declared - set(Scenario.model_fields))}"
+    )
+    assert identity.SECTION_SOURCES.keys() == set(identity.SECTIONS)
+
+
+def test_the_session_name_is_the_only_thing_a_session_hides() -> None:
+    """会话那一节只许抹掉一个字段——`name`。
+
+    抹掉的动作是**减法**：`SessionSpec` 上以后再加字段（比如别的计数器），
+    它会一声不响地落在指纹之外，而这一节看起来还是"什么都比"。所以抹掉的名单
+    要和模型的字段表对上：`SessionSpec` 减去名单，剩下的必须是这一节里真的
+    出现的字段。
+    """
+    payload = identity.sections(_scenario())["script"][0]
+    hidden = set(identity.SESSION_FIELDS_NOT_IN_FINGERPRINT)
+    assert set(SessionSpec.model_fields) - hidden == set(payload), (
+        "会话那一节的字段和 `SESSION_FIELDS_NOT_IN_FINGERPRINT` 对不上"
+    )
+    assert "name" not in payload
+
+    # 上面那两句是**同源**的：`hidden` 从同一个常量取、又被减了两次，所以它们看
+    # 得见「名单里写了一个模型上已经没有的名字」，看不见「名单**长了一条**」——
+    # 而后者才是真正危险的方向：多藏一个字段，那一节就少比一样东西，报告上却
+    # 还是「这一节都核过了」。所以名单本身逐字钉在这里：往上面加字段是一个
+    # **要动这一行**的动作。（这条是探针量出来的：把 `script` 加进名单，上面两句
+    # 全绿，红的只有下面这一句。）
+    assert identity.SESSION_FIELDS_NOT_IN_FINGERPRINT == ("name",), (
+        "会话里被藏起来的东西不止 `name` 一个——多藏一个字段，这一节就少比一样"
+        "东西，而报告上看起来还是「这一节比过了」。"
+    )
 
 
 def test_every_world_field_reaches_the_fingerprint() -> None:

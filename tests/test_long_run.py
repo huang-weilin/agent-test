@@ -400,11 +400,14 @@ async def test_a_broken_accelerator_makes_the_long_run_fail(
 
 
 async def test_the_control_scenario_concludes_the_opposite(temp_db: str) -> None:
-    """对照组：一字不差，只把间隔改成 0，结论必须相反。
+    """对照组：世界一样、间隔改成 0，结论必须相反。
 
     两个场景给出同一个结果的话，说明让 overnight 扣款的根本不是时间——可能是
     订单默认就逾期、可能是脚本多写了一步付款、也可能是那个场景压根没在看目标
     系统的回答。那时候它的"通过"是个假阳性，而它读起来和真的一模一样。
+
+    这一条管的是"跑起来之后结论确实翻了过来"；文件级的那一半（这两份差在哪几处、
+    多出来的那一步付款为什么必须差）由 `tests/control_pairs.py` 的账本逐条核对。
     """
     from sandbox.scenario.runner import ScenarioRunner
 

@@ -32,6 +32,7 @@ from sandbox.detectors.autonomy import (
 from sandbox.detectors.base import CallView, Exemption, ExemptionSet
 from sandbox.scenario.loader import ScenarioError, load_scenario, parse_scenario
 from sandbox.watchdog import KILL_ON_DETECTORS
+from tests.control_pairs import assert_only_differs, entry_for
 
 SCENARIOS = REPO_ROOT / "scenarios"
 UNAUTHORIZED = SCENARIOS / "autonomous_night_unauthorized.yaml"
@@ -378,26 +379,17 @@ def test_the_controlled_pair_differs_in_exactly_one_bit() -> None:
     对照成立的判据不是"两个都跑通"，是**必须不同**：一个报越权、一个报按授权
     办事。两边给出同一个结果，就说明审计判的不是授权，而是"它有没有调写工具"，
     那它只是幂等检测的影子。
+
+    文件级的比对不再写在这里：账本是 `tests/control_pairs.py` 里那一条，口径
+    也是那里的（用生产上判"配置变没变"的 `identity.sections`，比这里原先手搓
+    的那份 `model_dump` 更硬）。
     """
     bad = load_scenario(UNAUTHORIZED)
     good = load_scenario(AUTHORIZED)
 
-    def subject(scenario):
-        """被测对象面对的那份输入：Agent、工具、会话、地面真值。
-
-        刻意**不含 `id`、`description`（散文）与 `expect`（尺子）**：两边的尺子
-        本来就必须不同——"必须给出相反的结论"正是对照组的全部内容，把它们也算进
-        差异里就等于要求对照组放弃它的作用。要钉死的是**除了授权那一行之外，
-        它面对的世界一模一样**。
-        """
-        payload = scenario.model_dump(mode="json")
-        for key in ("id", "description", "expect"):
-            payload.pop(key)
-        for tool in payload["tools"]:
-            tool.pop("may_run_unattended", None)
-        return payload
-
-    assert subject(bad) == subject(good), "两个场景除了授权那一行之外还有别的差别"
+    assert_only_differs(
+        entry_for("autonomous_night_authorized", "autonomous_night_unauthorized")
+    )
 
     bad_tools = {t.name: t for t in bad.tools}
     good_tools = {t.name: t for t in good.tools}

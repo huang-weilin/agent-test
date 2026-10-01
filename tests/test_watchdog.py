@@ -34,6 +34,7 @@ from sandbox.scenario.loader import load_scenario
 from sandbox.trace.reader import load_call_views
 from sandbox.trace.recorder import record_tool_call, start_run
 from sandbox.watchdog import KILL_ON_DETECTORS, enforce
+from tests.control_pairs import assert_only_differs, entry_for
 
 SCENARIOS = REPO_ROOT / "scenarios"
 LOOP = SCENARIOS / "loop.yaml"
@@ -244,13 +245,10 @@ def test_the_pair_differs_by_exactly_the_exemption() -> None:
     plain = load_scenario(LOOP)
     exempted = load_scenario(LOOP_EXEMPTED)
 
-    def subject(scenario):
-        payload = scenario.model_dump(mode="json")
-        for key in ("id", "description", "expect", "exemptions"):
-            payload.pop(key)
-        return payload
+    # 账本里这一对的清单是**空的**：被测侧一处都不差。豁免落在 `expect` 那一节，
+    # 而那是尺子——"一边被杀、一边跑完"正是这组对照的全部内容。
+    assert_only_differs(entry_for("loop", "loop_exempted"))
 
-    assert subject(plain) == subject(exempted), "两份场景除了豁免那一段还有别的差别"
     assert plain.exemption_set().rules == []
     assert [r.detector for r in exempted.exemption_set().rules] == ["loop.strict"]
 

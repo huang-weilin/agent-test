@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sandbox.db.models import ToolCall
 from sandbox.scenario.loader import load_scenario
 from sandbox.trace.reader import BOUNDARY_DETECTORS
+from tests.control_pairs import assert_only_differs, entry_for
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UNDECLARED = REPO_ROOT / "scenarios" / "schema_keys_undeclared.yaml"
@@ -46,22 +47,14 @@ def test_the_controlled_pair_differs_in_exactly_one_bit() -> None:
     undeclared = load_scenario(UNDECLARED)
     empty = load_scenario(EMPTY_TABLE)
 
-    def subject(scenario: Any) -> dict[str, Any]:
-        """被测对象面对的那份输入：Agent、工具、会话脚本、世界。
-
-        与别的对照对同一个口径：不含 `id`、`description`（散文）与 `expect`
-        （尺子）——两边的尺子本来就必须不同，那正是对照组的全部内容。
-        """
-        payload = scenario.model_dump(mode="json")
-        for key in ("id", "description", "expect"):
-            payload.pop(key)
-        for tool in payload["tools"]:
-            tool["parameters"].pop("properties", None)
-        return payload
-
-    assert subject(undeclared) == subject(empty), (
-        "两个场景除了 properties 那一行之外还有别的差别"
+    # 文件级的比对在账本里（`tests/control_pairs.py`）。这一对的形状特别值得
+    # 记一笔：两支的差别是一个**空表**对**没有这个键**，而空字典在逐叶比对里
+    # 没有叶子——账本里有一条测试专门盯着这一点（`test_an_empty_container_is_
+    # not_the_same_as_a_missing_key`）。
+    assert_only_differs(
+        entry_for("schema_empty_properties", "schema_keys_undeclared")
     )
+
     assert "properties" not in undeclared.tools[0].parameters, "对照组不该有键的名单"
     assert empty.tools[0].parameters == {"type": "object", "properties": {}}, (
         "实验组给的是一个空表——不是没写"

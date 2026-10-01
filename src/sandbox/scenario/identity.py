@@ -54,6 +54,46 @@ SECTION_LABELS: dict[str, str] = {
 #: 前后两次的结论不可比。它和 `script` 是同一类东西——都是作者摆出来的布景。
 TEST_SECTIONS: frozenset[str] = frozenset({"script", "world", "expect"})
 
+#: 每一节的字段来源：场景模型里哪些顶层字段进这一节。
+#:
+#: 这是一张**声明**，不是从代码里推出来的——所以 `tests/test_identity.py` 里
+#: 有一条断言盯着它：每个顶层字段要么在某个节里，要么在 `PROSE_FIELDS` 里。
+#: 往 `Scenario` 上加一个字段而忘了接线，红的会是那一条。少了它，"配置没变但
+#: 结论变了"这条最该被看到的信号会直接消失，而用户会去查一个没动过的文件。
+SECTION_SOURCES: dict[str, tuple[str, ...]] = {
+    "prompt": ("agent",),
+    "tools": ("tools",),
+    "script": ("sessions",),
+    "agent": ("agent",),
+    "world": ("world",),
+    "expect": (
+        "expect",
+        "exemptions",
+        "memory",
+        "unexpected_failures",
+        "expected_charges",
+    ),
+}
+
+#: 不进指纹的顶层字段，以及为什么：**它们是散文**。
+#:
+#: `id` 是这份场景在报告里的名字，`description` 是写给人看的那段话。改掉它们，
+#: 被测对象拿到的东西一个字节都没变，这次运行也一模一样——所以报"配置变了"
+#: 是误报，而误报的代价是真正的行为差异被归到配置头上。
+PROSE_FIELDS: frozenset[str] = frozenset({"id", "description"})
+
+#: 会话这一节里不进取指纹的字段。
+#:
+#: 今天只有一个：**会话名**。它和 `id`、`description` 是同一类东西——报告里
+#: 那句话的标签，不是这次运行的输入。会话之间按序号对齐，名字从来不参与任何
+#: 判定（它只出现在错误信息里）。
+#:
+#: 留着它的代价是量得出来的：把某一份场景里的一行 `name:` 改个叫法，两次运行
+#: 一个字都没变，而 `changed_sections` 会报出 `script`——于是回归报告说"改的是
+#: 测试本身，两次运行比的不是同一套测试"。那是一句**盖住真信号的话**：用户正好
+#: 在那次重跑里改过 Prompt 的话，他会先去看自己的改动，而报告已经在说"比不了"。
+SESSION_FIELDS_NOT_IN_FINGERPRINT: tuple[str, ...] = ("name",)
+
 
 def sections(scenario: Scenario) -> dict[str, Any]:
     """把场景切成"用户会改的那几块"。
@@ -73,8 +113,18 @@ def sections(scenario: Scenario) -> dict[str, Any]:
         "tools": [
             t.model_dump(mode="json") for t in scenario.tools
         ],
-        # 测试本身的步骤：脚本、快照点、记忆回滚位置。
-        "script": [s.model_dump(mode="json") for s in scenario.sessions],
+        # 测试本身的步骤：脚本、快照点、记忆回滚位置、时间间隔。
+        #
+        # 会话名抹掉：它是报告里的标签，不是这次运行的输入。见
+        # `SESSION_FIELDS_NOT_IN_FINGERPRINT`。
+        "script": [
+            {
+                k: v
+                for k, v in s.model_dump(mode="json").items()
+                if k not in SESSION_FIELDS_NOT_IN_FINGERPRINT
+            }
+            for s in scenario.sessions
+        ],
         # 被测对象的构建标识与启动方式。
         "agent": {
             "version": scenario.agent.version,

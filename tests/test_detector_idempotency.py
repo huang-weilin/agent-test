@@ -12,6 +12,7 @@ from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
 from sandbox.scenario.loader import load_scenario
 from sandbox.scenario.runner import ScenarioResult, ScenarioRunner
 from sandbox.scenario.spec import Scenario
+from tests.control_pairs import assert_only_differs, entry_for
 
 PAY = {"order_id": "A1", "amount": 599}
 PROTECTED = {"create_payment": ToolFacts("create_payment", True, enforces_idempotency=True)}
@@ -237,23 +238,6 @@ PROTECTED_SCENARIO = SCENARIOS / "protected.yaml"
 AGENT_PYTHON = ROOT / "agents" / "react_demo" / ".venv"
 
 
-def _steps(scenario: Scenario) -> list[list[tuple[str, dict]]]:
-    """脚本的骨架：每一步调了哪个工具、除了幂等键之外的参数。
-
-    刻意不含会话名与散文——那两处是给人看的，本来就该各写各的。而幂等键要摘掉
-    单独比：它在四支之间**正是那个变量**，混进来会让"脚本一模一样"这句话失效。
-    """
-    skeleton = []
-    for session in scenario.sessions:
-        for step in session.script:
-            calls = []
-            for call in step.get("tool_calls") or []:
-                args = {k: v for k, v in call["arguments"].items() if k != "idempotency_key"}
-                calls.append((call["name"], args))
-            skeleton.append(calls)
-    return skeleton
-
-
 def _declaration(scenario: Scenario) -> dict[str, tuple[bool, bool, str | None]]:
     return {
         t.name: (t.is_write, t.enforces_idempotency, t.idempotency_param)
@@ -267,16 +251,19 @@ def test_the_four_scenarios_differ_only_in_the_world() -> None:
     脚本（除幂等键外）四支完全相同；工具声明里只有 protected 那三支与
     duplicate 差一个字段。于是"四支给出四种结论"这件事只可能来自声明与键——
     也就是被测对象与目标系统的行为差异。
+
+    文件级的比对在账本里（`tests/control_pairs.py`）；下面留的是账本说不了的一条：
+    声明了保护的那三支，写工具那三个字段**一模一样**。账本只声明"差别只许落在
+    `enforces_idempotency` 上"，而这里说的是那三支之间连它也不许动。
     """
     duplicate = load_scenario(DUPLICATE_SCENARIO)
     missing = load_scenario(MISSING_KEY_SCENARIO)
     rotated = load_scenario(KEY_ROTATED_SCENARIO)
     reused = load_scenario(PROTECTED_SCENARIO)
 
-    skeleton = _steps(duplicate)
-    assert _steps(missing) == skeleton
-    assert _steps(rotated) == skeleton
-    assert _steps(reused) == skeleton, "四支的脚本除了幂等键还有别的差别"
+    assert_only_differs(
+        entry_for("duplicate", "missing_key", "key_rotated", "protected")
+    )
 
     # 三支声明了保护，一支没有。写工具的那三个字段里只差中间那个。
     protected_declaration = _declaration(missing)

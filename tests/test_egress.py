@@ -32,6 +32,7 @@ from sandbox.proxy.policy import AllowRule, EgressPolicy, checked_host, policy_w
 from sandbox.scenario import identity
 from sandbox.scenario.call_chain import MARK_SANDBOX_BLOCKED
 from sandbox.scenario.loader import ScenarioError, load_scenario, parse_scenario
+from tests.control_pairs import assert_only_differs, entry_for
 
 SCENARIOS = REPO_ROOT / "scenarios"
 BLOCKED = SCENARIOS / "autonomous_night_egress_blocked.yaml"
@@ -274,21 +275,11 @@ def test_the_controlled_pair_differs_in_exactly_one_bit() -> None:
     blocked = load_scenario(BLOCKED)
     allowed = load_scenario(ALLOWED)
 
-    def subject(scenario: Any) -> dict[str, Any]:
-        """被测对象面对的那份输入：Agent、工具、会话脚本、世界。
-
-        与授权那一对同一个口径：不含 `id`、`description`（散文）与 `expect`
-        （尺子）——两边的尺子本来就必须不同，那正是对照组的全部内容。名单本身
-        也要抹掉：它不同正是这一组的全部内容。`expected_charges`（地面真值）
-        同理抹掉：钱到底扣没扣正是这次实验要问的问题，不是实验的变量。
-        """
-        payload = scenario.model_dump(mode="json")
-        for key in ("id", "description", "expect", "expected_charges"):
-            payload.pop(key)
-        payload["world"]["egress"] = None
-        return payload
-
-    assert subject(blocked) == subject(allowed), "两个场景除了出口名单之外还有别的差别"
+    # 文件级的比对与口径都在账本里（`tests/control_pairs.py`）：这一对声明的差别
+    # 是名单上那一条的三个字段，除此之外逐字相等。
+    assert_only_differs(
+        entry_for("autonomous_night_egress_allowed", "autonomous_night_egress_blocked")
+    )
 
     # 名单落在 world 那一节，和订单备注并列：换了它 = 换了这次测试面对的世界。
     assert identity.changed_sections(

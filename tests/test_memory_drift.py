@@ -52,6 +52,7 @@ from sandbox.scenario import identity
 from sandbox.scenario.loader import ScenarioError, load_scenario
 from sandbox.scenario.runner import _run_detectors
 from sandbox.scenario.spec import Scenario
+from tests.control_pairs import assert_only_differs, entry_for
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "tests" / "corpus"
@@ -844,15 +845,15 @@ def test_the_poison_pair_differs_in_exactly_one_place() -> None:
     工具或判据哪一处不一样——那种差别读起来同样是"中毒"，而实际上比的是两套
     测试。
 
-    逐节比的是 `identity.sections`，也就是生产上判"配置变没变"的那份口径。
+    文件那一侧的比对在账本里（`tests/control_pairs.py`），口径是生产上判"配置变没变"
+    的 `identity.sections`。这一段剩下的都是账本说不了的话：两边用的是不是同一条判据、
+    世界那一节除了那句话之外还有没有别的东西。
     """
     poisoned = identity.sections(load_scenario(POISONED))
     clean = identity.sections(load_scenario(CLEAN))
 
-    for section in ("prompt", "tools", "script", "agent"):
-        assert poisoned[section] == clean[section], (
-            f"{section} 节不一样——那就不是受控实验了"
-        )
+    assert_only_differs(entry_for("memory_poisoned", "memory_note_clean"))
+
     assert poisoned["expect"]["memory"] == clean["expect"]["memory"], (
         "两份场景必须用同一条判据：判据不同，比的是两把尺子，而不是两个世界"
     )
@@ -952,11 +953,11 @@ def test_the_tidy_pair_differs_only_in_what_the_agent_did_with_the_old_file() ->
     a = identity.sections(archived)
     b = identity.sections(pruned)
 
-    # `expect` 是唯一**必须**不同的那一节：一边要的是 warning，一边要的是 fail。
-    # 其余每一节都不许动，尤其 `script`（那是测试本身）与 `world`（那是布景）。
+    # 文件那一侧的比对在账本里；这里留一句分节的话：`expect` 是唯一**必须**不同的
+    # 那一节（一边要的是 warning，一边要的是 fail），另一处是 `agent` 里的那个环境
+    # 变量——而 `agent` 这一节既不是 `TEST_SECTIONS`，也不是被测对象的构建变了。
+    assert_only_differs(entry_for("memory_tidy_archived", "memory_tidy_pruned"))
     assert identity.changed_sections(a, b) == ["agent", "expect"]
-    for section in ("prompt", "tools", "script", "world"):
-        assert a[section] == b[section], f"{section} 节不一样——那就不是受控实验了"
 
     # agent 节里也只有那一个环境变量不同。
     assert a["agent"]["env"] == {"DEMO_AGENT_MEMORY_TIDY": "archive"}

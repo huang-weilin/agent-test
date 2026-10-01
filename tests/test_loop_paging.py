@@ -37,6 +37,7 @@ from sandbox.scenario.runner import _run_detectors
 from sandbox.scenario.spec import Scenario
 from sandbox.trace.recorder import record_tool_call, start_run
 from sandbox.watchdog import detector_for, enforce, inspect_run
+from tests.control_pairs import assert_only_differs, entry_for
 
 SCENARIOS = REPO_ROOT / "scenarios"
 BOUNDED = SCENARIOS / "loop_paging_bounded.yaml"
@@ -99,16 +100,14 @@ def _approximate(scenario: Scenario, pages: int) -> list:
 def test_the_pair_differs_by_exactly_the_page_count() -> None:
     """两份场景之间只有**一个**变量：脚本往后多翻 4 页。
 
-    比对用的是 `identity.sections`，也就是生产上判"配置变没变"的那份口径。
-    `tools` 一节必须逐字相同——**权重表就在这一节里**，两支写的是同一张表。
+    比对用的是账本（`tests/control_pairs.py`），口径是生产上判"配置变没变"的那份
+    `identity.sections`。`tools` 一节必须逐字相同——**权重表就在这一节里**，
+    两支写的是同一张表。
     """
     bounded = identity.sections(load_scenario(BOUNDED))
     unbounded = identity.sections(load_scenario(UNBOUNDED))
 
-    for section in ("prompt", "tools", "agent", "world"):
-        assert bounded[section] == unbounded[section], (
-            f"{section} 节不一样——那就不是受控实验了"
-        )
+    assert_only_differs(entry_for("loop_paging_bounded", "loop_paging_unbounded"))
 
     assert bounded["script"] != unbounded["script"], "脚本必须不同，否则两支跑的是同一件事"
     assert len(bounded["script"]) == len(unbounded["script"]) == 1, "两支都是单会话"
