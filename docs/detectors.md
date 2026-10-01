@@ -52,11 +52,39 @@ exemptions:
     allow_write: true
 ```
 
-`detector` 只认 `sandbox.detectors.KNOWN_DETECTORS` 里的名字（`loop`、`loop.strict`、
+`detector` 只认 `sandbox.detectors.KNOWN_DETECTORS` 里的 14 个名字（`loop`、`loop.strict`、
 `loop.approximate`、`loop.ping_pong`、`loop.cross_session`、`loop.retry`、
 `loop.snapshot_replay`、`idempotency`、`idempotency.read_repeats`、`autonomy`、
-`autonomy.unauthorized`）。`match` 只认两个键：`arg_differs_on: [字段名]`（仅当两次调用的
+`autonomy.unauthorized`、`memory`、`memory.drift`、`memory.poisoning`）。`match` 只认两个键：
+`arg_differs_on: [字段名]`（仅当两次调用的
 差异**只**出现在这些字段上时命中）和 `tool_has_idempotency: true/false`。
+
+**名字认得，还得那条路上真的有人去看。** 名字列表是所有检测器的全集，不是"能写豁免"
+的集合——14 个名字里，会去找豁免的只有 6 个。写在不查豁免的名字上，规则永远不会命中；
+写在记忆那三族上，引擎直接拒收（它们的例外机制是逐条声明的判据，不叠第二层）。
+
+**键认得，还得这个检测器答得了。** `match` 里的每个键都是一句"这个检测器当场知道的事"；
+写到不知道那件事的检测器上，规则**不是不生效，是永远也不会命中**——调用点没把这个
+事实传下来，比对的那一边是 `None`，而 `None` 跟 `true`、`false` 都不相等：
+
+| 写法 | 实际行为（拆掉闸门实测，三种调用组合全跑过） |
+|---|---|
+| `tool_has_idempotency: true` 写在 `loop.strict` 上 | 0 次命中——一条死规则 |
+| `tool_has_idempotency: false` 写在 `loop.strict` 上 | 同样 0 次命中：`None` 也不等于 `false` |
+| `arg_differs_on` 写在 `loop.ping_pong` 上 | 0 次命中（乒乓那条路不算"差异在哪些字段上"） |
+| `arg_differs_on: []`（写在哪个检测器上都一样） | 0 次命中——"只在零个字段上不同"就是"完全相同"，那是确定性最高的循环，豁免侧刻意不接 |
+
+**"写 `false` 会变成无条件静音"这句话是错的**，我一开始就是这么写的，后来真跑了一遍
+才改掉：`None` 两个方向都不相等，所以两种写法都只是死规则。这不比恒真好——死规则
+在报告里同样一个字都看不出来，"没有这条结论"和"这条结论被豁免了"长得一模一样，
+写规则的人会以为自己处理过了。
+
+四种都在加载时就拒（`EXEMPTION_AWARE` 记着谁答得了
+谁：今天 `arg_differs_on` 只有 `loop.strict` / `loop.approximate` 答得了，
+`tool_has_idempotency` 只有 `idempotency` 答得了；空列表那一行是 `check_match` 管的
+形状问题）。运行时还有第二道：调用点忘了把
+事实传下去时直接抛，而不是按默认值算——那张表管"人挑错了检测器"，这一道管"表漂了"。
+"压根不查豁免"和"答不了这个键"是两种错法、同一种后果，都在下面那张表里分档写清楚。
 
 规则：
 - `reason` 是必填的，而且是唯一必填项——没有理由的豁免在报告里无法复核，等于永久静音。
@@ -64,9 +92,24 @@ exemptions:
   写 `allow_write: true`：让"我在静音一次重复扣款告警"变成一个必须写下来的动作。
 - 被静音的结论**不会消失**：它降级为 `pass`，摘要里写着"已被豁免规则 X 静音：<理由>"，
   `exempted_by` 也一并落库。报告里看得见理由，不用回去翻场景文件。
-- **"装上了但没接线"的规则在加载时就报错**：未知检测器、未声明的工具、`match` 里写错的键，
-  三种都让规则永远匹配不上，而检测器不会因此报错——它只是安静地不生效，用户于是以为
-  自己处理过了。这类错误宁可让场景加载失败。
+- **"装上了但没接线"的规则在加载时就报错**：未知检测器、未声明的工具、`match` 里写错的键、
+  **这个检测器答不了的键**（上面那张表）、**写得出来却永远不成立的条件**（`arg_differs_on: []`），
+  以及**压根不查豁免的那个检测器**（`detector` 只认 14 个名字，其中会去找豁免的只有 6 个，
+  见下表）。六种都让规则变成一条死规则（永远不命中），而检测器不会因此报错——报告里
+  "没有这条结论"和"这条结论被豁免了"是同一个样子，用户于是以为自己处理过了。这类错误
+  宁可让场景加载失败。
+
+  | 检测器名 | 查豁免吗 | 答得了哪些 `match` 键 |
+  |---|---|---|
+  | `loop.strict` / `loop.approximate` | 查 | `arg_differs_on` |
+  | `idempotency`（含跨会话那一路） | 查 | `tool_has_idempotency` |
+  | `loop.ping_pong` / `autonomy` / `autonomy.unauthorized` | 查 | 一个都答不了——只能写不带条件的规则 |
+  | `loop` / `loop.retry` / `loop.cross_session` / `loop.snapshot_replay` / `idempotency.read_repeats` | **不查** | 写了也不生效，加载就拒 |
+  | `memory` / `memory.drift` / `memory.poisoning` | 不吃豁免 | 判据就是逐条声明的 `must_hold` / `forbidden`，不叠第二层 |
+
+  这张表由 `tests/test_scenario_exemptions.py::test_every_known_detector_is_classified`
+  盯着：14 个名字每一个都得落在上面三档里的一档。**按名字写、不按类写**——`loop` 和
+  `loop.strict` 看着像父子，一个不查、一个查，凭名字猜是不行的。
 - 豁免落在配置指纹的**判卷标准**一节（`identity.sections` 的 `expect`）。于是"加了一条豁免"
   的那次运行会被判成"测试本身变了、两次运行不可比"，而不是"失败少了几个"——后者是把
   静音读成修复。每次运行也都随轨迹落库一份当时的判卷标准原值，所以"哪次跑用的是哪套
@@ -492,7 +535,7 @@ run_id、检测器、豁免规则），因为这个运行确实在打转、而�
 而应接近 1。它们在真实场景里误报只可能是一个原因：**声明写错了**——不是判定
 判错了，处置方式完全不同（去改场景，不是去调检测器）。
 
-### 实测（2026-09-30，45 条语料）
+### 实测（2026-10-01，47 条语料）
 
 ```
 .venv/Scripts/python.exe scripts/calibrate.py
@@ -500,14 +543,14 @@ run_id、检测器、豁免规则），因为这个运行确实在打转、而�
 
 | 族 | TP | FP | FN | TN | 精确率 | 召回率 |
 |---|---|---|---|---|---|---|
-| loop | 8 | 0 | 0 | 37 | 100.0% | 100.0% |
-| idempotency | 11 | 0 | 0 | 34 | 100.0% | 100.0% |
-| autonomy | 4 | 0 | 0 | 41 | 100.0% | 100.0% |
-| memory | 7 | 0 | 0 | 38 | 100.0% | 100.0% |
+| loop | 8 | 0 | 0 | 39 | 100.0% | 100.0% |
+| idempotency | 12 | 0 | 0 | 35 | 100.0% | 100.0% |
+| autonomy | 4 | 0 | 0 | 43 | 100.0% | 100.0% |
+| memory | 7 | 0 | 0 | 40 | 100.0% | 100.0% |
 
 **这四行不是"检测器没有缺陷"**，是"这批样本上没找到分歧"。统计按**族**做
 （`loop` 一族含严格/近似/乒乓/跨会话/重试各层），因为语料规模还撑不起按层分。
-样本是人手挑的，挑的时候已经知道检测器怎么工作；45 条里一条误报就能让精确率掉
+样本是人手挑的，挑的时候已经知道检测器怎么工作；47 条里一条误报就能让精确率掉
 几个百分点。真实脱敏轨迹尚未收进语料（需签授权）。
 
 记忆族那一行要单独说一句：它的样本只有 7 条正样本，而这一族的判据是**声明**，

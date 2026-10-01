@@ -248,3 +248,61 @@ items:
       idempotency: pass
       loop: pass
       autonomy: inconclusive
+
+  # --- 豁免的 match 键：受控对照 --------------------------------------------
+  # 两条只差世界里一个比特（工具声不声明幂等保护），规则一字不差。
+  # 它们证明 tool_has_idempotency 这个键是一个真的条件，不是常量。
+
+  - id: idem-exemption-scoped-to-unprotected
+    source: 自造
+    why: >
+      与 idem-exemption-silences-write 同一条轨迹、同一条规则，只多了一个
+      match：这条规则只在工具没有声明幂等保护时成立。上游已经有一层去重、
+      工具本身却声明不了保护，是这个场景里真实的样子，所以静音是对的。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    exemptions:
+      - detector: idempotency
+        tool: create_payment
+        reason: 重试是上游重试机制自动发起的，已人工确认上游那一层有去重
+        allow_write: true
+        match: {tool_has_idempotency: false}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+    expect:
+      memory: none
+      idempotency: pass
+      loop: pass
+      autonomy: inconclusive
+
+  - id: idem-exemption-is-not-a-blanket
+    source: 自造
+    why: >
+      与上一条一字不差，只把工具改成声明了幂等保护。同一份轨迹、同一条规则，
+      这次结论必须还是 fail（missing_key）——因为规则的条件是「工具没有声明
+      保护」，而这个工具声明了。
+      两条摆在一起才说明这个键在承重：只有前一条的话，把键整个删掉、换成
+      别的值，结果都一模一样，那样"写了条件"就只是一句装饰。
+    tools:
+      create_payment: {is_write: true, enforces_idempotency: true}
+    sessions:
+      - {ordinal: 0}
+    exemptions:
+      - detector: idempotency
+        tool: create_payment
+        reason: 重试是上游重试机制自动发起的，已人工确认上游那一层有去重
+        allow_write: true
+        match: {tool_has_idempotency: false}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}}
+    expect:
+      memory: none
+      idempotency:
+        verdict: fail
+        reason_code: missing_key
+      loop: pass
+      autonomy: inconclusive

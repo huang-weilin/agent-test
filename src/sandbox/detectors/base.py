@@ -68,7 +68,48 @@ class Finding:
 #: `match` 里认得的键。写错的键（`arg_differs_on_page` 这种）会让规则永远
 #: 匹配不上——而规则看起来是在的，报告里也不会有任何异常。一条"装上了但没
 #: 接线"的静音开关比没有规则更坏，所以在这里硬拦。
+#:
+#: 拦"这个键存在吗"只是一半，另一半是 `EXEMPTION_AWARE`：键认得、
+#: 而**这个检测器答不了**的时候，规则会变成一条死规则，比不生效还坏。
 KNOWN_MATCH_KEYS: frozenset[str] = frozenset({"arg_differs_on", "tool_has_idempotency"})
+
+#: 哪些检测器**真的会去查豁免**，以及它各自答得了哪些 `match` 键。按**检测器名**
+#: 写，不按类：同一个 `LoopDetector` 里 `loop.approximate` 答得了"这两次调用差在
+#: 哪些字段上"，`loop.ping_pong` 答不了——乒乓判定压根不算那个。
+#:
+#: **不在表里的检测器，规则写上去永远不会命中。** `KNOWN_DETECTORS` 里有 14 个
+#: 名字，查豁免的只有这 6 个：`loop`、`loop.retry`、`loop.cross_session`、
+#: `loop.snapshot_replay`、`idempotency.read_repeats` 五条路上压根没有查豁免那
+#: 一步（记忆那三族是另一回事，见 `NOT_EXEMPTIBLE`）。不查就不收——收下一条
+#: 永远不会命中的规则，等于让写的人以为自己处理过了。
+#:
+#: **答不了某个键的时候，规则就是一条死规则——两种写法都是。** 调用点没把这个
+#: 事实传下来，比对的那一边就是 `None`，而 `None` 跟 `True`、`False` 都不相等。
+#: 所以 `tool_has_idempotency` 无论写 true 还是 false，写在 `loop.strict` 上都不会
+#: 命中（实测：拆掉闸门之后，两种写法 × 三种调用组合，0 次命中）。
+#:
+#: 报告上完全看不出来：那条规则从来没提过，而"没有这条结论"和"这条结论被豁免了"
+#: 是同一个样子。写规则的人以为自己处理过了。所以加载时就拒。
+#:
+#: 这是 `KNOWN_MATCH_KEYS` 那条纪律的另一半：那张表管"这个键存在吗"，这张管
+#: "这个检测器查不查豁免、答得了吗"。
+#:
+#: 运行时还有第二道（`ExemptionSet.find` 按调用点实际传了哪些事实再问一遍）。
+#: 两道都留着，因为它们防的不是同一件事：这张表防**人写规则时挑错了检测器**，
+#: 运行时那道防**有人加了新的 find 调用点却忘了把事实传下去**——那恰恰是这张
+#: 表会漂的地方，而它漂起来没有任何症状。
+EXEMPTION_AWARE: dict[str, frozenset[str]] = {
+    "idempotency": frozenset({"tool_has_idempotency"}),
+    "loop.strict": frozenset({"arg_differs_on"}),
+    "loop.approximate": frozenset({"arg_differs_on"}),
+    "loop.ping_pong": frozenset(),
+    "autonomy": frozenset(),
+    "autonomy.unauthorized": frozenset(),
+}
+
+
+class UnanswerableMatch(ValueError):
+    """一条规则在问一个这个检测器答不了的问题。加载时拒，运行时也拒。"""
 
 #: **不吃豁免的检测器。** 记忆族的判据是场景里逐条声明的 `must_hold` / `forbidden`，
 #: 声明本身就是那个"例外机制"——再叠一层豁免，等于给同一件事开两个开关。
@@ -101,6 +142,59 @@ def check_match(match: dict[str, Any]) -> None:
             f"arg_differs_on 要的是字段名列表（例如 [page]），收到 {differs!r}。"
             f"写成字符串的话集合运算是按字符走的，看起来能跑，命中的是别的规则。"
         )
+    if differs is not None and len(differs) == 0:
+        raise ValueError(
+            "arg_differs_on 给的是空列表——「差异只在零个字段上」就是「两次调用完全"
+            "相同」，而这个条件永远不会成立：豁免那一侧专门拦着不让它命中（参数一模一样"
+            "的重复是确定性最高的循环，见 ExemptionSet.find 里那个 not differing_fields）。"
+            "所以这是一条写得出来、却永远不命中的规则，与写在答不了的检测器上是同一种坏。\n"
+            "要连这种重复一起静音，就把 match 写成空的——一个条件都不加。但那是"
+            "「这一族全部放行」，比看起来更像一个开关，写之前先确认你要的是这个。"
+        )
+
+
+def check_answerable(detector: str, match: dict[str, Any]) -> None:
+    """这个检测器查豁免吗；查的话，这条规则要问的事它答得了吗。
+
+    答不了（或者压根不查）就抛 `UnanswerableMatch`。两件事放在同一个函数里，
+    因为它们对写规则的人来说是同一种后果：**规则看起来在，实际不按他以为的走**。
+
+    和 `check_match` 分开是因为它们要的东西不一样：那个只看 `match` 的形状，
+    这个还要看**规则指的是哪个检测器**。两个入口（场景 YAML、过线的规则字典）
+    都从 `Exemption.__post_init__` 走，所以两条路报的是同一条错。
+    """
+    if detector not in EXEMPTION_AWARE:
+        raise UnanswerableMatch(
+            f"检测器 {detector} 不查豁免——这条规则永远不会命中。\n"
+            f"今天查豁免的只有 {sorted(EXEMPTION_AWARE)}。\n"
+            f"这不是键写错了：那条路上压根没有查豁免的那一步（记忆那几族是另一种"
+            f"情况，它们的例外机制是逐条声明的判据本身，见 NOT_EXEMPTIBLE）。\n"
+            f"一条永远不命中的规则比没有规则更坏——读报告的人会以为那件事已经"
+            f"处理过了。要豁免这一族，得先给它接上。"
+        )
+
+    answers = EXEMPTION_AWARE[detector]
+    unanswerable = sorted(set(match) - answers)
+    if not unanswerable:
+        return
+
+    lines = []
+    for key in unanswerable:
+        names = sorted(name for name, keys in EXEMPTION_AWARE.items() if key in keys)
+        if names:
+            lines.append(f"  {key} 今天只有 {'、'.join(names)} 答得了")
+        else:
+            lines.append(f"  {key} 今天没有任何检测器答得了——它对谁都是一句空话")
+    raise UnanswerableMatch(
+        f"检测器 {detector} 答不了这些 match 键：{unanswerable}。\n"
+        + "\n".join(lines)
+        + "\n答不了的结果不是「这条规则不生效」，是它永远也不会命中：调用点没把这个"
+        "事实传下来，比对的那一边是 None，而 None 跟 true、false 都不相等——所以"
+        "两种写法都一样是死规则。听起来比恒真好一点，其实一样坏：报告里「没有这条"
+        "结论」和「这条结论被豁免了」是同一个样子，你会以为自己处理过了。\n"
+        "换一个检测器、换一个键，或者把那个条件去掉——"
+        "不想要的条件应该删掉，而不是留下来当装饰。"
+    )
 
 
 @dataclass(frozen=True)
@@ -110,6 +204,15 @@ class Exemption:
     `match` 目前支持：
       - `arg_differs_on`: [字段名] —— 仅当两次调用的差异**只**出现在这些字段上时命中
       - `tool_has_idempotency`: bool —— 仅当工具声明了幂等保护时命中
+
+    **两个键都不是哪儿都能用的**：只有当场知道那件事的检测器才答得了它，见
+    `EXEMPTION_AWARE`。写到答不了的检测器上是加载期错误。
+
+    而且，**不是每个检测器都会去查豁免**。记忆那三族写在 `NOT_EXEMPTIBLE` 里，
+    另有五条路（`loop`、`loop.retry`、`loop.cross_session`、`loop.snapshot_replay`、
+    `idempotency.read_repeats`）压根没有查豁免那一步。两边都拒，理由不同：
+    记忆族是"本就有另一套例外机制，别叠两个开关"，那五条是"收了也不会有人看"。
+    但给写规则的人的后果是同一种——规则看起来在，实际不按他以为的走。
     """
 
     detector: str
@@ -135,6 +238,10 @@ class Exemption:
             check_match(self.match)
         except ValueError as exc:
             raise ValueError(f"豁免规则 {self!r} 的 {exc}") from exc
+        try:
+            check_answerable(self.detector, self.match)
+        except UnanswerableMatch as exc:
+            raise UnanswerableMatch(f"豁免规则 {self.label}：{exc}") from exc
 
     @property
     def label(self) -> str:
@@ -206,10 +313,23 @@ class ExemptionSet:
         tool: str,
         *,
         is_write: bool,
-        differing_fields: tuple[str, ...] = (),
-        tool_has_idempotency: bool = False,
+        differing_fields: tuple[str, ...] | None = None,
+        tool_has_idempotency: bool | None = None,
     ) -> Exemption | None:
-        """找一条命中的豁免。写操作且未显式允许 → 直接跳过，不豁免。"""
+        """找一条命中的豁免。写操作且未显式允许 → 直接跳过，不豁免。
+
+        两个事实参数写 `None` 的意思是**这个调用点答不了**（乒乓那一处不算
+        "两次调用差在哪些字段上"），不是"值是空/假"。规则要问而事实是 `None`
+        时**直接抛**，不按默认值算下去：
+
+        * 加载期那张表（`EXEMPTION_AWARE`）拦的是**人挑错了检测器**；
+        * 这里拦的是**调用点忘了把事实传下去**——表会漂，而"传没传"不会。
+
+        两道闸门防的不是同一件事，所以两道都要有。少了这一道，一个新加的
+        `find` 调用点就能让某条带条件的规则悄悄变成死规则（`None` 跟 true、false
+        都不相等，写哪个值都不命中）——报告上什么都看不出来，而这恰恰是豁免机制
+        （一个专门用来"让结论消失"的东西）最不能出的毛病。
+        """
         for rule in self.rules:
             if rule.detector != detector:
                 continue
@@ -220,6 +340,7 @@ class ExemptionSet:
 
             expected_diff = rule.match.get("arg_differs_on")
             if expected_diff is not None:
+                self._require_answered(rule, detector, "arg_differs_on", differing_fields)
                 # "差异只在 page 上"要求**确实存在差异且只在 page 上**。
                 # 不加 `differing_fields` 非空这个条件的话，参数完全相同的严格
                 # 重复也会被翻页豁免静音掉——而那是确定性最高的循环。
@@ -227,12 +348,35 @@ class ExemptionSet:
                     continue
                 if set(differing_fields) - set(expected_diff):
                     continue
-            if "tool_has_idempotency" in rule.match and (
-                bool(rule.match["tool_has_idempotency"]) != tool_has_idempotency
-            ):
-                continue
+            if "tool_has_idempotency" in rule.match:
+                self._require_answered(
+                    rule, detector, "tool_has_idempotency", tool_has_idempotency
+                )
+                if bool(rule.match["tool_has_idempotency"]) != tool_has_idempotency:
+                    continue
             return rule
         return None
+
+    @staticmethod
+    def _require_answered(
+        rule: Exemption, detector: str, key: str, answered: Any
+    ) -> None:
+        """规则问了、而这个调用点没答 → 抛。答了（哪怕是 False / 空元组）就放行。
+
+        判的是 `is None` 而不是真假：`False` 和 `()` 都是**答过的答案**，
+        `None` 才是"没人问过我这件事"。
+        """
+        if answered is not None:
+            return
+        raise UnanswerableMatch(
+            f"规则 {rule.label} 拿 {key} 当条件，而 {detector} 这一处调豁免时"
+            f"没有把这件事传下来。\n"
+            f"按默认值（None）算下去的话这条规则永远不命中——None 跟 true、false"
+            f"都不相等，写哪个值都一样。而它看起来完全正常：报告里「没有这条结论」"
+            f"和「这条结论被豁免了」是同一个样子。\n"
+            f"两条路：把这个检测器加进 EXEMPTION_AWARE 并在调用点把事实传下去，"
+            f"或者让这条规则换个条件。"
+        )
 
 
 def inconclusive(detector: str, summary: str, detail: dict[str, Any] | None = None) -> Finding:

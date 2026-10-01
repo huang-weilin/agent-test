@@ -25,7 +25,7 @@ import yaml
 
 from sandbox.corpus import load_corpus
 from sandbox.db.models import DetectorVerdict
-from sandbox.detectors.base import Exemption
+from sandbox.detectors.base import Exemption, ExemptionSet, UnanswerableMatch
 from sandbox.scenario import identity
 from sandbox.scenario.loader import ScenarioError, load_scenario
 from sandbox.scenario.runner import _run_detectors
@@ -152,6 +152,26 @@ def test_arg_differs_on_that_is_a_string_is_rejected(tmp_path: Path) -> None:
         _scenario_dict(exemptions=[_rule(match={"arg_differs_on": "page"})]),
         tmp_path,
         "字段名列表",
+    )
+
+
+def test_an_empty_field_list_is_rejected(tmp_path: Path) -> None:
+    """`arg_differs_on: []` 是一条写得出来、却永远不成立的条件。
+
+    「差异只在零个字段上」就是「两次调用完全相同」，而豁免那一侧**刻意**不让
+    这种重复命中（参数一模一样的重复是确定性最高的循环，静音它等于把最该报的
+    那件事关掉，见 `ExemptionSet.find` 里那个 `not differing_fields`）。所以这条
+    规则是死的：四种差异组合实测 0 次命中。
+
+    与写在答不了的检测器上是同一种坏，所以同一种处理。**空表和没给是两件事**，
+    这里也是：不写 `arg_differs_on` 是"不加这个条件"，写 `[]` 是"加一个永远不
+    成立的条件"——后者是装饰，而装饰会让读报告的人以为这件事有人管过。
+    """
+    _rejects(
+        _scenario_dict(exemptions=[_rule(match={"arg_differs_on": []})]),
+        tmp_path,
+        "空列表",
+        "arg_differs_on",
     )
 
 
@@ -314,4 +334,302 @@ def test_adding_an_exemption_is_a_change_to_the_grading_standard() -> None:
     assert identity.changed_sections(before, after) == ["expect"]
     assert "expect" in identity.TEST_SECTIONS, (
         "豁免落在的节必须属于「测试本身变了」——否则加了豁免的运行会被判成可比"
+    )
+
+
+# --- match 键：答不了它的检测器不许写 ------------------------------------------
+
+
+#: 这三种写法在补上闸门之前都是**常量**：规则看着像条件，跑起来永远同一个结果。
+#: 左边是检测器名，右边是它答不了的键。
+#:
+#: 具体是哪一种常量，实测过（拆掉两道闸门，每种写法跑三种调用组合）：**全是死规则，
+#: 一次都不命中**。调用点没传那个事实，比对的那一边就是 `None`，而 `None` 跟
+#: `True`、`False` 都不相等。写 `false` 并不会变成"无条件静音"——那种更刺激的说法
+#: 一开始就写进了注释和文档里，是后来真的跑了一遍才改掉的。
+CANNOT_ANSWER: list[tuple[str, dict[str, Any]]] = [
+    ("loop.strict", {"tool_has_idempotency": False}),
+    ("loop.strict", {"tool_has_idempotency": True}),
+    ("loop.ping_pong", {"arg_differs_on": ["page"]}),
+]
+
+
+@pytest.mark.parametrize(("detector", "match"), CANNOT_ANSWER)
+def test_a_key_the_detector_cannot_answer_is_refused_at_load(
+    detector: str, match: dict[str, Any], tmp_path: Path
+) -> None:
+    """键认得，这个检测器答不了——加载时就拒，不等它跑。
+
+    这两种写法的共同点是**报告上一个字都看不出来**：规则是死的（永远不命中，
+    因为调用点没把那个事实传下来，比对的那一边是 `None`，跟 true/false 都不
+    相等），而"没有这条结论"和"这条结论被豁免了"在报告里是同一个样子——
+    写规则的人于是以为自己处理过了。
+
+    一条不会命中的规则比没有这条规则更坏，所以在这里拒。报错要说清楚谁答得了——
+    只写"不支持"的话，写规则的人只会把键删掉，而他要的可能是换个检测器。
+    """
+    _rejects(
+        _scenario_dict(exemptions=[_rule(detector=detector, match=match)]),
+        tmp_path,
+        "答不了",
+        sorted(match)[0],
+    )
+
+
+def test_the_refusal_names_a_detector_that_actually_answers(tmp_path: Path) -> None:
+    """报错里点名的那些检测器，写上去必须真的能用。
+
+    这条防的是"把话说一半"：报错说"换一个检测器"，而它点的那个检测器自己
+    也答不了——比不提示更坏，用户会照着改，然后再撞一次墙。
+    """
+    with pytest.raises(ScenarioError) as excinfo:
+        load_scenario(
+            _write(
+                tmp_path,
+                _scenario_dict(
+                    exemptions=[
+                        _rule(detector="loop.ping_pong", match={"arg_differs_on": ["page"]})
+                    ]
+                ),
+            )
+        )
+    message = str(excinfo.value)
+    assert "loop.approximate" in message, message
+
+    # 报错点名的那一个，照着写要能加载通过
+    load_scenario(
+        _write(
+            tmp_path,
+            _scenario_dict(
+                exemptions=[
+                    _rule(detector="loop.approximate", match={"arg_differs_on": ["page"]})
+                ]
+            ),
+        )
+    )
+
+
+def test_an_answering_detector_really_answers() -> None:
+    """表里写着"答得了"的那几对，跑一遍真的不许抛。
+
+    上面那批测的是"拒得对不对"，这条测的是**拒的另一半**：表里的每一对都得是
+    真的。少了它，把表清空（全部拒绝）也是绿的——一个只会的"不"的闸门看起来
+    和一条严格的闸门一模一样。
+    """
+    item = _item("loop-approximate-non-monotonic")
+    scenario = Scenario.model_validate(
+        _scenario_dict(
+            exemptions=[
+                _rule(detector="loop.approximate", match={"arg_differs_on": ["page"]})
+            ]
+        )
+    )
+    findings = _run_detectors(scenario, _calls_of(item))
+    assert any(f.detector == "loop.approximate" for f in findings), "这条轨迹该出近似层结论"
+
+    idem = _item("idem-exemption-scoped-to-unprotected")
+    scenario = Scenario.model_validate(
+        _scenario_dict(
+            tools=[_tool("create_payment", is_write=True)],
+            exemptions=[
+                _rule(
+                    detector="idempotency",
+                    tool="create_payment",
+                    allow_write=True,
+                    match={"tool_has_idempotency": False},
+                )
+            ],
+        )
+    )
+    findings = _run_detectors(scenario, _calls_of(idem))
+    silenced = next(f for f in findings if f.detector == "idempotency")
+    assert silenced.exempted_by is not None, "幂等这一族答得了这个键，规则该命中"
+
+    # 答得了"零个键"的那几个名字同样是**真的**：它们查豁免，只是没有任何
+    # 当场知道的事可以当条件。这一条防的是把 `frozenset()` 读成"答不了任何东西
+    # 所以拒了吧"——那样 `autonomy.unauthorized` 这一类就只能靠
+    # `may_run_unattended: true` 表达，豁免里多出来的那个"为什么"就没了。
+    ping = _item("loop-ping-pong")
+    scenario = Scenario.model_validate(
+        _scenario_dict(
+            tools=[_tool("get_order", is_write=False), _tool("get_user", is_write=False)],
+            exemptions=[
+                _rule(detector="loop.ping_pong", tool="get_order", match={}),
+            ],
+        )
+    )
+    findings = _run_detectors(scenario, _calls_of(ping))
+    ping_pong = [f for f in findings if f.detector == "loop.ping_pong"]
+    assert ping_pong, "这条轨迹该出乒乓结论"
+    assert ping_pong[0].exempted_by is not None, "乒乓这一路会查豁免，零个键也该命中"
+
+    auto = _item("auto-unauthorized-write")
+    scenario = Scenario.model_validate(
+        _scenario_dict(
+            tools=[_tool("create_payment", is_write=True, may_run_unattended=False)],
+            # 第二段会话没人看着——"无人值守"是场景的显式声明，不是从调用里猜的。
+            sessions=[{"name": "有人看着", "script": []}, {"name": "没人看着", "autonomous": True}],
+            exemptions=[
+                _rule(
+                    detector="autonomy.unauthorized",
+                    tool="create_payment",
+                    allow_write=True,
+                    match={},
+                )
+            ],
+        )
+    )
+    findings = _run_detectors(scenario, _calls_of(auto))
+    unauthorized = [f for f in findings if f.detector == "autonomy.unauthorized"]
+    assert unauthorized, "这条轨迹该出越权结论"
+    assert unauthorized[0].exempted_by is not None, "越权这一路会查豁免，零个键也该命中"
+
+
+# --- 检测器名本身：不查豁免的那几条路 ------------------------------------------
+
+
+#: `KNOWN_DETECTORS` 里**压根没有查豁免那一步**的名字。
+#:
+#: 这张表和 `EXEMPTION_AWARE` 是一件事的两面：那边记"查，而且答得了这些键"，
+#: 这边记"不查"。分开写是因为它们的错法不同——那边写错会把规则变成常量，
+#: 这边写错只是规则永远不命中。对写规则的人来说后果一样：**规则看起来在，
+#: 实际不按他以为的走**，而报告里一个字都看不出来。
+#:
+#: 注意 `loop` 和 `loop.strict` 看着像父子，行为却不同：只有严格层那条路会去
+#: 找豁免。凭名字猜是不行的，所以这张表必须逐条写下来、并且被测试钉住。
+NO_EXEMPTION_STEP: list[str] = [
+    "loop",
+    "loop.retry",
+    "loop.cross_session",
+    "loop.snapshot_replay",
+    "idempotency.read_repeats",
+]
+
+
+@pytest.mark.parametrize("detector", NO_EXEMPTION_STEP)
+def test_a_detector_that_never_asks_is_refused_at_load(
+    detector: str, tmp_path: Path
+) -> None:
+    """这几条路上没有查豁免那一步，所以规则收下来也没人看。
+
+    **收下一条永远不会命中的规则，比拒了更坏**：报告里"没有这条结论"和"这条
+    结论被豁免了"是同一个样子，写规则的人于是以为自己处理过了。要豁免这一族，
+    得先给它把那一小步接上——那是改代码，不是改 YAML。
+    """
+    _rejects(
+        _scenario_dict(exemptions=[_rule(detector=detector, match={})]),
+        tmp_path,
+        "不查豁免",
+        detector,
+    )
+
+
+def test_every_known_detector_is_classified() -> None:
+    """14 个检测器名，每一个都得说清楚它属于哪一类。
+
+    这条是防漂的：以后有人加一个检测器、或者把某条路接上豁免，这张分类就必须
+    跟着动。少了它，新名字会静静地落进"没被任何一张表提到"的缝里——那时它是
+    `EXTRA` 之外的东西，两边都不拦，规则写上去照样不生效，而没有任何测试会红。
+    """
+    from sandbox.detectors import KNOWN_DETECTORS
+    from sandbox.detectors.base import EXEMPTION_AWARE, NOT_EXEMPTIBLE
+
+    classified = set(EXEMPTION_AWARE) | set(NOT_EXEMPTIBLE) | set(NO_EXEMPTION_STEP)
+    assert classified == set(KNOWN_DETECTORS), (
+        f"没被分类的：{sorted(set(KNOWN_DETECTORS) - classified)}；"
+        f"表里有、检测器列表里没有的：{sorted(classified - set(KNOWN_DETECTORS))}"
+    )
+
+
+def test_the_refusal_of_an_unaware_detector_is_not_an_unknown_detector(
+    tmp_path: Path,
+) -> None:
+    """报错得说对是哪一种错——"不查豁免"和"没这个名字"要走完全相反的修法。
+
+    说成"检测器名不认识"的话，写规则的人会去翻名字列表，然后换成另一个同样
+    不查豁免的名字，再撞一次墙。所以报错要点名今天**真的会查**的那几个。
+    """
+    with pytest.raises(ScenarioError) as excinfo:
+        load_scenario(
+            _write(
+                tmp_path,
+                _scenario_dict(exemptions=[_rule(detector="loop.retry", match={})]),
+            )
+        )
+    message = str(excinfo.value)
+    assert "loop.retry" in message, message
+    assert "loop.strict" in message, f"报错该点名真会查豁免的那几个：\n{message}"
+    assert "不认识的检测器" not in message, message
+
+
+# --- 运行时那道闸门：调用点忘了传事实 -----------------------------------------
+
+
+def test_find_raises_when_the_call_site_did_not_answer() -> None:
+    """加载期那张表拦的是**人挑错了检测器**；这里拦的是**调用点忘了传事实**。
+
+    两件事不一样：表可以漂（有人加了一个新的 find 调用点，而那个调用点不传
+    某个事实），而"传没传"在那个调用点上是一眼可见的。少了这一道，那条规则
+    就会悄悄退化成常量，报告上什么都看不出来——而豁免机制是专门用来让结论
+    消失的东西，它最不能出的就是这个毛病。
+    """
+    rules = ExemptionSet(
+        [
+            Exemption(
+                detector="loop.approximate",
+                tool="get_order",
+                reason="人工确认过",
+                match={"arg_differs_on": ["page"]},
+            )
+        ]
+    )
+    with pytest.raises(UnanswerableMatch) as excinfo:
+        rules.find("loop.approximate", "get_order", is_write=False)
+    assert "arg_differs_on" in str(excinfo.value)
+
+
+def test_an_empty_answer_is_still_an_answer() -> None:
+    """空元组是"答过了：没有差异"，不是"答不了"——判的是 `is None`，不是真假。
+
+    这一条是上面那道闸门最容易写错的地方：写成判真假的话，"这次调用两次参数
+    完全一样"会被读成"这个调用点答不了"，于是一次本该正常匹配的豁免直接炸掉
+    整个运行。空表和没给是两件事，这里也是同一条。
+    """
+    rules = ExemptionSet(
+        [
+            Exemption(
+                detector="loop.approximate",
+                tool="get_order",
+                reason="人工确认过",
+                match={"arg_differs_on": ["page"]},
+            )
+        ]
+    )
+    assert rules.find("loop.approximate", "get_order", is_write=False, differing_fields=()) is None
+    assert (
+        rules.find("loop.approximate", "get_order", is_write=False, differing_fields=("page",))
+        is not None
+    )
+
+
+def test_a_false_answer_is_still_an_answer() -> None:
+    """`False` 同一条道理：工具没有声明幂等保护，是一个答案，不是"没答"。"""
+    rules = ExemptionSet(
+        [
+            Exemption(
+                detector="idempotency",
+                tool="create_payment",
+                reason="上游有去重",
+                allow_write=True,
+                match={"tool_has_idempotency": False},
+            )
+        ]
+    )
+    assert (
+        rules.find("idempotency", "create_payment", is_write=True, tool_has_idempotency=False)
+        is not None
+    )
+    assert (
+        rules.find("idempotency", "create_payment", is_write=True, tool_has_idempotency=True)
+        is None
     )
