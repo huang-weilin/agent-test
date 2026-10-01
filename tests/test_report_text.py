@@ -10,11 +10,21 @@
 
   * 模板 —— `tests/test_api.py` 的 `test_templates_do_not_render_markdown_asterisks`
   * 场景 YAML 的自由文本 —— 本文件
-  * Python 源码里的非文档字符串 —— 本文件
+  * Python 源码里的非文档字符串 —— 本文件，`src/sandbox` 与 `scripts` 两棵树
 
 **为什么是"非文档字符串"而不是"能到报告的字符串"**：靠肉眼判断哪个字面量会进报告，
 迟早会漏，而漏掉的正是没人想到的那条路径。反过来，文档字符串和注释是给读代码的
 人看的，那里的 `**` 是有用的强调（本项目的注释一直这么写），必须放行。
+
+**为什么 `scripts` 也要在名单上**：这道闸门原先只扫 `src/sandbox`，而"报告"有一半
+是从 `scripts/` 里 `print` 出去的（校准报告、跨运行成本报告、冒烟脚本的汇总）。
+结果是**同一条规则在同一个仓库里有一条腿没盖**——量于 2026-10-01，`scripts/` 里当时
+有 4 处（`calibrate.py`、`calibrate_tokens.py`、`cost_report.py`、
+`run_walking_skeleton.py`），每一条都会在用户的终端里原样打出两个星号。
+
+**`tests/` 刻意不在名单上**：那里出现的 `**` 全在断言失败信息里，读的人是改代码的
+人、读的地方是 pytest 的 diff——不是产品的报告。把它们卷进来会把闸门变成噪音，
+而一个会误报的闸门迟早被整体忽略。
 """
 
 from __future__ import annotations
@@ -27,6 +37,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "sandbox"
+#: 会被扫星号的两棵源码树。`scripts/` 是报告的另一半出口（见文件头）。
+CODE_TREES = (SRC, ROOT / "scripts")
 SCENARIOS = ROOT / "scenarios"
 CORPUS = ROOT / "tests" / "corpus"
 
@@ -66,7 +78,8 @@ def _string_literals(path: Path):
 def test_python_report_strings_have_no_markdown_asterisks() -> None:
     offenders = [
         f"{path.relative_to(ROOT)}:{lineno}: {text.strip()[:100]}"
-        for path in sorted(SRC.rglob("*.py"))
+        for tree in CODE_TREES
+        for path in sorted(tree.rglob("*.py"))
         for lineno, text in _string_literals(path)
         if "**" in text
     ]

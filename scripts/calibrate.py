@@ -92,7 +92,7 @@ def _print_caveats(results: list[ItemResult]) -> None:
     print("\n这些数字说的是")
     total = len(results)
     print(f"  · 语料共 {total} 条，全部手写并逐条标注。")
-    print("  · 精确率/召回率是**关于这份语料**的陈述，不是关于世界的。")
+    print("  · 精确率/召回率是「关于这份语料」的陈述，不是关于世界的。")
     print("  · 标着公开来源的那几条，复现的是威胁类型，不是论文/案例库里的原始轨迹。")
     print("  · 真实脱敏轨迹（需签授权）尚未收进语料。")
     print(f"  · 一条误报就能让 n={total} 上的精确率掉几个百分点——结论要更硬，得先把语料做大。")

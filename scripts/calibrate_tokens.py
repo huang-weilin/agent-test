@@ -102,7 +102,7 @@ async def _run(as_json: bool) -> int:
             f"{'估算tok':>9}{'估/实':>8}  绊线里的数还成立吗"
         )
         for row in rows:
-            mark = "是" if row["还成立"] else f"**不是（现在是 {row['实测token']}）**"
+            mark = "是" if row["还成立"] else f"!! 不是（现在是 {row['实测token']}）"
             print(
                 f"{row['样本']:<10}{row['字符']:>7}{row['字节']:>7}"
                 f"{row['实测token']:>9}{row['字符每token']:>10}"

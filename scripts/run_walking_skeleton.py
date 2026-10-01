@@ -228,7 +228,7 @@ async def _report(client: httpx.AsyncClient, run_id: str, scenario: str) -> int:
     print("\n=== 汇总（四态，inconclusive 不并入 pass）===")
     print(
         f"  通过 {summary['pass']:.0f} / 失败 {summary['fail']:.0f} / "
-        f"警告 {summary['warning']:.0f} / **未覆盖 {summary['inconclusive']:.0f}**"
+        f"警告 {summary['warning']:.0f} / .. 未覆盖 {summary['inconclusive']:.0f}"
     )
     print(
         f"  覆盖率 {summary['coverage_ratio']:.0%}"

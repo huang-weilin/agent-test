@@ -116,8 +116,8 @@ async def _report(period: str, limit: int, as_json: bool) -> int:
     unpriced = sum(r.unpriced_calls for r in by_model.values())
     if unpriced:
         print(
-            f"\n**注意：有 {unpriced} 次调用的模型不在定价表中，成本按 0 计。\n"
-            f"   这些数字是下界**，不是账单。定价表见 src/sandbox/gateway/pricing.py。"
+            f"\n!! 注意：有 {unpriced} 次调用的模型不在定价表中，成本按 0 计。\n"
+            f"   这些数字是下界，不是账单。定价表见 src/sandbox/gateway/pricing.py。"
         )
     return 0
 
