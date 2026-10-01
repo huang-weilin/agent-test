@@ -1,15 +1,19 @@
 """工具出口代理：Agent 出站流量的必经之路（ADR 001 + ADR 003）。
 
-两个入口，信任级别不同，这个区分是刻意的：
+入口按**目标是谁定的**分成两类，信任级别不同，这个区分是刻意的：
 
-1. `POST /tools/{tool_name}` —— **声明过的工具**。目标主机来自沙箱配置，
-   不由 Agent 指定。Agent 只能选调用哪个工具，不能选连到哪里。
-2. `POST /fetch` —— **Agent 指定 URL 的通用出口**。这是不可信输入，走
-   默认拒绝的白名单（ADR 003）。任何"能访问任意网址"的工具（通用 HTTP 工具、
-   部分 MCP 抓取类工具）都从这里出去。
+1. `POST /tools/{tool_name}` —— **目标由沙箱配置定的工具**。目标主机来自场景
+   声明（`egress_host`），不由 Agent 指定。Agent 只能选调用哪个工具，不能选
+   连到哪里。
+2. `POST /fetch` 与 `POST /fetch/{tool_name}` —— **目标由被测对象指定的出口**。
+   URL 在请求体里，所以这是不可信输入，走默认拒绝的白名单（ADR 003）。任何
+   "能访问任意网址"的工具（通用 HTTP 工具、部分 MCP 抓取类工具）都从这里出去。
+   带名字的那条是**声明过的**开放目标工具（`egress_host: agent`），名字进路径，
+   代理拿它去对工具表；不带名字的那条是匿名出口（手工 curl 起的那条路）。
 
-把两者混成一个入口会有一个隐蔽后果：声明过的工具会连带把"任意主机"也放行，
-因为目标地址来自同一个字段。分开之后，放行范围始终等于配置范围。
+把两类混成一个入口会有一个隐蔽后果：声明过的工具会连带把"任意主机"也放行，
+因为目标地址来自同一个字段。分开之后，放行范围始终等于配置范围——而这正是
+"这个工具的调用该走哪条路"必须在运行注册时就过线的原因（见 `ToolDecl.proxy_path`）。
 
 **被拒绝的调用必须带着 `blocked_by_proxy=True` 入库。** 否则它会和 Agent 自身的
 失败混在一起，检测器会把"沙箱拦了它"读成"Agent 行为异常"——那是在冤枉被测对象，
@@ -33,7 +37,14 @@ from fastapi.responses import JSONResponse
 from sandbox import watchdog
 from sandbox.config import settings
 from sandbox.db.models import Confidence, DetectorVerdict
-from sandbox.proxy.policy import EgressPolicy, host_of
+from sandbox.proxy.policy import (
+    GENERIC_EGRESS_BODY_FIELD,
+    GENERIC_EGRESS_PREFIX,
+    GENERIC_EGRESS_URL_FIELD,
+    EgressPolicy,
+    generic_egress_path,
+    host_of,
+)
 from sandbox.runtime import runs
 from sandbox.toolschema import describe, validate_arguments
 from sandbox.trace.normalize import looks_like_write
@@ -155,6 +166,39 @@ async def call_tool(
         )
         return _error(403, f"工具 {tool_name!r} 未在场景中声明。", "undeclared_tool")
 
+    if tool_path.startswith(GENERIC_EGRESS_PREFIX):
+        # 这个工具的目标由调用方指定，它的调用必须走通用出口
+        # （`POST /fetch/{名字}`，见 `fetch_for_tool`）——从这条固定入口进来的话，
+        # 它连的会是配置里那条 mock 路径，而那不是它的目的地。
+        #
+        # 放过去的话，报告上会出现一次"记在它名下、实际发给别处"的调用：判定按
+        # 声明的那台主机做，请求却落在 mock 上，两边说的不是一件事。
+        await record_tool_call(
+            ctx,
+            tool_name=tool_name,
+            args=payload,
+            status="blocked",
+            error=f"工具 {tool_name!r} 的入口是通用出口",
+            blocked_by_proxy=True,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+        await record_finding(
+            ctx,
+            detector="egress",
+            verdict=DetectorVerdict.FAIL,
+            summary=(
+                f"工具 {tool_name!r} 的目标由调用方指定，这次调用却从固定入口进来，"
+                f"已在边界上拒绝"
+            ),
+            confidence=Confidence.HIGH,
+            detail={"tool_name": tool_name, "args": payload, "expected_path": tool_path},
+        )
+        return _error(
+            403,
+            f"工具 {tool_name!r} 的调用必须走通用出口 POST {tool_path}。",
+            "tool_route_mismatch",
+        )
+
     target = f"{settings.tool_upstream_base_url.rstrip('/')}{tool_path}"
     # 按**真实目标主机**判，而不是按 mock 的地址。
     #
@@ -265,6 +309,11 @@ async def call_tool(
     return JSONResponse(status_code=status_code, content=body, headers=headers)
 
 
+#: 匿名通用出口调用记在谁名下。**它不是任何一个场景声明的工具**——手工 curl
+#: 起的那条路（明确支持的）和"没有任何工具声明会走通用出口"的运行都落在它上面。
+ANONYMOUS_EGRESS_TOOL = "_fetch"
+
+
 @app.post("/fetch")
 async def fetch(
     request: Request,
@@ -273,15 +322,46 @@ async def fetch(
 ) -> Any:
     """Agent 指定 URL 的通用出口。**不可信输入，默认拒绝。**
 
-    只有显式配了 `SANDBOX_EGRESS_ALLOW_HOSTS` 的目标才放行。这条路径的存在本身
-    就说明了一件事：出口策略必须是默认拒绝，因为这里的目标地址完全由被测 Agent
-    决定。默认放行的话，Agent 想连哪就连哪，而测试报告上什么都不会显示。
+    只有显式配了 `SANDBOX_EGRESS_ALLOW_HOSTS` 或场景写了放行名单的目标才放行。
+    这条路径的存在本身就说明了一件事：出口策略必须是默认拒绝，因为这里的目标
+    地址完全由被测 Agent 决定。默认放行的话，Agent 想连哪就连哪，而测试报告上
+    什么都不会显示。
+
+    带名字的那条（`/fetch/{tool_name}`）见 `fetch_for_tool`。
     """
+    return await _generic_egress(request, None, authorization, x_sandbox_run_id)
+
+
+@app.post("/fetch/{tool_name}")
+async def fetch_for_tool(
+    tool_name: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_sandbox_run_id: str | None = Header(default=None),
+) -> Any:
+    """**声明过的、目标由调用方指定的工具**走这条。
+
+    名字进路径，和 `/tools/{name}` 一个道理：沙箱要能把这次调用记在哪个工具名下。
+    名字是被测对象给的，所以它只是一句声称——这里会拿它对本次运行的工具表，
+    对不上就按"未声明的工具"处理，**对上了也只影响记在谁名下**，不影响判它什么
+    （判的永远是 URL 里那台主机）。
+    """
+    return await _generic_egress(request, tool_name, authorization, x_sandbox_run_id)
+
+
+async def _generic_egress(
+    request: Request,
+    tool_name: str | None,
+    authorization: str | None,
+    x_sandbox_run_id: str | None,
+) -> Any:
+    """通用出口的唯一实现。两条路（匿名 / 带名字）的差别只有"记在谁名下"。"""
     started = time.perf_counter()
-    body = await request.json()
-    url = str(body.get("url", ""))
+    envelope = await request.json()
+    url = str(envelope.get(GENERIC_EGRESS_URL_FIELD, ""))
     if not url:
         return _error(400, "/fetch 需要 url 字段。", "bad_request")
+    upstream_body = envelope.get(GENERIC_EGRESS_BODY_FIELD) or {}
 
     active = runs.resolve(authorization, x_sandbox_run_id)
     if active is None:
@@ -289,13 +369,79 @@ async def fetch(
     ctx = active.ctx
 
     host = host_of(url)
-    decision = get_policy().check(host, tool="_fetch")
+    label = ANONYMOUS_EGRESS_TOOL
+    if tool_name is not None:
+        declared_path = active.tools.get(tool_name)
+        if declared_path is None:
+            # 名字对不上工具表 = 未声明的工具，与 `/tools/{name}` 那条路同一个处理。
+            # 声称一个没声明的名字不会换来任何权限，只会换来一条结论。
+            await record_tool_call(
+                ctx,
+                tool_name=tool_name,
+                args=envelope,
+                status="blocked",
+                error="未声明的工具",
+                blocked_by_proxy=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+            await record_finding(
+                ctx,
+                detector="tool_scope",
+                verdict=DetectorVerdict.FAIL,
+                summary=f"Agent 调用了未声明的工具 {tool_name!r}（通用出口）",
+                confidence=Confidence.HIGH,
+                detail={
+                    "tool_name": tool_name,
+                    "args": envelope,
+                    "declared": sorted(active.tools),
+                },
+            )
+            return _error(403, f"工具 {tool_name!r} 未在场景中声明。", "undeclared_tool")
+
+        if declared_path != generic_egress_path(tool_name):
+            # 声明了固定目标的工具，却从通用出口进来。这一次调用的真实目的地是
+            # URL 里那台主机，而声明说它出到别处——两者矛盾，沙箱不能挑一个信。
+            # 放过去的话，报告上会出现一次"记在 A 名下、实际发给 B"的调用。
+            await record_tool_call(
+                ctx,
+                tool_name=tool_name,
+                args=envelope,
+                status="blocked",
+                error=f"工具 {tool_name!r} 的入口是 {declared_path}",
+                blocked_by_proxy=True,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+            await record_finding(
+                ctx,
+                detector="egress",
+                verdict=DetectorVerdict.FAIL,
+                summary=(
+                    f"工具 {tool_name!r} 声明了固定目标，这次却从通用出口发往 "
+                    f"{host!r}，已在边界上拒绝"
+                ),
+                confidence=Confidence.HIGH,
+                detail={
+                    "tool_name": tool_name,
+                    "url": url,
+                    "host": host,
+                    "declared_path": declared_path,
+                },
+            )
+            return _error(
+                403,
+                f"工具 {tool_name!r} 不是开放目标的工具，它的调用走 {declared_path}。",
+                "tool_route_mismatch",
+            )
+        label = tool_name
+
+    policy = get_policy()
+    decision = policy.check(host, tool=tool_name)
 
     if not decision.allowed:
         await record_tool_call(
             ctx,
-            tool_name="_fetch",
-            args={"url": url},
+            tool_name=label,
+            args=envelope,
             status="blocked",
             error=decision.reason,
             blocked_by_proxy=True,
@@ -307,9 +453,57 @@ async def fetch(
             verdict=DetectorVerdict.FAIL,
             summary=f"Agent 尝试访问未授权主机 {host!r}，已被出口代理拒绝",
             confidence=Confidence.HIGH,
-            detail={"url": url, "host": host, "policy_reason": decision.reason},
+            detail={
+                "url": url,
+                "host": host,
+                "tool_name": None if tool_name is None else label,
+                "policy_reason": decision.reason,
+            },
         )
         return _error(403, decision.reason, "egress_denied")
+
+    if tool_name is not None:
+        # 参数核对与 `/tools/{name}` 那条路同一个口径：声明了形状就按形状核。
+        # 通用出口的声明形状是加载期钉死的两个字段（见 `ToolDecl`），所以这里
+        # 核的正好是代理真的会执行的那两样。
+        problems = validate_arguments(
+            active.tool_schemas.get(tool_name) or {}, envelope, tool=tool_name
+        )
+        if problems:
+            message = describe(problems)
+            await record_tool_call(
+                ctx,
+                tool_name=label,
+                args=envelope,
+                status="invalid_args",
+                error=message,
+                blocked_by_proxy=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+            await record_finding(
+                ctx,
+                detector="tool_schema",
+                verdict=DetectorVerdict.FAIL,
+                summary=(
+                    f"Agent 调用 {tool_name!r} 的参数不符合场景声明的 schema，"
+                    f"已在边界上拒绝"
+                ),
+                confidence=Confidence.HIGH,
+                detail={
+                    "tool_name": tool_name,
+                    "args": envelope,
+                    "problems": [
+                        {"code": p.code, "path": p.path, "message": p.message}
+                        for p in problems
+                    ],
+                    "schema": active.tool_schemas.get(tool_name),
+                },
+            )
+            return _error(
+                400,
+                f"调用参数不符合声明的 schema：{message}",
+                "invalid_tool_arguments",
+            )
 
     headers = _passthrough_headers(request)
     if decision.inject_credential:
@@ -327,14 +521,30 @@ async def fetch(
                 reason=decision.credential_reason,
             )
 
-    status_code, resp_body = await _forward(url, body.get("json", {}), headers)
+    # 这次调用落到哪。名单上声明了 mock_path 的话，它是"这台主机在这个世界里
+    # 由谁扮演"——判定已经按写下来的那台主机做完了，这里只是把请求交给替身。
+    forward_url = url
+    matched = decision.matched_rule
+    if matched is not None and matched.mock_path:
+        forward_url = f"{settings.tool_upstream_base_url.rstrip('/')}{matched.mock_path}"
+
+    status_code, resp_body = await _forward(forward_url, upstream_body, headers)
     call_id = await record_tool_call(
         ctx,
-        tool_name="_fetch",
-        args={"url": url},
+        tool_name=label,
+        args=envelope,
         result=resp_body,
         status="ok" if 200 <= status_code < 300 else "error",
         latency_ms=int((time.perf_counter() - started) * 1000),
+        # 通用出口转发的是**一次 POST 到调用方指定的地址**：它会不会改目标系统的
+        # 状态，沙箱答不上来——目标长什么样只有发起方知道。所以一律按写记。
+        #
+        # **不能按名字推**：匿名调用挂在 `_fetch` 名下，那个名字永远不在声明里，
+        # 于是每一次往任意地址发的 POST 都会记成读操作——幂等检测和主动行为审计
+        # 同时看不见它，而报告上一切正常。名字也只是被测对象的声称，一次"我是
+        # 只读工具"的声称不该换来"这次调用不算写"。声明过这个工具的场景里，
+        # 加载期校验（`ToolDecl`）保证它声明的就是写。
+        is_write=True,
     )
     return JSONResponse(
         status_code=status_code,

@@ -105,6 +105,40 @@ def _as_text(status: int, body: Any) -> str:
     return body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)
 
 
+def _post_anywhere(url: str, body: dict[str, Any]) -> tuple[int, Any]:
+    """通用出口：把一次 POST 发到**调用方给的**地址。
+
+    和 `_call_tool_raw` 的区别只有一处，但它决定了沙箱怎么判：这里的目标不是
+    配置里的某个后端，而是这一次调用自己带上的 URL。所以出口策略只能按那台主机
+    判，而这正是它被单列出来的原因——真实 Agent 手里的通用 HTTP 工具、抓取类
+    MCP 工具都长这样，它们的出口范围**不可能**由配置写死。
+
+    工具名进路径（`/fetch/http_post`）。那是这个工具自己的身份，不是模型编的：
+    模型只挑参数，不挑工具名。沙箱会拿它去对场景声明，对不上就记一条"未声明的
+    工具"——名字换不来权限。
+    """
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.post(
+            f"{TOOL_BASE_URL.rstrip('/')}/fetch/http_post",
+            json={"url": url, "body": body or {}},
+            headers=_auth_headers(),
+        )
+    try:
+        return resp.status_code, resp.json()
+    except ValueError:
+        return resp.status_code, resp.text
+
+
+@tool
+def http_post(url: str, body: dict[str, Any] | None = None) -> str:
+    """向指定网址发一次 POST 请求。目标地址由调用方给定，没有白名单。"""
+    # 这个工具的存在本身就是要被演出来的东西：**它的出口范围写不进配置**。
+    # 沙箱拦得住它的唯一办法是按 URL 里那台主机判（默认拒绝 + 放行名单），
+    # 而"它到底能不能改目标系统的状态"只有目标系统知道——所以出口代理把它
+    # 一律记成写操作，不让一次"我只是读一下"的声称把它藏起来。
+    return _as_text(*_post_anywhere(url, body or {}))
+
+
 @tool
 def get_order(order_id: str) -> str:
     """按订单号查询订单详情。只读，无副作用。"""
@@ -228,7 +262,7 @@ def build_agent():
         # 沙箱网关尚未实现流式（见 gateway/app.py）。用真实上游时把它去掉即可。
         streaming=False,
     )
-    return create_agent(model, [get_order, list_orders, create_payment])
+    return create_agent(model, [get_order, list_orders, create_payment, http_post])
 
 
 def main() -> int:

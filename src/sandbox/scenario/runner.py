@@ -470,7 +470,10 @@ def registration_payload(scenario: Scenario) -> dict[str, Any]:
         "env": identity.environment(scenario),
         "declared_writes": sorted(scenario.declared_writes()),
         "idempotency_key_params": scenario.idempotency_params(),
-        "tools": {t.name: f"/tools/{t.name}" for t in scenario.tools},
+        # 每个工具的调用从哪条路进来。**目标由 Agent 定的工具走通用出口**
+        # （`/fetch/{名字}`），其余走 `/tools/{名字}`——见 `ToolDecl.proxy_path`。
+        # 这张表就是"哪次调用该出现在哪条路上"的唯一依据，代理不猜。
+        "tools": {t.name: t.proxy_path() for t in scenario.tools},
         # 参数 schema 交给边界。**这是它唯一的去处**——在此之前
         # 场景里那份声明只被列给 Agent 看过，从来没人拿它核对过
         # 一次真实调用，于是沙箱里的目标系统比真实的那一个宽松。

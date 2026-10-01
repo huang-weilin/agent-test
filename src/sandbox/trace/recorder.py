@@ -381,8 +381,16 @@ async def record_tool_call(
     replay_reason: str | None = None,
     blocked_by_proxy: bool = False,
     seq: int | None = None,
+    is_write: bool | None = None,
 ) -> str:
-    """落一条工具调用。返回其 id，便于检测器在 detail_json 里引用。"""
+    """落一条工具调用。返回其 id，便于检测器在 detail_json 里引用。
+
+    `is_write=None` 时按工具名推（声明优先，见 `looks_like_write`）。**传了就以
+    传进来的为准**——那是路由层掌握的事实，名字里读不出来：通用出口转发的是一次
+    POST，而它记在哪个名字下由被测对象说（甚至可能什么都没说）。按名字推的话，
+    一次往任意地址发的 POST 会被记成读操作，于是幂等和主动行为审计都看不见它
+    ——报告上完全正常，只是少了一次扣款。
+    """
     raw_args = args or {}
     normalized = normalize_args(raw_args)
     arg_hash = structural_hash(tool_name, normalized)
@@ -409,7 +417,11 @@ async def record_tool_call(
                 ),
                 status=status,
                 error=error,
-                is_write=looks_like_write(tool_name, ctx.declared_writes),
+                is_write=(
+                    is_write
+                    if is_write is not None
+                    else looks_like_write(tool_name, ctx.declared_writes)
+                ),
                 idempotency_key=ctx.extract_idempotency_key(tool_name, raw_args),
                 replay_reason=replay_reason,
                 blocked_by_proxy=blocked_by_proxy,

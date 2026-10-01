@@ -22,6 +22,62 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+#: `egress_host` 的**保留值**：这个工具的目标由被测对象在调用时指定。
+#:
+#: 它是唯一一类"目标不是说好的那台"的出口。所以它不是一个主机名，而是一句
+#: 关于工具的声明——这个工具本身**没有**可声明的目标，判定只能按它实际要连的
+#: 那台做。保留给这个意思，不做别用：真有一台主机叫这个名字的话，它写不进来，
+#: 这是刻意的——一个值一旦既是主机名又是保留字，读的人没法从字面上分辨一条
+#: 声明是哪个意思。
+AGENT_CHOOSES_HOST = "agent"
+
+#: 通用出口的路径前缀。目标由 Agent 定的工具，调用从这里进来。
+GENERIC_EGRESS_PREFIX = "/fetch"
+
+#: 通用出口信封里的两个字段：`url` 是目的地，`body` 是转发到那里的请求体。
+#:
+#: **只有这两个，而且是加载期校验过的**（见 `ToolDecl`）：目标由 Agent 定的工具
+#: 在场景里声明参数时，声明只能是这个形状。不这么钉死的话，场景可以给这种工具
+#: 声明一个目标系统的 schema——而那条路上没人执行它（沙箱不知道目标系统接受
+#: 什么），于是"写了却没人核对"的那类失效又回来了。
+GENERIC_EGRESS_URL_FIELD = "url"
+GENERIC_EGRESS_BODY_FIELD = "body"
+
+
+def generic_egress_path(tool_name: str) -> str:
+    """目标由 Agent 定的工具，它的调用走哪条路进来。
+
+    **带上工具名**，和 `/tools/{名字}` 一个道理：沙箱要能把这次调用记在哪个
+    工具名下。名字是被测对象给的（它写 URL），所以它只是一句**声称**——代理会
+    拿它去对本次运行的工具表，对不上照样按"未声明的工具"处理。它影响的是
+    这次调用**记在谁名下**，不影响判它什么（判的是 URL 里那台主机）。
+    """
+    return f"{GENERIC_EGRESS_PREFIX}/{tool_name}"
+
+
+def checked_mock_path(value: str, *, what: str) -> str:
+    """模拟世界里"这台主机由谁扮演"的那条路径写对了没有。
+
+    拦住两种写法：不写路径（那是 URL 的写法，会让代理拼出一个指向别处的东西）
+    和带协议（`http://evil.test/x`——它看起来像"改投到 mock"，实际是把判定过
+    的那台主机换成另一台）。
+    """
+    path = (value or "").strip()
+    if not path:
+        raise ValueError(f"{what}不能为空。")
+    if "://" in path:
+        raise ValueError(
+            f"{what} {path!r} 里带了协议。这里要的是 mock 上的路径（例如 "
+            f"/tools/create_payment），不是一条 URL——写 URL 等于把判定过的主机"
+            f"换成另一台。"
+        )
+    if not path.startswith("/"):
+        raise ValueError(
+            f"{what} {path!r} 不是一条路径（要以 / 开头）。"
+            f"要的是 mock 上的路径，例如 /tools/create_payment。"
+        )
+    return path
+
 
 @dataclass(frozen=True)
 class AllowRule:
@@ -30,8 +86,25 @@ class AllowRule:
     host: str
     tool: str | None = None
     reason: str = ""
+    #: 这个世界里，这台主机由 mock 的哪条路径扮演。`None` = 不翻译，真的发过去。
+    #:
+    #: 模拟出来的外部系统（合作方的回调地址、第三方接口）并不存在，出去的请求
+    #: 得有个落点。写一条 mock 上的路径，代理就把这次调用改投到那儿，而判定
+    #: 照旧按**写下来的那台主机**做——这正是"沙箱里每个工具连的都是自己的
+    #: mock，真实部署里它们各是一台机器"在通用出口上的同一件事。
+    #:
+    #: 它**不是一条授权**：写不写、写成什么，都不影响放不放行，只影响这次调用
+    #: 落在哪。不写它的放行是真出口——在测试环境里通常连不出去，那也是一种
+    #: 如实的失败，不是静默放行。
+    mock_path: str | None = None
 
     def __post_init__(self) -> None:
+        if self.mock_path is not None:
+            object.__setattr__(
+                self,
+                "mock_path",
+                checked_mock_path(self.mock_path, what=f"放行规则 {self.host!r} 的 mock_path"),
+            )
         if "*" in self.host:
             raise ValueError(
                 f"主机白名单不支持通配（收到 {self.host!r}）："
@@ -71,6 +144,13 @@ def checked_host(value: str, *, what: str) -> str:
     host = (value or "").strip()
     if not host:
         raise ValueError(f"{what}的主机名不能为空。")
+    if host.lower() == AGENT_CHOOSES_HOST:
+        raise ValueError(
+            f"{what}的主机名是保留值 {AGENT_CHOOSES_HOST!r}。它表示「这台主机由被测"
+            f"对象在调用时指定」，是一句关于工具的声明，不是一台真的主机——"
+            f"名单里写它只会得到一条永远不命中的规则。要声明开放式目标，"
+            f"写在那个工具的 egress_host 上。"
+        )
     if "://" in host:
         raise ValueError(
             f"{what}的主机名 {host!r} 里带了协议。这里要的是主机名本身"
@@ -120,12 +200,27 @@ class EgressPolicy:
         self.default = default
         self.credential_rules = list(credential_rules or [])
         self.tool_hosts = dict(tool_hosts or {})
+        # 保留值不许进这张表。放进去的话 `declared_host` 会返回字面量 "agent"，
+        # 于是这个工具的每一次调用都按一台名叫 agent 的主机判——一律拒绝，
+        # 而报告上写着「Agent 访问了未授权主机」，归因完全反了。
+        reserved = sorted(n for n, h in self.tool_hosts.items() if h == AGENT_CHOOSES_HOST)
+        if reserved:
+            raise ValueError(
+                f"工具 {reserved} 的目标由被测对象指定（egress_host 写了保留值 "
+                f"{AGENT_CHOOSES_HOST!r}），它们不该出现在 tool_hosts 里"
+                f"——那张表回答的是「这个工具出到哪台主机」，而这几个工具没有"
+                f"可写下来的目标。"
+            )
 
     def declared_host(self, tool_name: str, fallback: str) -> str:
         """这次调用该按哪台主机判。
 
         声明过就用声明的那台（真实环境里的目标），没声明就用它实际连的那台
         ——后者是沙箱的内部组件，由 `default_policy()` 自动放行。
+
+        **目标由被测对象指定的工具不在 `tool_hosts` 里**（见 `__init__` 的检查），
+        所以它们走的正是回落那一支：按这次调用实际要连的那台主机判。调用方
+        传进来的 `fallback` 就是那条 URL 里的主机。
         """
         return self.tool_hosts.get(tool_name) or fallback
 
@@ -194,6 +289,9 @@ def policy_with_rules(
 
     追加也不构成后门：声明过 `egress_host` 的工具**不按**它实际连的那台判，
     而是按真实目标主机判（见 `declared_host`），所以内部例外碰不到它们。
+    目标由被测对象指定的那些（保留值，见 `AGENT_CHOOSES_HOST`）反过来：
+    它们的 `tool_hosts` 项在场景侧就被摘掉了（`Scenario.egress_policy`），
+    于是内部例外同样碰不到它们——判的永远是 URL 里那台主机。
     """
     base = default_policy()
     return EgressPolicy(

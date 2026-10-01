@@ -28,7 +28,17 @@ from sandbox.db.models import DetectorVerdict
 from sandbox.detectors.base import Exemption, ExemptionSet
 from sandbox.detectors.loop import checked_field_weights
 from sandbox.detectors.memory import ForbiddenText, MemoryRules, MustHold
-from sandbox.proxy.policy import AllowRule, EgressPolicy, checked_host, policy_with_rules
+from sandbox.proxy.policy import (
+    AGENT_CHOOSES_HOST,
+    GENERIC_EGRESS_BODY_FIELD,
+    GENERIC_EGRESS_URL_FIELD,
+    AllowRule,
+    EgressPolicy,
+    checked_host,
+    checked_mock_path,
+    generic_egress_path,
+    policy_with_rules,
+)
 from sandbox.toolschema import check_schema
 
 
@@ -104,16 +114,30 @@ class ToolDecl(BaseModel):
     #:
     #: **要不要写，由场景有没有声明出口名单决定**（见下面那条跨字段校验）：
     #: 不声明名单时这个字段一次都不会被读到，写了也只会让人以为限制了什么。
+    #:
+    #: 它还可以写**保留值**（`agent`）：这个工具的目标由被测对象在调用时指定。
+    #: 那是唯一一类"目标不是说好的那台"的工具（通用 HTTP 工具、抓取类 MCP 工具
+    #: 都是这样），它的出口只能按**这次调用实际要连的那台主机**判，声明固定主机
+    #: 就成了编造。它和写主机的工具一样要交代自己，只是交代的内容不同——
+    #: 一个说"我出到哪"，一个说"我出到哪由它定"。
     egress_host: str | None = None
 
     @model_validator(mode="after")
     def _egress_host_is_a_host(self) -> ToolDecl:
-        """写了就得是个主机名。规则本身在 `checked_host` 里，与场景那边的名单共用。
+        """写了就得是个主机名——或者是那个保留值。
 
-        两边只留一份实现：一份写错了的规则**不会报错，只会永远不命中**——
-        报告上看起来像"这次运行没放行它"，而真相是那行字压根没参与过判定。
+        主机名的规则本身在 `checked_host` 里，与场景那边的名单共用。两边只留
+        一份实现：一份写错了的规则**不会报错，只会永远不命中**——报告上看起来
+        像"这次运行没放行它"，而真相是那行字压根没参与过判定。
+
+        保留值在这里先接住（`checked_host` 见到它会报错，那是给名单用的：
+        名单里写它只会得到一条永不命中的规则）。存回去的是规整过的小写值，
+        下面所有判断都按字面比。
         """
         if self.egress_host is not None:
+            if self.egress_host.strip().lower() == AGENT_CHOOSES_HOST:
+                self.egress_host = AGENT_CHOOSES_HOST
+                return self
             # 规整过的值**存回去**：`checked_host` 校验的是去过空白、小写过的
             # 版本，而放行名单是按字符串逐字比对的。不存回去的话，
             # `" Payments.example.com"` 能通过校验，然后在判定时永远不命中
@@ -122,6 +146,122 @@ class ToolDecl(BaseModel):
                 self.egress_host, what=f"工具 {self.name!r} 的 egress_host"
             )
         return self
+
+    @model_validator(mode="after")
+    def _an_open_target_declares_the_route_protocol(self) -> ToolDecl:
+        """目标由 Agent 定的工具，参数声明只能是通用出口的那两个字段。
+
+        通用出口只做一件事：把 `body` 原样 POST 到 `url`。所以沙箱**能核对**的
+        就只有这两样，能执行的也只有这两样。声明成别的形状会有两种坏法，都是
+        这份文件一直在防的那种：
+
+        - 声明了目标系统的 schema（"这个接口要 order_id 和 amount"）：那条路上
+          没人执行它——沙箱不知道目标系统接受什么，那个形状只有目标系统自己
+          说了算。写了却没人核对，正是我们最不想要的失效。
+        - 声明了工具自己都不用的参数（`method`、`headers` 之类）：路由永远发
+          POST、头由 `_passthrough_headers` 决定，于是那些字段名存实亡。
+
+        两种都在加载时拦下，而不是让它们安静地待在声明里。
+
+        `body` 于是只能是自由形状（`additionalProperties: true`）——它里面每一条
+        约束都是关于某个目标系统的断言，而这条路的目标由调用方定。
+
+        **还有一条：它必须是写操作。** 通用出口转发的是 POST，而目标由调用方
+        定——所以"这个工具只读"是一句沙箱没法核实、也不该采信的话：一次往任意
+        地址发的 POST 会不会改状态，只有目标系统知道。声明成读的话，它会被记成
+        读操作，幂等检测和主动行为审计**同时**看不见它，而报告上一切正常。
+        """
+        if not self.egress_is_agent:
+            return self
+
+        if not self.is_write:
+            raise ValueError(
+                f"工具 {self.name!r} 的 egress_host 是保留值 {AGENT_CHOOSES_HOST!r}"
+                f"（目标由调用方指定），它必须是写操作（is_write: true）。\n"
+                f"通用出口转发的是一次 POST 到它自己指定的地址——会不会改目标"
+                f"系统的状态只有那边知道，而记成读操作会让幂等与主动行为审计"
+                f"都看不见它。"
+            )
+
+        properties = self.parameters.get("properties")
+        if not isinstance(properties, dict) or not properties:
+            raise ValueError(
+                f"工具 {self.name!r} 的 egress_host 是保留值 {AGENT_CHOOSES_HOST!r}"
+                f"（目标由调用方指定），它必须声明通用出口的参数形状："
+                f"必填 {GENERIC_EGRESS_URL_FIELD!r}（字符串），可选 "
+                f"{GENERIC_EGRESS_BODY_FIELD!r}（对象）。\n"
+                f"没有这份声明，边界上一次调用都核不了——而"
+                f"「声明空着」和「没声明」在报告上是一个样子。"
+            )
+        extra = sorted(set(properties) - {GENERIC_EGRESS_URL_FIELD, GENERIC_EGRESS_BODY_FIELD})
+        if extra:
+            raise ValueError(
+                f"工具 {self.name!r} 声明了 {extra}，而通用出口只认 "
+                f"{GENERIC_EGRESS_URL_FIELD!r} 和 {GENERIC_EGRESS_BODY_FIELD!r} 两个字段"
+                f"（把 body 原样 POST 到 url）。声明别的字段等于写一句没人执行的约束。"
+            )
+        if GENERIC_EGRESS_URL_FIELD not in (self.parameters.get("required") or []):
+            raise ValueError(
+                f"工具 {self.name!r} 的 {GENERIC_EGRESS_URL_FIELD!r} 必须是必填字段："
+                f"通用出口没有它就没有目的地——这是一次连不上任何地方的调用，"
+                f"真实工具会直接拒绝。"
+            )
+        if properties.get(GENERIC_EGRESS_URL_FIELD, {}).get("type") != "string":
+            raise ValueError(
+                f"工具 {self.name!r} 的 {GENERIC_EGRESS_URL_FIELD!r} 必须是字符串类型的 URL。"
+            )
+
+        # `body` 只能是自由形状，而且必须把这件事写下来。
+        #
+        # 上面那条"别声明目标系统的 schema"在这里露了原形：声明里对 `body` 的
+        # 每一个约束都是**关于某个目标系统**的断言，而这条路的目标由调用方定
+        # ——同一个工具今天发给支付网关、明天发给工单系统。所以"body 里只许有
+        # order_id 和 amount"是一句沙箱核实不了、而且随目的地而变的话。
+        #
+        # 更要紧的是不写它会发生什么。**空 properties 意味着"这个键一个都不许
+        # 有"**（见 toolschema 的默认拒绝），于是一次带着真实业务字段的转发会被
+        # 判成 invalid_tool_arguments——报告上写着"Agent 参数送错了"，而真相是
+        # 这份声明让每一次调用都过不去。这正是那份文件（spec.py）一直在拦的
+        # "写了却没人核对"，只不过这次是**核对的方式错了**，比不核对更难发现。
+        body = properties.get(GENERIC_EGRESS_BODY_FIELD)
+        if body is None:
+            return self
+        if body.get("type") != "object":
+            raise ValueError(
+                f"工具 {self.name!r} 的 {GENERIC_EGRESS_BODY_FIELD!r} 必须是对象"
+                f"（它是原样转发给目标系统的那份请求体）。"
+            )
+        if body.get("additionalProperties") is not True:
+            raise ValueError(
+                f"工具 {self.name!r} 的 {GENERIC_EGRESS_BODY_FIELD!r} 必须声明成自由"
+                f"形状：additionalProperties: true。\n"
+                f"它对 body 的每一条约束都是关于某个「目标系统」的断言，而这条路"
+                f"的目标由调用方定——同一个工具可以去不同的主机。少写这一句的后果"
+                f"不是少核了一层，而是每一次带业务字段的转发都会被判成参数错误"
+                f"（空 properties 在这里的意思是一个字段都不许有），报告上却写着"
+                f"是 Agent 送错了参数。"
+            )
+        return self
+
+    @property
+    def egress_is_agent(self) -> bool:
+        """这个工具的目标由被测对象在调用时指定（`egress_host` 写了保留值）。"""
+        return self.egress_host == AGENT_CHOOSES_HOST
+
+    def proxy_path(self) -> str:
+        """它的调用从代理的哪条路进来。
+
+        固定目标的工具走 `/tools/{名字}`（目的地由沙箱配置定），目标由 Agent
+        定的那些只能走通用出口 `/fetch/{名字}`——那条路按 URL 里的主机判，
+        因为它没有可声明的目标。
+
+        **这张表随运行注册一起过线**（见 `runner.registration_payload`），网关
+        按键名读。所以"这个工具的调用该走哪条路"在运行当中是有据可查的，
+        不是代理自己猜的。
+        """
+        if self.egress_is_agent:
+            return generic_egress_path(self.name)
+        return f"/tools/{self.name}"
 
     @field_validator("field_weights")
     @classmethod
@@ -344,9 +484,22 @@ class EgressRuleDecl(BaseModel):
     #: 必填。没有理由的放行在审计时无法复核，等于永久豁免（与 `AllowRule` 同）。
     reason: str
 
+    #: 这个世界里，这台主机由 mock 的哪条路径扮演。`None` = 不翻译，真发过去。
+    #:
+    #: 模拟出来的外部系统并不存在，出去的请求得有个落点。**它是"布景"而不是
+    #: "授权"**：写不写、写成什么，都不影响放不放行，只影响这次调用落在哪。
+    #: 声明过 `egress_host` 的工具靠那条声明翻译（沙箱里每个工具连的都是自己的
+    #: mock），而没有固定目标的那些（保留值，见 `ToolDecl.egress_host`）没有
+    #: 可声明的目标——所以只能由名单来说"这台主机在这个世界里是谁"。
+    mock_path: str | None = None
+
     @model_validator(mode="after")
     def _usable(self) -> EgressRuleDecl:
         self.host = checked_host(self.host, what="放行规则")
+        if self.mock_path is not None:
+            self.mock_path = checked_mock_path(
+                self.mock_path, what=f"放行规则 {self.host!r} 的 mock_path"
+            )
         if not self.reason.strip():
             raise ValueError(
                 f"放行规则 {self.host!r} 缺少 reason。"
@@ -379,7 +532,12 @@ class EgressDecl(BaseModel):
         """转成策略层那条规则的形状。**只此一处**：加载期校验与运行时判定
         必须看同一份数据，各转一遍的话，总有一天校验放过的和判定的不是同一条。"""
         return [
-            AllowRule(host=r.host, tool=None, reason=f"场景声明：{r.reason}")
+            AllowRule(
+                host=r.host,
+                tool=None,
+                reason=f"场景声明：{r.reason}",
+                mock_path=r.mock_path,
+            )
             for r in self.allow
         ]
 
@@ -515,14 +673,24 @@ class Scenario(BaseModel):
 
         第 3 条**不反过来要求**"每个工具的主机都在名单上"——不在名单上正是
         "拒绝"的表达方式，那是这套东西存在的理由。
+
+        **目标由 Agent 定的工具（`egress_host` 写了保留值）破这三条里的两条**，
+        而且是必然的：它没有可写下来的目标主机，所以第 1 条只要求它交代"目标由
+        调用方定"（那就是它的交代），第 3 条则整个不成立——它的目标在运行当中
+        才定，名单上任何一条都可能是它可以去的地方，"哪条没工具指向"这个问题
+        在这里没有答案。第 2 条对它照旧：写了一句没人读的声明仍然要报错。
         """
         egress = self.world.egress
         declared = {t.name: t.egress_host for t in self.tools if t.egress_host}
+        open_targets = sorted(t.name for t in self.tools if t.egress_is_agent)
 
         if egress is None:
-            if declared:
+            # 保留值不算"读不到"：它的路由作用与名单无关（见 proxy_path）。写死的
+            # 主机名才算——那条声明要靠名单才判得动。
+            fixed = sorted(n for n, h in declared.items() if h != AGENT_CHOOSES_HOST)
+            if fixed:
                 raise ValueError(
-                    f"工具 {sorted(declared)} 声明了 egress_host，但场景没有 "
+                    f"工具 {fixed} 声明了 egress_host，但场景没有 "
                     f"`world.egress` 段——这条声明一次都不会被读到。\n"
                     f"它说的是「这个工具在真实环境里出到哪台主机」，"
                     f"而按它判定的那份放行名单没写，于是它不影响任何一次调用。"
@@ -533,10 +701,16 @@ class Scenario(BaseModel):
         if missing:
             raise ValueError(
                 f"场景声明了出口放行名单（world.egress），但工具 {sorted(missing)} "
-                f"没写 egress_host。\n"
+                f"没交代自己的出口。\n"
                 f"名单是按真实目标主机判的；没写这个字段的工具仍然按沙箱"
-                f"mock 的地址判，于是它不受名单管——报告上却看不出这个区别。"
+                f"mock 的地址判，于是它不受名单管——报告上却看不出这个区别。\n"
+                f"固定目标的写那台主机（payments.example.com），目标由调用方定的"
+                f"写保留值 {AGENT_CHOOSES_HOST!r}：两种都要写，写出来的意思不同，"
+                f"但都得写。"
             )
+
+        if open_targets:
+            return self
 
         known = set(declared.values())
         unwired = [r.host for r in egress.allow if r.host not in known]
@@ -558,10 +732,14 @@ class Scenario(BaseModel):
         egress = self.world.egress
         if egress is None:
             return None
-        return policy_with_rules(
-            egress.to_allow_rules(),
-            tool_hosts={t.name: t.egress_host for t in self.tools if t.egress_host},
-        )
+        tool_hosts: dict[str, str] = {}
+        for t in self.tools:
+            # 目标由 Agent 定的那些**不进这张表**：放进去的话它们会被按字面量
+            # "agent" 判（`EgressPolicy` 也会在构造时直接报错），而正确的判法
+            # 是走"没声明"那一支——按这次调用实际要连的那台主机判。
+            if t.egress_host and not t.egress_is_agent:
+                tool_hosts[t.name] = t.egress_host
+        return policy_with_rules(egress.to_allow_rules(), tool_hosts=tool_hosts)
 
     def tool_index(self) -> dict[str, ToolDecl]:
         return {t.name: t for t in self.tools}
