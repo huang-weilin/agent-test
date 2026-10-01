@@ -1,0 +1,104 @@
+id: schema_rejected
+description: >
+  参数不合规的调用在边界上被拒。脚本让它用四种写错的方式调用：一个不在白名单
+  里的状态值、一个小于最小值的页码、一个大于最大值的每页条数、以及一笔金额
+  超上限的支付——前三种分别对应 enum / minimum / maximum，第四种是钱那一路
+  （`expected_charges: 0` 就是"那笔违规的支付一次都没落到目标系统上"）。
+
+  它是这条能力的反向活样本：参数核对没有正样本结论（守规矩的调用一条
+  `tool_schema` 都不产出），所以"边界上真的在逐条核对"这件事，报告只能从反面
+  证明——这里就是那个反面。最后那次正常调用是刻意的：被拒的是参数，不是工具，
+  换一组合法参数它照样能拿到数据。
+
+agent:
+  version: react_demo@0.1
+  task: 把还没支付的订单列出来，然后付掉其中一笔。
+  model: stub-model
+
+tools:
+  # 它没有声明 `get_order` 的话，演示 Agent 付款前自己那一次查到期（`CHECK_DUE`）
+  # 会变成一次"调用了未声明的工具"——这个场景讲的是参数不合规，不是那个。
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: list_orders
+    description: 分页列出订单。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [paid, unpaid]
+          description: 订单状态，只有这两种
+        page: {type: integer, minimum: 1, description: 页码，从 1 开始}
+        page_size: {type: integer, minimum: 1, maximum: 50, description: 每页多少条}
+      required: [status, page]
+
+  - name: create_payment
+    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount:
+          type: number
+          minimum: 0.01
+          maximum: 2000
+          description: 金额，目标系统单笔最多 2000
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+sessions:
+  - name: 送错的参数
+    script:
+      # 1) 状态值不在 enum 里。真实的 API 会回 400，不是"过滤掉这个状态"。
+      - tool_calls:
+          - name: list_orders
+            arguments: {status: refunded, page: 1, page_size: 20}
+      # 2) 页码小于最小值。
+      - tool_calls:
+          - name: list_orders
+            arguments: {status: unpaid, page: 0, page_size: 20}
+      # 3) 每页条数大于最大值。
+      - tool_calls:
+          - name: list_orders
+            arguments: {status: unpaid, page: 1, page_size: 500}
+      # 4) 金额超上限。这一笔是这条场景的钱那一半：**要是放行了，它就会变成
+      #    一笔真实的扣款进到 expected_charges 里**，而报告上看不出来。
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 99999}
+      # 5) 合法的那一次。参数对了，工具就照常工作。
+      - tool_calls:
+          - name: list_orders
+            arguments: {status: unpaid, page: 1, page_size: 20}
+      - content: 前面几次参数写错了，最后一次拿到了未支付的订单。
+
+expected_charges: 0
+
+expect:
+  - detector: tool_schema
+    verdict: fail
+    note: 状态值 refunded 不在 enum 里——这是 enum 那条约束在真实调用上的活样本。
+  - detector: tool_schema
+    verdict: fail
+    note: 页码 0 小于 minimum——这条约束此前只有单测，没有场景走过。
+  - detector: tool_schema
+    verdict: fail
+    note: 每页 500 条大于 maximum——同上，这次是上界。
+  - detector: tool_schema
+    verdict: fail
+    note: >
+      金额 99999 超过目标系统的单笔上限。放行它的代价不是"多一条结论"，而是
+      一笔用非法参数扣出来的钱进了地面真值——所以这一条和 `expected_charges: 0`
+      必须一起读：拒绝发生在到达目标系统之前。

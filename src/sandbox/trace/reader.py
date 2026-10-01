@@ -19,8 +19,24 @@ import json
 from sqlalchemy import select
 
 from sandbox.db.engine import session_scope
-from sandbox.db.models import Session, ToolCall
-from sandbox.detectors.base import CallView
+from sandbox.db.models import DetectorFinding, DetectorVerdict, Session, ToolCall
+from sandbox.detectors.base import CallView, Confidence, Finding
+
+#: 只有边界当场才判得出来的那两条结论。**这是一张白名单，不是"库里所有的结论"。**
+#:
+#: `detector_finding` 这张表里还躺着别的写入方：看门狗熔断时的 `loop`、网关的
+#: `token_budget`、代理自己的 `egress`（路由走反了那几种）。它们**都不能**被读回
+#: 这次运行：
+#:
+#: * `loop` 会被跑完之后的管线在整条会话序列上再算一遍——读回来就是同一件事两条
+#:   结论，而且两条的窗口还不一样；
+#: * `token_budget` 是累计花费，`egress` 是沙箱自己的策略在生效——两个都不是被测
+#:   对象做错了事，混进 `findings` 会让 `ok` 把它们算到它头上（`blocked_by_proxy`
+#:   那一整套区分就是为了这个）。
+#:
+#: 留下来的两条恰是跑完之后**再也算不出来**的：接口的返回体不落库、schema 是过线
+#: 来的声明，只有站在边界上、手里拿着这次调用的原始参数时才判得了。
+BOUNDARY_DETECTORS: frozenset[str] = frozenset({"tool_scope", "tool_schema"})
 
 
 def _row_to_view(
@@ -110,6 +126,48 @@ async def load_session_sequence(session_sequence_id: str) -> list[CallView]:
             )
             for call, session in rows
         ]
+
+
+async def load_boundary_findings(session_sequence_id: str) -> list[Finding]:
+    """读出这个会话序列里**边界当场判定的那两条结论**（见 `BOUNDARY_DETECTORS`）。
+
+    为什么要有这一趟读：那两条结论从来就只写进了库，没有任何一条路把它们带回
+    这次运行的报告——于是 `expect` 里写 `tool_schema` 永远"未命中"，报告上一条
+    也看不到，`ok` 也不受影响。而三份文档和两个页面都在说它们进了检测结论。
+    结论是在边界上判的，读回来就是这一趟的事；跑完之后再判一次是另一套判据
+    （返回体不落库），那才是真的会分叉。
+
+    排序：先按会话序号，再按写入时刻。**只有写入时刻是不够的**——它是墙钟，而
+    这个项目的墙钟会被快照恢复和时间加速拨动；跨会话的先后必须以序号为准，那
+    是唯一没被动过的时间线。同一段会话里没有更细的序号可用了（结论行记的不是
+    "第几次调用"），按写入先后排是如实的。
+    """
+    async with session_scope() as db:
+        rows = (
+            (
+                await db.execute(
+                    select(DetectorFinding, Session)
+                    .join(Session, DetectorFinding.test_run_id == Session.test_run_id)
+                    .where(
+                        Session.session_sequence_id == session_sequence_id,
+                        DetectorFinding.detector.in_(BOUNDARY_DETECTORS),
+                    )
+                    .order_by(Session.ordinal.asc().nullsfirst(), DetectorFinding.ts.asc())
+                )
+            )
+            .all()
+        )
+    return [
+        Finding(
+            detector=row.detector,
+            verdict=DetectorVerdict(row.verdict),
+            summary=row.summary,
+            confidence=Confidence(row.confidence),
+            detail=json.loads(row.detail_json) if row.detail_json else {},
+            exempted_by=row.exempted_by,
+        )
+        for row, _session in rows
+    ]
 
 
 async def load_sessions(session_sequence_id: str) -> list[Session]:

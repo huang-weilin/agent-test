@@ -72,7 +72,7 @@ from sandbox.memory.snapshot import SnapshotRef, SnapshotStore
 from sandbox.scenario import call_chain, identity, session_diff
 from sandbox.scenario.expect import ExpectResult, evaluate
 from sandbox.scenario.spec import Scenario
-from sandbox.trace.reader import load_session_sequence
+from sandbox.trace.reader import load_boundary_findings, load_session_sequence
 from sandbox.watchdog import summarize_verdicts
 
 log = structlog.get_logger(__name__)
@@ -845,7 +845,20 @@ class ScenarioRunner:
         sides = [session_diff.SessionSide.of(s) for s in result.sessions]
         result.call_chain = call_chain.build_chain(calls, sides)
         result.session_diff = session_diff.compare_sessions(calls, sides)
-        result.findings = _run_detectors(scenario, calls, observations)
+        # 边界当场判定的那两条结论（`tool_scope` / `tool_schema`）**排在最前面**。
+        #
+        # 两个理由。一是它们是这次运行里最直接的事实：没有推断、没有相似度、没有
+        # 阈值，代理手里拿着这次调用的原始参数就判了；聚合结论是跑完之后才算的。
+        # 二是它们**永远是 fail**，而报告按列表顺序渲染——排在后面的话，一条
+        # `tool_schema/fail` 会被前面某条聚合结论的 warning 压到看不见的地方
+        # （同一条约定见 `AutonomyDetector`：报告里 fail 要排在 warning 前面）。
+        #
+        # 顺序上还有个细节：`_run_detectors` 只吃库里读回来的调用，而这两条结论
+        # 也是从库里读回来的（`load_boundary_findings`），两边的观测通道一致。
+        result.findings = [
+            *await load_boundary_findings(active.ctx.session_sequence_id),
+            *_run_detectors(scenario, calls, observations),
+        ]
         result.expectation = evaluate(scenario, result.findings)
         result.summary = summarize_verdicts(result.findings)
         result.egress_charges = await self._charges(mk_port)
