@@ -1200,6 +1200,16 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
                 f"  !! 注意：其中 {c.unpriced_calls} 次调用的模型不在定价表中，"
                 f"成本按 0 计。上面的金额是下界，不是账单。"
             )
+        if c.tokens_are_estimated:
+            # 上面那几个数字里有几个是估的。**这不是检测结论**，是"这段陈述有多
+            # 可信"——
+            # 估的数可能偏大也可能偏小（所以它不等于"下界"），但把它当账单读的
+            # 人和知道它是估的人，会做出不同的决定。
+            add(
+                f"  !! 注意：其中 {c.estimated_calls} 次调用没拿到上游的用量"
+                f"（流式请求未带 usage 帧，或被中途断开），token 数是网关按看到的"
+                f"内容估的。这几行不是账单。"
+            )
         if c.cache_read_tokens or c.cache_write_tokens:
             add(
                 f"  缓存读 {_tokens(c.cache_read_tokens)}"

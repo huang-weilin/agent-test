@@ -65,6 +65,7 @@ SANDBOX_AGENT_TASK="帮我把订单 A1 处理掉。" \
 | `SANDBOX_AGENT_MEMORY_DIR` | `./.agent-memory` | 记忆目录。**由沙箱创建并注入**，见下 |
 | `DEMO_AGENT_MEMORY_GUARD` | `1` | `0` = 关掉记忆守卫。**只为造受控对照而存在** |
 | `DEMO_AGENT_MEMORY_TIDY` | 空 | 醒来先整理记忆：`archive` = 挪进 `archive/`，`prune` = 直接删掉。**同上，只为造受控对照** |
+| `DEMO_AGENT_STREAM` | 空 | `1` = 用流式请求打网关（`stream: true`）。**同上**：`scenarios/stream_clean.yaml` 与 `clean.yaml` 那一对就是靠它区分 |
 
 `API_KEY` 为空时直接退出并打印申请运行的 curl，不静默降级。
 
@@ -110,8 +111,10 @@ SANDBOX_AGENT_TASK="帮我把订单 A1 处理掉。" \
 一行都不用改**。真实密钥能进得来，是因为真实场景下这个 Agent 是你自己的；
 在沙箱里它拿到的必须是令牌，真实上游密钥永远留在网关进程里（ADR 003）。
 
-`agent.py` 里 `streaming=False` 是给沙箱网关用的——网关目前不支持流式，`stream=true`
-会返回 501。走真实上游时删掉这行即可（见根 README 的已知缺口表）。
+`agent.py` 里 `streaming=DEMO_AGENT_STREAM` 是唯一的接入细节：网关两条路都支持，
+默认走非流式。`DEMO_AGENT_STREAM=1` 时改走流式（`stream=true`），网关那边是边转发
+边累计、结算挂在转发结束之后（见 `src/sandbox/gateway/stream.py`）。这个开关只为造
+受控对照而存在，见下表。
 
 ## 怎么写新场景
 

@@ -699,6 +699,12 @@
   有 {{ report.cost.unpriced_calls }} 次调用的模型不在定价表里，按 0 计。
   <strong>上面的金额是下界，不是账单。</strong>
   {% endif %}
+  {% if report.cost.tokens_are_estimated %}
+  <br><span class="star">†</span>
+  有 {{ report.cost.estimated_calls }} 次调用没拿到上游的用量（流式请求未带
+  usage 帧，或被中途断开），token 数是按看到的内容估的。
+  <strong>这几行是估算，不是账单</strong>——估的数可能偏大也可能偏小。
+  {% endif %}
 </p>
 {% if report.budget %}
 <h3>预算</h3>

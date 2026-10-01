@@ -252,6 +252,23 @@ PAIRS: tuple[Controlled, ...] = (
         differs_in=("tools[n].parameters.properties",),
     ),
     Controlled(
+        scenarios=("clean", "stream_clean"),
+        claim="同一段脚本、同一个世界，唯一的变量是请求走不走流式（`DEMO_AGENT_STREAM`）。",
+        # 要证的是「换一种传输方式不改行为」：结论该一字不差，而账要从上游的
+        # usage 来、不能是网关估的（那一半在 `tests/test_gateway_stream.py` 里
+        # 真跑一遍来核，不在这个文件里）。
+        #
+        # `clean` 本来是 UNPAIRED 里的独苗（理由见那张表）——它不需要对照组，
+        # 但它可以**当**人家的对照组：这里的变量是传输方式，而 clean 正是
+        # 「不流式」那一支的全部内容。
+        #
+        # 两处一起列：`clean` 根本没有 `env` 那一行，`stream_clean` 有一个只装了
+        # 这一个变量的 `env`。抹掉叶子之后，一边是空表、一边是「没有这个键」——
+        # 而空表在这个摊平器里**是按值算的**（见文件头那段：空容器没有叶子，
+        # 不特判就会把这一对判成「一处都不差」）。
+        differs_in=("agent.env", "agent.env.DEMO_AGENT_STREAM"),
+    ),
+    Controlled(
         scenarios=("memory_poisoned", "memory_note_clean"),
         claim="记忆中毒：唯一的变量是世界里的那句话（订单备注上的自由文本）。",
         differs_in=("world.order_notes.A1",),
@@ -312,11 +329,6 @@ PAIRS: tuple[Controlled, ...] = (
 #: 反向断言盯的就是这个：加了一份新场景而它谁都不搭，红的是那一条。理由不必长，
 #: 但要说出「为什么它没有对照组」，而不是「还没写」。
 UNPAIRED: dict[str, str] = {
-    "clean": (
-        "全绿的活样本，演的是「什么都没发生」。它不需要对照组：要证的是「无事发生"
-        "时不乱报」，而「乱报」的活样本各自待在自己那一族里（四支幂等、三种跨会话"
-        "结论、中毒与整理各一对）。"
-    ),
     "target_error": (
         "目标系统报错那一路的活样本。它的对照组要造一个「同样的调用、目标系统不报错」"
         "的世界，而那正是 clean 的常态——再抄一份只差一个布尔值的场景，比在测试里"

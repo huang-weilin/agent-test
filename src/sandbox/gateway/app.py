@@ -9,74 +9,49 @@
 
 第 4 点容易被忽略但很重要：如果 Agent 手里是真实密钥，它就能绕过网关直连上游，
 "完整观测"立刻失效——而且是静默失效，报告会显示一切正常，只是少了一半调用。
+
+流式请求（`stream: true`）走的是同一套职责，只有一处不同：结算发生在转发
+**结束之后**（客户端随时可能断开），所以它挂在生成器的 `finally` 上。转发与结算
+的实现都在 `stream.py`，这个文件只负责路由和 HTTP 的形状。
 """
 
 from __future__ import annotations
 
-import json
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 import structlog
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from sandbox.config import settings
 from sandbox.db.models import Confidence, DetectorVerdict
 from sandbox.detectors.base import ExemptionSet
 from sandbox.detectors.loop import checked_field_weights
-from sandbox.gateway.budget import BudgetExceededError
+from sandbox.gateway.budget import BudgetExceededError, TokenBudget
+from sandbox.gateway.stream import (
+    UPSTREAM_TIMEOUT,
+    Reserved,
+    UpstreamError,
+    chain_first,
+    real_stream_lines,
+    relay_stream,
+    settle_and_record,
+    stub_stream_lines,
+    upstream_headers,
+    upstream_url,
+    usage_requested,
+    with_usage_option,
+)
 from sandbox.gateway.stub import scripted_upstream
-from sandbox.runtime import runs
-from sandbox.trace.recorder import record_finding, record_llm_call
+from sandbox.runtime import RunContext, runs
+from sandbox.trace.recorder import record_finding
 
 log = structlog.get_logger(__name__)
 
 app = FastAPI(title="sandbox LLM gateway", version="0.0.1")
-
-# 保守的输入估算：CJK 约 1–2 字符/token，英文约 4。取 3 是往安全的方向估——
-# 估多了只是提前熔断（可恢复），估少了会让超限的那一次已经花出去。
-_CHARS_PER_TOKEN = 3
-# 请求没给 max_tokens 时的补全上界。
-_DEFAULT_MAX_COMPLETION = 4096
-
-
-class UpstreamError(Exception):
-    def __init__(self, status: int, detail: str) -> None:
-        self.status = status
-        self.detail = detail
-        super().__init__(detail)
-
-
-def estimate_input_tokens(payload: dict[str, Any]) -> int:
-    """估算输入 token。**只用于预扣**，结算一律用上游返回的真实 usage。"""
-    blob = json.dumps(
-        {
-            "messages": payload.get("messages", []),
-            "tools": payload.get("tools"),
-            "system": payload.get("system"),
-        },
-        ensure_ascii=False,
-        default=str,
-    )
-    return max(1, len(blob) // _CHARS_PER_TOKEN)
-
-
-def estimate_reserve(payload: dict[str, Any]) -> tuple[int, int]:
-    """返回 (输入预估, 输出预估)。输出取 max_tokens，没给就按默认上界。"""
-    max_out = payload.get("max_tokens") or payload.get("max_completion_tokens")
-    if not isinstance(max_out, int) or max_out <= 0:
-        max_out = _DEFAULT_MAX_COMPLETION
-    return estimate_input_tokens(payload), max_out
-
-
-def _upstream_url(base: str) -> str:
-    """把 base_url 规范成 chat/completions 端点。两种写法都接受。"""
-    base = base.rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}/chat/completions"
-    return f"{base}/v1/chat/completions"
 
 
 def _default_tool_schemas() -> dict[str, dict[str, Any]]:
@@ -107,21 +82,14 @@ def _default_tools() -> dict[str, str]:
 
 
 async def _call_real_upstream(payload: dict[str, Any]) -> dict[str, Any]:
-    """转发到真实上游。真实密钥只在这里出现。"""
-    if not settings.upstream_ready:
-        raise UpstreamError(
-            500,
-            "upstream_mode=real 但没有配置 SANDBOX_UPSTREAM_API_KEY。"
-            "拒绝静默降级到 stub——那会让测试结果看起来正常但毫无意义。",
-        )
+    """转发到真实上游（非流式）。
 
-    url = _upstream_url(settings.upstream_base_url)
-    headers = {
-        "Authorization": f"Bearer {settings.upstream_api_key}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(url, json=payload, headers=headers)
+    密钥与 URL 的拼装都在 `stream` 里——**流式与非流式共用那一份**，所以
+    "真实密钥只出现在网关进程的一个函数里"这句话只有一个实现处。
+    """
+    url = upstream_url(settings.upstream_base_url)
+    async with httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT) as client:
+        resp = await client.post(url, json=payload, headers=upstream_headers())
 
     if resp.status_code >= 400:
         raise UpstreamError(resp.status_code, resp.text[:2000])
@@ -133,6 +101,27 @@ def _error(status: int, message: str, err_type: str = "sandbox_error") -> JSONRe
         status_code=status,
         content={"error": {"message": message, "type": err_type, "code": status}},
     )
+
+
+def _upstream_failure(exc: Exception, ctx: Any) -> JSONResponse:
+    """上游那几种失败 → 响应。**流式与非流式共用这一份。**
+
+    分成两张表写的话，"脚本没注册"在一条路上是 400、在另一条路上是 502，
+    而两条路指向的是同一件事故——排查的人会以为是两个不同的问题。
+    """
+    if isinstance(exc, StopAsyncIteration):
+        return _error(
+            502,
+            "上游的流一帧都没有就结束了。空流会让客户端一直等下去，"
+            "所以这里直接报错，而不是回一个 200。",
+            err_type="empty_stream",
+        )
+    if isinstance(exc, KeyError):
+        return _error(400, str(exc), err_type="stub_script_missing")
+    if isinstance(exc, UpstreamError):
+        return _error(exc.status, exc.detail, err_type="upstream_error")
+    log.exception("gateway.upstream_failed", run_id=getattr(ctx, "run_id", None))
+    return _error(502, f"上游调用失败：{exc}", err_type="upstream_error")
 
 
 @app.get("/healthz")
@@ -302,22 +291,10 @@ async def chat_completions(
     budget = active.budget
     model = payload.get("model") or "unknown"
 
-    if payload.get("stream"):
-        # 明确拒绝而不是静默走非流式：静默的话 Agent 侧解析会炸在别处，
-        # 报错信息指向错误的位置，排查成本远高于这里直接说清楚。
-        return _error(
-            501,
-            "网关尚未实现流式响应。请把请求的 stream 置为 false。"
-            "（流式需要边转发边累计 usage，在结算正确性上另有一套逻辑，"
-            "不走通不发布。）",
-            err_type="not_implemented",
-        )
-
-    est_in, est_out = estimate_reserve(payload)
-    reserved = est_in + est_out
+    est = Reserved.of(payload)
 
     try:
-        budget.reserve(reserved)
+        budget.reserve(est.total)
     except BudgetExceededError as exc:
         # 熔断是运行级事件，必须留痕。否则报告里只会看到"运行提前结束"，
         # 看不到为什么结束。
@@ -336,41 +313,31 @@ async def chat_completions(
         )
         return _error(429, str(exc), err_type="budget_exceeded")
 
+    if payload.get("stream"):
+        return await _streaming_response(
+            payload, ctx=ctx, budget=budget, reserved=est, model=model, started=started
+        )
+
     try:
         if settings.upstream_mode == "stub":
             response = scripted_upstream.next_response(
-                ctx.run_id, model=model, approx_input_tokens=est_in
+                ctx.run_id, model=model, approx_input_tokens=est.input_tokens
             )
         else:
             response = await _call_real_upstream(payload)
-    except KeyError as exc:
-        budget.release(reserved)
-        return _error(400, str(exc), err_type="stub_script_missing")
-    except UpstreamError as exc:
-        budget.release(reserved)
-        return _error(exc.status, exc.detail, err_type="upstream_error")
     except Exception as exc:  # noqa: BLE001 — 必须归还未预扣，否则预算会慢性泄漏
-        budget.release(reserved)
-        log.exception("gateway.upstream_failed", run_id=ctx.run_id)
-        return _error(502, f"上游调用失败：{exc}", err_type="upstream_error")
+        budget.release(est.total)
+        return _upstream_failure(exc, ctx)
 
-    usage = response.get("usage") or {}
-    in_tok = int(usage.get("prompt_tokens") or 0)
-    out_tok = int(usage.get("completion_tokens") or 0)
-    cache_read = int(usage.get("prompt_cache_hit_tokens") or 0)
-    cache_write = int(usage.get("prompt_cache_miss_tokens") or 0)
-
-    budget.settle(reserved, in_tok, out_tok)
-    latency_ms = int((time.perf_counter() - started) * 1000)
-
-    cost = await record_llm_call(
+    cost = await settle_and_record(
         ctx,
+        budget,
+        reserved=est,
         model=model,
-        input_tokens=in_tok,
-        output_tokens=out_tok,
-        cache_read_tokens=cache_read,
-        cache_write_tokens=cache_write,
-        latency_ms=latency_ms,
+        usage=response.get("usage") or None,
+        # 非流式的内容不经过网关，没有可数的地方；没拿到 usage 时只能退回预扣的上界。
+        observed_output=None,
+        started=started,
         streaming=False,
     )
 
@@ -383,3 +350,61 @@ async def chat_completions(
         "X-Sandbox-Priced": "1" if cost["priced"] else "0",
     }
     return JSONResponse(content=response, headers=headers)
+
+
+async def _streaming_response(
+    payload: dict[str, Any],
+    *,
+    ctx: RunContext,
+    budget: TokenBudget,
+    reserved: Reserved,
+    model: str,
+    started: float,
+) -> JSONResponse | StreamingResponse:
+    """流式：转发上游的帧，同时累计结算。
+
+    **先取第一帧再返回 200。** 开流之前就会失败的情况（脚本没注册、上游 4xx、
+    连不上）在这一步就暴露出来，那时还能回一个正常的错误响应；等 200 和第一帧
+    发出去之后再失败，客户端只会看到一个断掉的流，而错误信息只剩下网关的日志。
+    取出来的那一帧由 `chain_first` 放回去，客户端不会少收东西。
+    """
+    outbound, injected = with_usage_option(payload)
+    lines: AsyncIterator[str]
+    if settings.upstream_mode == "stub":
+        lines = stub_stream_lines(
+            ctx.run_id, model, reserved, include_usage=usage_requested(outbound)
+        )
+    else:
+        lines = real_stream_lines(outbound)
+
+    try:
+        first = await anext(lines)
+    except Exception as exc:  # noqa: BLE001 — 同上，失败必须归还预扣
+        budget.release(reserved.total)
+        return _upstream_failure(exc, ctx)
+
+    # 流式响应**没有** X-Sandbox-Tokens-Used / Cost 这几个头：它们要等流结束
+    # 才知道，而响应头在第一帧之前就发出去了。不知道就不写，别写一个"当前值"
+    # 让读的人以为那是这次调用的结算数——结算数在 LlmCall 明细和报告里。
+    headers = {
+        "X-Sandbox-Run-Id": ctx.run_id,
+        "X-Sandbox-Streaming": "1",
+        "X-Sandbox-Token-Ceiling": str(budget.ceiling),
+        "Cache-Control": "no-cache",
+    }
+    if injected:
+        # 我们动过这次请求，就得让它在响应里留下痕迹（见 with_usage_option）。
+        headers["X-Sandbox-Stream-Options-Added"] = "include_usage"
+
+    return StreamingResponse(
+        relay_stream(
+            chain_first(first, lines),
+            ctx=ctx,
+            budget=budget,
+            reserved=reserved,
+            model=model,
+            started=started,
+        ),
+        media_type="text/event-stream",
+        headers=headers,
+    )

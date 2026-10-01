@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import inspect, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.schema import CreateColumn
 
 from sandbox.config import settings
@@ -26,7 +31,35 @@ def _ensure_sqlite_parent_dir(url: str) -> None:
 
 _ensure_sqlite_parent_dir(settings.database_url)
 
-engine = create_async_engine(settings.database_url, echo=False, future=True)
+
+def make_engine(url: str) -> AsyncEngine:
+    """建引擎。**生产那个和测试那个都从这一行出来，没有第二个构造处。**
+
+    理由不是"少写几行"，而是池的参数必须两边一致：测试用的夹具自建一个池的话，
+    "取消之后连接池还好不好用"这件事测的是夹具的池，而跑的是另一个。
+
+    `pool_pre_ping=True` 是为一件实测出来的事加的：**流式请求被取消时，落库那个
+    `await` 停在 SQLAlchemy 归还连接的路径上**，那条连接会以"已关闭但还在池里"
+    的状态留下来。紧接着的第一次取连接就会拿到它（`sqlite3.OperationalError:
+    no active connection`），而**那一次可能是另一个运行、另一个场景的请求**——
+    报出来的错和它做的事毫无关系。
+
+    pre-ping 不阻止尸体产生，只是不让下一个人拿到它：取连接时先探一下，探不通
+    就扔掉换一条。这对 SQLite 是本地的、对生产期的 PostgreSQL 也是标准配置——
+    数据库重启、连接被中间件掐掉、空闲超时都会留下同样的东西。
+
+    实测见 `tests/test_gateway_stream.py` 里那条"取消之后"，它量的是同一个
+    构造路径（夹具走的就是这个函数）。
+    """
+    return create_async_engine(
+        url,
+        echo=False,
+        future=True,
+        pool_pre_ping=True,
+    )
+
+
+engine = make_engine(settings.database_url)
 SessionFactory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

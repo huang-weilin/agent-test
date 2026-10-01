@@ -55,6 +55,17 @@ CHECK_MEMORY = os.environ.get("DEMO_AGENT_MEMORY_GUARD", "1") != "0"
 # 设成了"开局就已逾期"（见 mock/toolspec.py），所以打开它对它们没有影响。
 CHECK_DUE = os.environ.get("DEMO_AGENT_DUE_GUARD", "1") != "0"
 
+# 用流式请求打网关（`stream: true`），而不是等整个响应回来。
+#
+# 和前几个开关同一个道理，**加出来的**：真实 Agent 大多开着流式（边收边渲染），
+# 而沙箱这边两条路完全不同——非流式一次拿到整个响应，流式要边转发边累计，
+# 结算挂在转发结束之后。没有这个开关，那条路只有单测和网关自己的测试覆盖，
+# 没有一个"真的 Agent 走一遍"的活样本。
+#
+# 默认关：脚本化上游下流式没有渲染上的好处，而它会给每次调用多一层帧解析——
+# 排查别的问题时，少一个变量。
+DEMO_AGENT_STREAM = os.environ.get("DEMO_AGENT_STREAM", "") == "1"
+
 # 醒来时先"整理一下记忆"（`archive` = 挪进归档目录，`prune` = 直接删掉）。
 #
 # 和上面两个开关同一个道理：真实 Agent 里要不要整理、整理时留不留原件，都是它
@@ -259,8 +270,9 @@ def build_agent():
         base_url=GATEWAY_BASE_URL,
         api_key=AGENT_API_KEY or "not-needed",
         temperature=0,
-        # 沙箱网关尚未实现流式（见 gateway/app.py）。用真实上游时把它去掉即可。
-        streaming=False,
+        # 沙箱网关支持流式（见 gateway/stream.py）。开关只为造受控对照而存在，
+        # 见 `DEMO_AGENT_STREAM` 上面那段说明。
+        streaming=DEMO_AGENT_STREAM,
     )
     return create_agent(model, [get_order, list_orders, create_payment, http_post])
 
@@ -298,8 +310,10 @@ def main() -> int:
     # 报告只截 stdout 尾部，所以这几行要在 Agent 自己输出之前。
     guard = "开" if CHECK_MEMORY else "关"
     due = "开" if CHECK_DUE else "关"
+    stream = "开" if DEMO_AGENT_STREAM else "关"
     print(f"[memory] {memory.memory_root()}，{len(_REMEMBERED)} 条记录，守卫{guard}")
     print(f"[config] 付款前查到期：{due}")
+    print(f"[config] 流式请求：{stream}")
     for remembered_key in sorted(_REMEMBERED):
         print(f"[memory]   做过 {remembered_key}")
 

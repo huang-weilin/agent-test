@@ -22,12 +22,15 @@
       `is_lower_bound` 属性，但 `to_dict()` 里叫 `cost_is_lower_bound`——
       属性名和键名不一样，用属性名的话快照那一支永远不显示星号，
       金额会被读成准确值。`unpriced_calls` 两边同名。 -#}
+  {#- 两个标记用两个符号，因为它们说的不是一件事：`*` = 金额是下界（有调用
+      没有单价），`†` = token 数是估的（没拿到上游用量）。合并成一个符号的话，
+      图例里那句话必须同时描述两件事，而它对其中任何一件都会是错的。 -#}
   {%- if rollup is none -%}
     <span class="dim">—</span>
   {%- elif rollup.llm_calls == 0 -%}
     <span class="dim">无调用</span>
   {%- else -%}
-    ${{ rollup.cost_usd | money }}{% if rollup.unpriced_calls %}<span class="star" title="含未定价调用，金额是下界">*</span>{% endif %}
+    ${{ rollup.cost_usd | money }}{% if rollup.unpriced_calls %}<span class="star" title="含未定价调用，金额是下界">*</span>{% endif %}{% if rollup.tokens_are_estimated %}<span class="star" title="含估算的 token 数（没拿到上游用量），金额也不精确">†</span>{% endif %}
   {%- endif -%}
 {%- endmacro %}
 
@@ -47,6 +50,14 @@
       有 {{ unpriced }} 次调用的模型不在定价表里，成本按 0 计。
       <strong>这些金额是下界，不是账单。</strong> 定价表见
       <code>src/sandbox/gateway/pricing.py</code>。
+    </p>
+  {%- endif -%}
+  {%- set estimated = rollups | map(attribute='estimated_calls') | sum -%}
+  {%- if estimated -%}
+    <p class="note">
+      <span class="star">†</span>
+      有 {{ estimated }} 次调用没拿到上游的用量，token 数是估的。
+      <strong>这些数字是估算，不是账单</strong>——不是下界，估的数可能偏大。
     </p>
   {%- endif -%}
 {%- endmacro %}

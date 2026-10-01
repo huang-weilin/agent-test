@@ -520,11 +520,18 @@ def _cost_cell(cost: dict[str, Any]) -> str | None:
 
     下界要标出来。未定价的调用让金额少算了一部分，"$0.0000 → $0.0100" 这样
     一行读起来像是有两位有效精度，而左边那个其实什么也没说明。
+
+    估算也要标出来，而且**是另一句话**：token 数是网关估的（没拿到上游用量）
+    和金额少算了一部分是两回事，说成同一句会让"下界"这个词失去它的意思。
     """
     if "cost_usd" not in cost:
         return None
     text = f"${_money(cost['cost_usd'])}"
-    return f"{text}（下界）" if cost.get("cost_is_lower_bound") else text
+    if cost.get("cost_is_lower_bound"):
+        text += "（下界）"
+    if cost.get("tokens_are_estimated"):
+        text += "（token 数为估算）"
+    return text
 
 
 def _money(value: Any) -> str:

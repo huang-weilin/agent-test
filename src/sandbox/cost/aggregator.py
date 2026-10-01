@@ -51,6 +51,8 @@ class CostRollup:
     cost_usd: float = 0.0
     # 定价表里查不到的模型，其调用数。见 `is_lower_bound`。
     unpriced_calls: int = 0
+    # Token 数**不是上游给的**、而是网关自己估的调用数。见 `tokens_are_estimated`。
+    estimated_calls: int = 0
 
     def __add__(self, other: CostRollup) -> CostRollup:
         return CostRollup(
@@ -61,6 +63,7 @@ class CostRollup:
             cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
             cost_usd=self.cost_usd + other.cost_usd,
             unpriced_calls=self.unpriced_calls + other.unpriced_calls,
+            estimated_calls=self.estimated_calls + other.estimated_calls,
         )
 
     @property
@@ -77,6 +80,17 @@ class CostRollup:
         """
         return self.unpriced_calls > 0
 
+    @property
+    def tokens_are_estimated(self) -> bool:
+        """这里的 Token 数是不是**有一部分不是上游给的**。
+
+        和 `is_lower_bound` 是两回事，别合并：那个说的是"金额少算了"（没单价），
+        这个说的是"token 数是估的"（没拿到 usage 帧）。估的数可能偏大也可能偏小，
+        所以它不是下界——它是一条"这几个数字的来源不一样"的备注，报告里必须
+        印出来，否则读的人会把估的数当成账单上的数。
+        """
+        return self.estimated_calls > 0
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "llm_calls": self.llm_calls,
@@ -86,7 +100,9 @@ class CostRollup:
             "cache_write_tokens": self.cache_write_tokens,
             "cost_usd": round(self.cost_usd, 6),
             "unpriced_calls": self.unpriced_calls,
+            "estimated_calls": self.estimated_calls,
             "cost_is_lower_bound": self.is_lower_bound,
+            "tokens_are_estimated": self.tokens_are_estimated,
         }
 
 
@@ -99,6 +115,7 @@ def _rollup(row: Any) -> CostRollup:
         cache_write_tokens=int(row[4]),
         cost_usd=float(row[5]),
         unpriced_calls=int(row[6]),
+        estimated_calls=int(row[7]),
     )
 
 
@@ -108,9 +125,13 @@ def _sum_columns() -> list[Any]:
     "未定价"是在**查询时**按当前定价表判定的，不是落库时存下来的标志。
     这样补一条新模型的单价之后，历史数据立刻跟着被重新定价——而"我们有没有
     这个模型的单价"本来就该是当下的属性，不是历史事实。
+
+    "估的"反过来，是**落库时**写下的（`LlmCall.status`）：它是"那一次调用当时
+    拿没拿到上游的用量"这个历史事实，事后改不了，也不该跟着定价表变。
     """
     priced = known_models()
     unpriced = case((LlmCall.model.in_(priced), 0), else_=1) if priced else literal(1)
+    estimated = case((LlmCall.status == "usage_estimated", 1), else_=0)
     return [
         func.count(LlmCall.id),
         func.coalesce(func.sum(LlmCall.input_tokens), 0),
@@ -119,6 +140,7 @@ def _sum_columns() -> list[Any]:
         func.coalesce(func.sum(LlmCall.cache_write_tokens), 0),
         func.coalesce(func.sum(LlmCall.cost_usd), 0.0),
         func.coalesce(func.sum(unpriced), 0),
+        func.coalesce(func.sum(estimated), 0),
     ]
 
 
@@ -194,6 +216,7 @@ async def by_session(run_id: str, *, db: AsyncSession | None = None) -> dict[int
                 cache_write_tokens=total.cache_write_tokens - tracked.cache_write_tokens,
                 cost_usd=total.cost_usd - tracked.cost_usd,
                 unpriced_calls=total.unpriced_calls - tracked.unpriced_calls,
+                estimated_calls=total.estimated_calls - tracked.estimated_calls,
             )
         return grouped
 

@@ -307,7 +307,19 @@ class LlmCall(Base):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
 
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    # 这一次是流式请求落的账。**读它的时候要知道 latency_ms 的含义不一样**：
+    # 非流式是整个响应往返，流式是到最后一帧为止。由网关转发时写（`stream.py`），
+    # 场景 `stream_clean` / `clean` 那一对是它的活样本。
     streaming: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 这几个 token 数是**从哪来的**。今天有两个值：
+    #
+    #   ok              —— 上游给的 usage（权威）；
+    #   usage_estimated —— 没拿到（流式没带 usage 帧、或被中途断开），
+    #                      数字是网关按看到的内容估的。
+    #
+    # 写它的是 `gateway/stream.py` 的 `numbers_for`，读它的是成本聚合
+    # （`CostRollup.estimated_calls` → 报告里那句"这几行不是账单"）。
+    # **读到别的值时不要当成 ok**：多出来的值是别人加的，含义未知。
     status: Mapped[str] = mapped_column(String(16), default="ok")
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

@@ -183,12 +183,9 @@ async def test_real_mode_without_key_refuses_instead_of_falling_back(client, mon
     assert created["run_id"]
 
 
-async def test_streaming_is_explicitly_not_implemented(client) -> None:
-    """明确拒绝优于静默走非流式——后者会让错误在 Agent 侧以别的方式爆出来。"""
-    await _register(client)
-    resp = await client.post("/v1/chat/completions", json=_chat_body(stream=True))
-    assert resp.status_code == 501
-    assert resp.json()["error"]["type"] == "not_implemented"
+# 流式那一族在 `tests/test_gateway_stream.py`。这里原本只有一条断言——501
+# 明确拒绝，理由是"结算正确性上另有一套逻辑，不走通不发布"。那套逻辑做出来了，
+# 断言也就搬到了它该在的地方。
 
 
 async def test_stub_returns_openai_compatible_shape(client) -> None:

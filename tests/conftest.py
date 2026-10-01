@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import sandbox.db.engine as engine_module
 from sandbox.db.models import Base
@@ -24,7 +24,9 @@ from sandbox.db.models import Base
 async def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
     """把全局引擎指到临时库，并建好表。"""
     url = f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}"
-    engine = create_async_engine(url)
+    # 引擎从 `make_engine` 来，不自己拼一个：池的参数（比如 pre-ping）必须和
+    # 生产那一个一模一样，否则"取消之后池还好不好用"测的是另一个池。
+    engine = engine_module.make_engine(url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

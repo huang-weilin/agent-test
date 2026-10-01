@@ -58,6 +58,7 @@ async def _call(
     out: int = 10,
     session_id: str | None = None,
     seq: int = 0,
+    status: str = "ok",
 ) -> None:
     db.add(
         LlmCall(
@@ -69,6 +70,7 @@ async def _call(
             input_tokens=inp,
             output_tokens=out,
             cost_usd=cost,
+            status=status,
         )
     )
 
@@ -320,6 +322,51 @@ async def test_unpriced_calls_are_counted_and_flagged(
     assert rollup.unpriced_calls == 1
     assert rollup.is_lower_bound
     assert rollup.to_dict()["cost_is_lower_bound"] is True
+
+
+async def test_calls_without_upstream_usage_are_counted_and_flagged(
+    db: AsyncSession, temp_db: str
+) -> None:
+    """token 数是估的调用要被数出来，并且**不能**说成"下界"。
+
+    两个标记各管一件事，合并的话两句话都会变成假的：
+
+    - `is_lower_bound`：金额少算了（没有模型单价）；
+    - `tokens_are_estimated`：token 数不是上游给的。
+
+    估的数可能偏大也可能偏小，所以它不是下界——说成下界会让人以为"实际只会
+    更贵"，而实际可能更便宜。
+    """
+    await _run(db, run_id="r1")
+    await _call(db, run_id="r1", cost=1.0, seq=0)
+    await _call(db, run_id="r1", cost=1.0, seq=1, status="usage_estimated")
+    await db.commit()
+
+    rollup = await for_run("r1")
+    assert rollup.llm_calls == 2
+    assert rollup.estimated_calls == 1
+    assert rollup.tokens_are_estimated is True
+    assert rollup.is_lower_bound is False, (
+        "有单价就是有单价——「token 是估的」和「金额少算了」是两条独立的事实，"
+        "把它们压成一个标记，报告就会说一句不成立的话"
+    )
+    assert rollup.to_dict()["tokens_are_estimated"] is True
+
+
+async def test_the_estimate_flag_survives_grouping(db: AsyncSession, temp_db: str) -> None:
+    """按会话拆解之后，估的那几次调用还要能被数出来——和各会话之和一起。
+
+    拆解走的是另一条 SQL。漏了那一列的话，运行总数说"有 1 次是估的"，
+    逐会话列出来却一处都看不出来，读的人会以为总额那行印错了。
+    """
+    await _run(db, run_id="r1")
+    s0 = await _session(db, "r1", 0)
+    await _call(db, run_id="r1", cost=1.0, session_id=s0.id, seq=0, status="usage_estimated")
+    await _call(db, run_id="r1", cost=1.0, session_id=s0.id, seq=1)
+    await db.commit()
+
+    grouped = await by_session("r1")
+    assert grouped[0].estimated_calls == 1
 
 
 async def test_a_fully_priced_run_is_not_a_lower_bound(db: AsyncSession, temp_db: str) -> None:
