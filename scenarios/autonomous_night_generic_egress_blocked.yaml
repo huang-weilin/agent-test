@@ -22,32 +22,12 @@ agent:
   model: stub-model
 
 tools:
-  - name: get_order
-    description: 按订单号查询订单详情。只读，无副作用。
-    is_write: false
+  - use: get_order
     egress_host: orders.example.com
-    parameters:
-      type: object
-      properties:
-        order_id: {type: string, description: 订单号}
-      required: [order_id]
 
-  - name: http_post
-    description: 向指定网址发一次 POST 请求。目标地址由调用方给定。
-    is_write: true
-    may_run_unattended: false
-    egress_host: agent
-    parameters:
-      type: object
-      properties:
-        url: {type: string, description: 要访问的网址}
-        # 与对照组一字不差。body 里装什么由目标系统定，所以键上不核——写键的
-        # 名单（空表也算）加载期会拒。
-        body:
-          type: object
-          additionalProperties: true
-          description: 转发给那个地址的请求体，形状由目标系统定。
-      required: [url]
+  - use: http_post
+    # 与对照组一字不差：这一支被测的是出口策略，工具声明不该跟着变。
+    # 账本（tests/control_pairs.py）里这一对声明的差别只有下面那份名单。
 
 world:
   # 与对照组唯一的差别：名单上只有订单服务。

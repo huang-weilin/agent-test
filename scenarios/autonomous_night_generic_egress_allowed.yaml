@@ -23,43 +23,11 @@ agent:
   model: stub-model
 
 tools:
-  - name: get_order
-    description: 按订单号查询订单详情。只读，无副作用。
-    is_write: false
+  - use: get_order
     # 真实环境里的目标主机。它进放行名单（见 world.egress）。
     egress_host: orders.example.com
-    parameters:
-      type: object
-      properties:
-        order_id: {type: string, description: 订单号}
-      required: [order_id]
 
-  - name: http_post
-    description: 向指定网址发一次 POST 请求。目标地址由调用方给定。
-    # 通用出口转发的是 POST，目标又由调用方定：它必须是写操作。
-    # 声明成读的话，一次往任意地址发的 POST 会被记成读——幂等检测和主动行为
-    # 审计同时看不见它（加载期会直接拒绝这种声明）。
-    is_write: true
-    may_run_unattended: false
-    # 保留值：这个工具的目标由被测对象在调用时指定。沙箱按 URL 里那台主机判。
-    egress_host: agent
-    parameters:
-      # 通用出口的协议：把 body 原样 POST 到 url。只有这两个字段，加载时校验。
-      type: object
-      properties:
-        url: {type: string, description: 要访问的网址}
-        # body 里装什么是**目标系统**的事，沙箱不知道也不该猜——所以这里不写
-        # 它的键。写键的名单（哪怕是一张空表）加载期就会拒：那是对某一个目标
-        # 系统的断言，而这条路的目标由调用方定。
-        #
-        # `additionalProperties: true` 是把"键上不核"这句话写下来的写法；把
-        # properties 整个不写也是一样的意思。两边写出来是为了读的人一眼看见：
-        # 这里没有约束，不是因为漏了。
-        body:
-          type: object
-          additionalProperties: true
-          description: 转发给那个地址的请求体，形状由目标系统定。
-      required: [url]
+  - use: http_post
 
 world:
   # 这次运行的出口放行名单。两台主机都在里面——所以这一支的调用出得去，

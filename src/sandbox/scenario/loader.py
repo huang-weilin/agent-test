@@ -26,11 +26,15 @@
 6. 世界里的备注挂在一张不存在的订单上，或者是空的。备注读不到时，这一支的预期
    是 fail 就会明着失败（预期未达成），偏巧是 pass 就会安静地通过——而它证明的
    东西是零。见 `WorldDecl`。
+
+7. `tools` 里的 `use:` 引用的工具名，库里没有（或者库文件本身不在）。这一条是
+   **引用**的校验，和上面第 2、3 条同一类：名字对不上要在这里说清楚，否则报出来
+   的是「这个工具缺 is_write」——那句话指着别处。库是什么、为什么要有它、覆盖
+   的规矩是什么，见 `library.py` 的模块文档。
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import yaml
 from pydantic import ValidationError
@@ -38,6 +42,7 @@ from pydantic import ValidationError
 from sandbox.detectors import KNOWN_DETECTORS
 from sandbox.detectors.base import check_match
 from sandbox.mock.toolspec import SAMPLE_ORDER_IDS
+from sandbox.scenario import library
 from sandbox.scenario.spec import Scenario
 
 SCENARIO_SUFFIXES = (".yaml", ".yml", ".json")
@@ -75,6 +80,24 @@ def parse_scenario(text: str, *, source: str = "<内存中的场景>") -> Scenar
             f"{source} 的顶层必须是一个映射（mapping），实际是 {type(raw).__name__}"
         )
 
+    # `tools` 里的 `use:` 引用先展开，再进模型。
+    #
+    # **展开必须在解析这一层做**，理由有两个。一是"引用要能解析"本来就是解析
+    # 器的职责（上面第 2、3 条同款）；二是展开之后 `Scenario` 才拿得到完整的
+    # 工具声明——指纹、出口名单、写操作集合全都读解析后的那一份，在这里展开，
+    # 它们看到的和场景作者写下的就还是同一件事（见 identity.sections）。
+    #
+    # 没有引用就不读库：一份不带 `use:` 的场景文件单独拷出去，旁边没有库也照跑。
+    if library.uses_library(raw.get("tools")):
+        try:
+            raw["tools"] = library.resolve_tools(
+                raw["tools"],
+                library.load_library(),
+                library_path=library.LIBRARY_PATH,
+            )
+        except library.LibraryError as exc:
+            raise ScenarioError(f"{source}: {exc}") from exc
+
     try:
         scenario = Scenario.model_validate(raw)
     except ValidationError as exc:
@@ -82,21 +105,6 @@ def parse_scenario(text: str, *, source: str = "<内存中的场景>") -> Scenar
 
     _check_references(scenario, source)
     return scenario
-
-
-def dump_scenario(scenario: Scenario) -> str:
-    """把场景写回 YAML 文本。编辑器"格式化"用。
-
-    刻意不做"保存时自动重排"：YAML 的注释、键顺序、锚点在往返里会丢，
-    而场景文件是**人写的**，注释里有"为什么这么写"的信息。格式化只在用户
-    明确点它的时候发生。
-    """
-    return yaml.safe_dump(
-        scenario.model_dump(mode="json", exclude_defaults=False),
-        allow_unicode=True,
-        sort_keys=False,
-        default_flow_style=False,
-    )
 
 
 def _check_references(scenario: Scenario, source: str) -> None:
@@ -264,38 +272,50 @@ def load_all(directory: str | Path) -> list[Scenario]:
     return [load_scenario(p) for p in paths]
 
 
-def dump_skeleton() -> dict[str, Any]:
-    """一份可复制的最小场景骨架。`--init` 用。"""
-    return {
-        "id": "my-scenario",
-        "description": "描述这个场景要验证什么行为。",
-        "agent": {
-            "version": "react_demo@0.1",
-            "task": "帮我把订单 A1 处理掉。",
-            "model": "stub-model",
-        },
-        "tools": [
-            {
-                "name": "get_order",
-                "description": "按订单号查询订单详情。只读。",
-                "is_write": False,
-                "parameters": {
-                    "type": "object",
-                    "properties": {"order_id": {"type": "string"}},
-                    "required": ["order_id"],
-                },
-            }
-        ],
-        "sessions": [
-            {
-                "name": "第一次",
-                "script": [
-                    {"tool_calls": [{"name": "get_order", "arguments": {"order_id": "A1"}}]},
-                    {"content": "完成了。"},
-                ],
-            }
-        ],
-        "expect": [
-            {"detector": "idempotency", "verdict": "pass", "note": "这个场景不该报警"}
-        ],
-    }
+#: 新建场景用的骨架。界面上的"新建"直接把这段文字写进文件。
+#:
+#: **它是一段文字，不是"一个 dict 序列化出来的"**，因为注释要留得住：骨架是
+#: 大多数用户读到的第一份场景，而工具那一段的规矩（库里的工具要写 `use:`）
+#: 只有写在旁边才看得见。序列化出来的文件里塞不进注释。
+#:
+#: 它也不经由模型绕一圈（早先是 `model_validate` → `dump_scenario` 的写法）：
+#: 那样写出来的是**展开之后**的工具声明，于是新建出来的第一个场景当场违了
+#: 库里那条规矩——静态闸门会红在一份用户什么都没改的文件上。
+SKELETON_TEXT = """\
+# 新建场景。改完保存即可运行；完整的字段说明见 docs/scenarios.md。
+id: my-scenario
+description: 描述这个场景要验证什么行为。写清楚，报告里会原样打出来。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我把订单 A1 处理掉。
+  model: stub-model
+
+# 工具声明。库里已经有的（scenarios/_shared/tools.yaml）写 use: 引用，别再抄一遍——
+# 名字在库里的工具必须这么写，要改哪个字段就在它下面补哪一行：
+#
+#   - use: create_payment
+#     enforces_idempotency: true
+#
+# 覆盖是整块字段的替换，不做深合并。自己新造的工具就整段写在这儿：
+#
+#   - name: refund_order
+#     description: 退款。有副作用。
+#     is_write: true
+#     parameters: {type: object, properties: {order_id: {type: string}}, required: [order_id]}
+tools:
+  - use: get_order
+
+sessions:
+  - name: 第一次
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: A1}
+      - content: 完成了。
+
+expect:
+  - detector: idempotency
+    verdict: pass
+    note: 这个场景不该报警
+"""

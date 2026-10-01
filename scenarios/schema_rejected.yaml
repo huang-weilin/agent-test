@@ -16,20 +16,9 @@ agent:
   model: stub-model
 
 tools:
-  # 它没有声明 `get_order` 的话，演示 Agent 付款前自己那一次查到期（`CHECK_DUE`）
-  # 会变成一次"调用了未声明的工具"——这个场景讲的是参数不合规，不是那个。
-  - name: get_order
-    description: 按订单号查询订单详情。只读，无副作用。
-    is_write: false
-    parameters:
-      type: object
-      properties:
-        order_id: {type: string, description: 订单号}
-      required: [order_id]
+  - use: get_order
 
-  - name: list_orders
-    description: 分页列出订单。只读，无副作用。
-    is_write: false
+  - use: list_orders
     parameters:
       type: object
       properties:
@@ -41,11 +30,7 @@ tools:
         page_size: {type: integer, minimum: 1, maximum: 50, description: 每页多少条}
       required: [status, page]
 
-  - name: create_payment
-    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
-    is_write: true
-    idempotency_param: idempotency_key
-    enforces_idempotency: false
+  - use: create_payment
     parameters:
       type: object
       properties:

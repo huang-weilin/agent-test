@@ -13,16 +13,7 @@ agent:
   model: stub-model
 
 tools:
-  - name: list_orders
-    description: 分页列出订单。只读，无副作用。
-    is_write: false
-    parameters:
-      type: object
-      properties:
-        status: {type: string, description: 只看某种状态的订单}
-        page: {type: integer, description: 页码，从 1 开始}
-        page_size: {type: integer, description: 每页多少条}
-      required: [status, page]
+  - use: list_orders
     # page 是**光标**，不是这个操作的身份。不声明的话检测器拿数值的相对差去猜：
     # page 从 1 涨到 10，第 1 次和第 6 次的相似度只剩 0.72，一串连续翻页会被切成
     # 5+3 两个簇，每个簇都够不着告警条数——下面那条 warning 预期于是永远不成立，

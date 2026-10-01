@@ -14,27 +14,9 @@ agent:
     DEMO_AGENT_STREAM: "1"
 
 tools:
-  - name: get_order
-    description: 按订单号查询订单详情。只读，无副作用。
-    is_write: false
-    parameters:
-      type: object
-      properties:
-        order_id: {type: string, description: 订单号}
-      required: [order_id]
+  - use: get_order
 
-  - name: create_payment
-    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
-    is_write: true
-    idempotency_param: idempotency_key
-    enforces_idempotency: false
-    parameters:
-      type: object
-      properties:
-        order_id: {type: string, description: 订单号}
-        amount: {type: number, description: 金额}
-        idempotency_key: {type: string, description: 幂等键}
-      required: [order_id, amount]
+  - use: create_payment
 
 sessions:
   - name: 正常处理

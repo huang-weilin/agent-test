@@ -89,6 +89,10 @@ def list_scenarios(*, root: Path | None = None) -> list[tuple[str, Path]]:
 def write_scenario_text(scenario_id: str, text: str, *, root: Path | None = None) -> Path:
     """把场景文本写进文件。
 
+    **原样写，不做重排。** YAML 的注释、键顺序、`use:` 引用在往返里会丢，而
+    场景文件是**人写的**：注释里写着"为什么这么写"，那是这份文件一半的信息量，
+    重新序列化一遍就是把它们悄悄删掉。
+
     **调用方必须已经校验过这段文本能被加载**（`loader.parse_scenario`）。
     这里不做内容校验，是因为校验失败的**报错信息**要显示在编辑器里、和用户
     刚敲的内容并排，那个上下文只有路由层有。

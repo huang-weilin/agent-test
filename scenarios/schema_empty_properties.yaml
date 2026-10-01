@@ -17,9 +17,7 @@ agent:
   model: stub-model
 
 tools:
-  - name: list_orders
-    description: 分页列出订单。只读，无副作用。
-    is_write: false
+  - use: list_orders
     parameters:
       type: object
       # 空表 = 一个键都不许。与对照组唯一的差别就在这一行。

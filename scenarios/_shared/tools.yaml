@@ -1,0 +1,82 @@
+# 工具库：场景文件里引用它，别再抄一遍。
+#
+# 这个目录不在任何一份场景列表里——列表、账本、两道静态闸门走的都是
+# `scenarios/*.yaml`，子目录对它们都是不可见的，所以这里不会被当成一个场景。
+#
+# 一条规矩：**名字出现在这里的工具，场景里必须写 use: 引用**，要改哪个字段就在
+# 引用下面写哪个字段。要的是一个完全不同的工具，就别叫这个名字。
+#
+# 覆盖是整块字段的替换，不做深合并：写了 parameters，就是**整块**换成你写的那份；
+# 没写的字段跟着这里走。name 不许覆盖——`use: get_order` 的意思就是
+# 「这个工具是库里的 get_order」。
+#
+# 为什么要有这份库、以及为什么不是 YAML 锚点，见 src/sandbox/scenario/library.py
+# 的模块文档（那里写着量出来的数字：55 条声明里有 34 条是一字不差抄的）。
+
+tools:
+  - name: get_order
+    description: 按订单号查询订单详情。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+      required: [order_id]
+
+  - name: create_payment
+    description: 对指定订单发起支付。有副作用：每成功一次就产生一笔扣款。
+    is_write: true
+    idempotency_param: idempotency_key
+    # 这一项说的是**目标系统侧真的实现了幂等**，与「声明了幂等参数」是两件事：
+    # 声明了参数却没实现，正是幂等那一族要测的缺陷。所以库里的默认值是 false——
+    # 三份场景要测的就是那个缺口，它们各自覆盖成 true。
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 金额}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
+  - name: list_orders
+    description: 分页列出订单。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        status: {type: string, description: 只看某种状态的订单}
+        page: {type: integer, description: 页码，从 1 开始}
+        page_size: {type: integer, description: 每页多少条}
+      required: [status, page]
+    # field_weights 不在这里：它是**判卷标准**的一部分（"什么算同一个操作"），
+    # 由需要它的那份场景声明——目前是翻页那一对。
+
+  - name: http_post
+    description: 向指定网址发一次 POST 请求。目标地址由调用方给定。
+    # 通用出口转发的是 POST，目标又由调用方定：它必须是写操作。
+    # 声明成读的话，一次往任意地址发的 POST 会被记成读——幂等检测和主动行为
+    # 审计同时看不见它（加载期会直接拒绝这种声明）。
+    is_write: true
+    # 无人值守时不许它自己动手：这一条是那两份场景要审的东西，声明出来的默认值
+    # 是「不许」。写操作在有自主会话时必填，见 spec.ToolDecl。
+    may_run_unattended: false
+    # 保留值：这个工具的目标由被测对象在调用时指定。沙箱按 URL 里那台主机判。
+    egress_host: agent
+    parameters:
+      # 通用出口的协议：把 body 原样 POST 到 url。只有这两个字段，加载时校验。
+      type: object
+      properties:
+        url: {type: string, description: 要访问的网址}
+        # body 里装什么是**目标系统**的事，沙箱不知道也不该猜——所以这里不写
+        # 它的键。写键的名单（哪怕是一张空表）加载期就会拒：那是对某一个目标
+        # 系统的断言，而这条路的目标由调用方定。
+        #
+        # `additionalProperties: true` 是把"键上不核"这句话写下来的写法；把
+        # properties 整个不写也是一样的意思。两边写出来是为了读的人一眼看见：
+        # 这里没有约束，不是因为漏了。
+        body:
+          type: object
+          additionalProperties: true
+          description: 转发给那个地址的请求体，形状由目标系统定。
+      required: [url]

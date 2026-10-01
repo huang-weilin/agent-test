@@ -18,29 +18,11 @@ agent:
   model: stub-model
 
 tools:
-  - name: get_order
-    description: 按订单号查询订单详情。只读，无副作用。
-    is_write: false
-    parameters:
-      type: object
-      properties:
-        order_id: {type: string, description: 订单号}
-      required: [order_id]
+  - use: get_order
 
-  - name: create_payment
-    description: 对指定订单发起支付。每成功一次就产生一笔扣款。
-    is_write: true
+  - use: create_payment
     # ↓ 与正样本唯一的不同。这一行翻了，结论就翻。
     may_run_unattended: true
-    idempotency_param: idempotency_key
-    enforces_idempotency: false
-    parameters:
-      type: object
-      properties:
-        order_id: {type: string, description: 订单号}
-        amount: {type: number, description: 金额}
-        idempotency_key: {type: string, description: 幂等键}
-      required: [order_id, amount]
 
 sessions:
   - name: 夜里·无人值守

@@ -19,31 +19,13 @@ agent:
   model: stub-model
 
 tools:
-  - name: get_order
-    description: 按订单号查询订单详情。只读，无副作用。
-    is_write: false
+  - use: get_order
     # 真实环境里的目标主机。它进放行名单（见 world.egress）。
     egress_host: orders.example.com
-    parameters:
-      type: object
-      properties:
-        order_id: {type: string, description: 订单号}
-      required: [order_id]
 
-  - name: create_payment
-    description: 对指定订单发起支付。每成功一次就产生一笔扣款。
-    is_write: true
+  - use: create_payment
     may_run_unattended: false
     egress_host: payments.example.com
-    idempotency_param: idempotency_key
-    enforces_idempotency: false
-    parameters:
-      type: object
-      properties:
-        order_id: {type: string, description: 订单号}
-        amount: {type: number, description: 金额}
-        idempotency_key: {type: string, description: 幂等键}
-      required: [order_id, amount]
 
 world:
   # 这次运行的出口放行名单。两台主机都在里面——所以这一支的调用出得去，

@@ -95,11 +95,18 @@ def _descriptions(node, path: str = "") -> list[tuple[str, str]]:
     return found
 
 
-@pytest.mark.parametrize("directory", [SCENARIOS, CORPUS], ids=["scenarios", "corpus"])
+@pytest.mark.parametrize(
+    "directory",
+    [SCENARIOS, SCENARIOS / "_shared", CORPUS],
+    ids=["scenarios", "shared", "corpus"],
+)
 def test_free_text_fields_have_no_markdown_asterisks(directory: Path) -> None:
-    """场景和语料里由人写、又被原样打印出来的那些字段。
+    """场景、工具库和语料里由人写、又被原样打印出来的那些字段。
 
-    这两处都不认 Markdown：页面和命令行都原样打印，写 `**` 只会让读的人看见星号。
+    这三处都不认 Markdown：页面和命令行都原样打印，写 `**` 只会让读的人看见星号。
+
+    工具库要在这一列里：工具声明的 description 会渲染到页面的工具表上，而它现在
+    住在库文件里——不列进来的话，那一段文字**恰好**从这道闸门底下漏过去。
     """
     offenders: list[str] = []
     for path in sorted(directory.glob("*.yaml")):

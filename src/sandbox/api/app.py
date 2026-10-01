@@ -46,7 +46,6 @@ from sandbox.memory.observe import phase_label
 from sandbox.regression import cases, diff
 from sandbox.scenario import identity, loader
 from sandbox.scenario.loader import ScenarioError
-from sandbox.scenario.spec import Scenario
 
 log = structlog.get_logger(__name__)
 
@@ -286,9 +285,11 @@ def create_app(
             return RedirectResponse(f"/scenarios/{scenario_id}", status_code=303)
         # 骨架经由解析器过一遍再写：**连我们自己的模板都要通过那道校验**，
         # 不然就会有一个"编辑器一保存就报错"的默认场景。
-        text = loader.dump_scenario(
-            Scenario.model_validate(loader.dump_skeleton())
-        )
+        #
+        # 原文照写，不再经由模型绕一圈序列化：骨架里的工具是 `use:` 引用，而
+        # 序列化出来的是**展开之后**的声明——于是新建出来的第一个场景当场违了
+        # 「库里的工具要写 use:」那条规矩，红在一份用户一个字都没改的文件上。
+        text = loader.SKELETON_TEXT
         loader.parse_scenario(text, source="<新建场景骨架>")
         paths.write_scenario_text(scenario_id, text, root=app.state.scenarios_root)
         return RedirectResponse(f"/scenarios/{scenario_id}", status_code=303)
