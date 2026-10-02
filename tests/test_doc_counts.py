@@ -105,7 +105,9 @@ def _collected_count() -> int:
     见文件头最后一段。
     """
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only"],
+        # `-p no:cacheprovider`：这条闸门是在 pytest 里起 pytest，两个进程会同时写
+        # 同一份 `.pytest_cache`（Windows 上那是个可能被锁住的文件）。收集数不需要缓存。
+        [sys.executable, "-m", "pytest", "--collect-only", "-p", "no:cacheprovider"],
         cwd=ROOT,
         capture_output=True,
         text=True,
