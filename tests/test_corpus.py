@@ -178,6 +178,24 @@ def test_source_must_be_in_the_whitelist() -> None:
     _rejects(_item(source="我从哪儿抄的忘了"), "白名单")
 
 
+def test_call_status_must_be_in_the_vocabulary() -> None:
+    """语料里的 `status` 和边界上写的是**同一份词表**，错一个字就是另一种判定。
+
+    `CallView.reached_target` 只问一句：`status` 在不在 `REACHED_TARGET` 里。
+    不在就一律算「没到目标系统」，也就是**这次调用一次都没发生过**，不进任何
+    判定。所以 `erorr` 不是"填错了"，是"把这次调用删掉了"——而且删得很安静：
+    报告里少一条和少得对长得一模一样。
+
+    边界那边的取值一直有闸门（`test_call_status_vocabulary.py`，拿 `proxy/app.py`
+    的十处真实写法核对），语料这边是 `status` 的**第二个生产者**，原先谁都没核。
+    这条补的就是那半边：同一份名单，两个生产者，两边都要有人看着。
+    """
+    _rejects(
+        _item(calls=[{"tool": "get_order", "args": {"order_id": "A1"}, "status": "erorr"}]),
+        "词表",
+    )
+
+
 def test_missing_why_is_rejected() -> None:
     _rejects(_item(why="   "), "why")
 

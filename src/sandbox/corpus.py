@@ -43,7 +43,13 @@ import yaml
 
 from sandbox.db.models import DetectorVerdict
 from sandbox.detectors import KNOWN_DETECTORS, run_all
-from sandbox.detectors.base import CallView, Exemption, ExemptionSet, Finding
+from sandbox.detectors.base import (
+    CALL_STATUSES,
+    CallView,
+    Exemption,
+    ExemptionSet,
+    Finding,
+)
 from sandbox.detectors.idempotency import ToolFacts
 from sandbox.detectors.memory import ForbiddenText, MemoryRules, MustHold
 from sandbox.memory.observe import PHASE_END, PHASE_START, MemoryEntry, MemoryObservation
@@ -498,6 +504,20 @@ def _parse_calls(
             )
         session = by_ordinal[ordinal]
         args = dict(mapping.get("args") or {})
+        # `status` 的取值受 `CALL_STATUSES` 管辖，**和边界那边是同一份名单**。
+        # 原先这里谁都没核：写个错字（`erorr`）会静默落进 `reached_target` 的
+        # "不在名单里就一律算没到"那一支，于是这次调用被判成**一次都没发生过**，
+        # 不进任何判定——而"漏判"和"判对了"在报告上长得一模一样。
+        #
+        # 拦它的理由和上面拦"调了没声明的工具"是同一条：不拦的后果是判定从此
+        # 建立在一个瞎猜上。区别只在错字落在键上还是落在值上。
+        status = str(mapping.get("status", "ok"))
+        if status not in CALL_STATUSES:
+            raise CorpusError(
+                f"{where}: status {status!r} 不在词表里（{sorted(CALL_STATUSES)}）。"
+                f"词表外的取值会被 `reached_target` 判成「没到目标系统」，也就是这次调用"
+                f"一次都没发生过——多半是打错字，而不是你真想表达那个意思。"
+            )
         call_id = f"{item_id}#{i}"
         lines[call_id] = i
         calls.append(

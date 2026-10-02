@@ -38,7 +38,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 #: 会被扫的两类文本载体。
-MD_TREES = ((ROOT, "*.md"), (ROOT / "docs", "**/*.md"), (ROOT / "agents", "**/*.md"))
+#:
+#: `tests/**/*.md` 是 2026-10-02 补进来的：加一条探针豁免时，那道"白名单不许腐烂"
+#: 的闸门反过来指出我写错了——`tests/corpus/README.md` **根本不在扫描范围里**，
+#: 所以它引的路径一条都没被核过，而它里面确实有几条是指错的（探针住在上一层，
+#: 要写 `../_probes/`，原文写的是 `_probes/`）。一份点了几十个文件名的规矩文档
+#: 没人核，正是这道闸门存在的理由本身。
+MD_TREES = (
+    (ROOT, "*.md"),
+    (ROOT / "docs", "**/*.md"),
+    (ROOT / "agents", "**/*.md"),
+    (ROOT / "tests", "**/*.md"),
+)
 PY_TREES = (ROOT / "src" / "sandbox", ROOT / "scripts", ROOT / "tests")
 
 #: 反引号里、带斜杠、且以这些后缀结尾的，才算"在指一个文件"。
