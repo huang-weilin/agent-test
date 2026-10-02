@@ -443,7 +443,9 @@ def test_a_declared_key_does_not_merge_different_targets(make_call) -> None:
         "modify_pending_order_address", True, identity_fields=("order_id",)
     )}
     calls = [
-        make_call(i, "modify_pending_order_address", {"order_id": oid, "address1": "X1"}, is_write=True)
+        make_call(
+            i, "modify_pending_order_address", {"order_id": oid, "address1": "X1"}, is_write=True
+        )
         for i, oid in enumerate(("A1", "B2", "C3"), start=1)
     ]
     findings = IdempotencyDetector(identity).run(calls, ExemptionSet())
