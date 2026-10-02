@@ -1,0 +1,192 @@
+{
+  "what": "τ-bench 每个工具的读写属性，以及它是怎么判出来的（写操作漏报 = 漏掉重复扣款，所以这件事不许靠看名字像）。",
+  "scope": "问的是「会不会改任务数据 data」，不是「会不会写日志」——两个 think 都往日志里追加一句话，在这张表里仍然是读。",
+  "source": "τ-bench（MIT）airline 15 个 + retail 15 个工具，共 30 个；判它的脚本与它读的第三方源码都在仓库外（仓库根目录旁边那个 _traces/）。",
+  "how": {
+    "判据甲（AST）": "最终判据：invoke 里有没有改动落在指向 data 的名字上（别名闭包迭代到不动点）。",
+    "判据乙（接口描述）": "交叉核对，不是判据：get_info() 里 function.description 的动词。它只负责把该有人看一眼的行挑出来，逐行说过什么记在 by_description 里。",
+    "人工裁决": "机械规则答不了，人读过代码之后的裁决；理由在 why 里。"
+  },
+  "tools": {
+    "airline__book_reservation": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "airline__calculate": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    },
+    "airline__cancel_reservation": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "airline__get_reservation_details": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    },
+    "airline__get_user_details": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    },
+    "airline__list_all_airports": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    },
+    "airline__search_direct_flight": {
+      "by_description": false,
+      "how": "人工裁决",
+      "is_write": false,
+      "why": "`results = []` 是本地新列表；`append` 进去的是字典推导式生成的新 dict，`update` 加进去的是 dates 子字典里的值。一路没有一处落到 data 上。"
+    },
+    "airline__search_onestop_flight": {
+      "by_description": false,
+      "how": "人工裁决",
+      "is_write": false,
+      "why": "`result1`/`result2` 是 `{k: v for k, v in flightX.items()}` 造的新 dict，`.update()` 是往新 dict 里塞。它们被算成「沾过 data」，但改的不是 data。"
+    },
+    "airline__send_certificate": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "airline__think": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": "判据乙报写，匹配到的是描述里那句「will not obtain new information or change the database」里的 change——一句否定。而甲的证据是空的：invoke 里一处改动写法都没有。采信甲，判读。"
+    },
+    "airline__transfer_to_human_agents": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    },
+    "airline__update_reservation_baggages": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "airline__update_reservation_flights": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "airline__update_reservation_passengers": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "retail__calculate": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    },
+    "retail__cancel_pending_order": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "retail__exchange_delivered_order_items": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "retail__find_user_id_by_email": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": "乙匹配到的是「the function will return an error message」里的 return——这里是「返回一个值」，不是「退货」。甲的 invoke 里一处改动写法都没有。"
+    },
+    "retail__find_user_id_by_name_zip": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": "同零售那个按邮箱找的：乙匹配到的是「will return an error message」里的 return。甲的 invoke 里一处改动写法都没有。"
+    },
+    "retail__get_order_details": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    },
+    "retail__get_product_details": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    },
+    "retail__get_user_details": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    },
+    "retail__list_all_product_types": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    },
+    "retail__modify_pending_order_address": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "retail__modify_pending_order_items": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "retail__modify_pending_order_payment": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "retail__modify_user_address": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "retail__return_delivered_order_items": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": true,
+      "why": "invoke 里有改动落在直接指向 data 的名字上"
+    },
+    "retail__think": {
+      "by_description": true,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": "同 airline__think：乙匹配到的是「will not ... change the database」里的 change，否定句。甲的 invoke 里一处改动写法都没有。"
+    },
+    "retail__transfer_to_human_agents": {
+      "by_description": false,
+      "how": "判据甲（AST）",
+      "is_write": false,
+      "why": ""
+    }
+  }
+}

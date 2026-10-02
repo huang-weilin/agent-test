@@ -53,7 +53,12 @@ MD_TREES = (
 PY_TREES = (ROOT / "src" / "sandbox", ROOT / "scripts", ROOT / "tests")
 
 #: 反引号里、带斜杠、且以这些后缀结尾的，才算"在指一个文件"。
-_REF = re.compile(r"`([A-Za-z0-9_./\-]+\.(?:py|md|yaml|toml))`")
+#:
+#: `json` 是 2026-10-03 补进来的：`tests/corpus/tau-tools-is-write.json` 进了仓库之后，
+#: 它被点名的那一处（`tests/corpus/README.md`）在这道闸门底下**根本没有后缀能匹配上**，
+#: 于是"指一份数据文件"成了唯一一种没人核的引用。补进来时先量过：全仓当时没有别的
+#: 反引号 `.json` 路径，不会因为这一改冒出历史遗留的红。
+_REF = re.compile(r"`([A-Za-z0-9_./\-]+\.(?:py|md|yaml|toml|json))`")
 
 #: 解析路径时依次试的根。见文件头。
 ROOTS = (
