@@ -726,6 +726,25 @@
   usage 帧，或被中途断开），token 数是按看到的内容估的。
   <strong>这几行是估算，不是账单</strong>——估的数可能偏大也可能偏小。
   {% endif %}
+  {# 「没这个键」和「键是 null」都读成**没对账**：老报告是这道对账存在之前存下的，
+     它确实没比过——而那时候明细正丢着（2026-10-03 修的）。写成"没这个键就什么
+     都不说"的话，翻历史报告的人会以为那些数是对过账的。 #}
+  {% if report.unrecorded_llm_calls is not defined or report.unrecorded_llm_calls is none %}
+  <br><span class="star">‡</span>
+  本次运行没有对账（结账次数与明细条数没比过）。<strong>上面的数可能少算。</strong>
+  {% elif report.unrecorded_llm_calls %}
+  <br><span class="star">‡</span>
+  {# 两个方向分开说：正数是明细少了（金额是下界），负数是明细比结账还多（报告
+     算得比落库早，也是下界）。折成一个数说，其中一支的读者会被误导。 #}
+  {% if report.unrecorded_llm_calls > 0 %}
+  有 {{ report.unrecorded_llm_calls }} 次调用的账结了、明细没落（落库被取消或
+  写失败）。<strong>上面的次数和金额都少算了这几笔，是下界，不是账单。</strong>
+  这是沙箱自己的账没记全，和被测对象做了什么无关。
+  {% else %}
+  明细比结账次数多 {{ 0 - report.unrecorded_llm_calls }} 条，说明上面这几行算得
+  比落库还早。<strong>实际只会更多，不是账单。</strong>
+  {% endif %}
+  {% endif %}
 </p>
 {% if report.tool_costs and report.tool_costs.tools %}
 {# 这一节报的是**上下文占用**，不是"这个工具花了多少钱"。工具调用本身不花

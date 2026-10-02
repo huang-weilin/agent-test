@@ -331,6 +331,49 @@ async def test_cost_dashboard_shows_the_per_tool_section(
     assert "没做的" not in page
 
 
+async def test_the_run_page_says_when_the_ledger_did_not_reconcile(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """账没对上时，运行页必须说出来。
+
+    终端那边由 `tests/test_gateway_stream.py` 量（那里量的是一次真的落库失败），
+    这一条管的是第二个出口：页面。两处各一条，因为只接一处的话，另一处被删掉
+    不会有任何东西变红——而**读的人正是从这两处拿数去做决定的**。
+
+    成本和调用次数是从 `LlmCall` 明细重算的：少一条明细，页面上那个"1 次 LLM
+    调用"就少报一次、少算一笔钱，而它长得和一次真的只调了一次的运行一模一样。
+    差额只有网关那本内存账知道（`budget.calls`，在 `settle` 里同步加一），所以
+    它必须印在**读那行数字的地方**，不能只写进日志。
+
+    三个方向一起量：对不上要说、对上了不许喊、老报告要按"没对账"说。
+    """
+    for run_id, gap in (("run-ledger-gap", 2), ("run-ledger-clean", 0)):
+        report = _long_run_report()
+        report["cost"] = _COST
+        report["unrecorded_llm_calls"] = gap
+        await _seed_diff_run(db, run_id, report)
+    # 老报告：连这个键都没有（它是在这道对账存在之前存下的）。
+    legacy = _long_run_report()
+    legacy["cost"] = _COST
+    await _seed_diff_run(db, "run-ledger-legacy", legacy)
+
+    gap_page = (await client.get("/runs/run-ledger-gap")).text
+    assert "有 2 次调用的账结了、明细没落" in gap_page
+    assert "上面的次数和金额都少算了这几笔，是下界，不是账单" in gap_page
+
+    clean_page = (await client.get("/runs/run-ledger-clean")).text
+    assert "明细没落" not in clean_page, (
+        "对上账的运行不许喊。假警报一多，真警报就没人看了——这条对账每次运行"
+        "都会跑，喊错的代价是它很快被无视"
+    )
+
+    legacy_page = (await client.get("/runs/run-ledger-legacy")).text
+    assert "本次运行没有对账" in legacy_page, (
+        "老报告是这道对账存在之前存下的，而那会儿明细正丢着（2026-10-03 修的）。"
+        "什么都不说的话，翻历史报告的人会以为那些数对过账"
+    )
+
+
 async def test_html_is_escaped(client: httpx.AsyncClient, scenarios: Path) -> None:
     """模板必须自动转义。
 

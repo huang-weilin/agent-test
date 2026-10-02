@@ -536,6 +536,56 @@ def test_a_lower_bound_is_not_shown_as_a_precise_number() -> None:
     assert "下界" not in cost[0].before
 
 
+def test_a_ledger_gap_travels_with_the_money_in_the_diff() -> None:
+    """账没对平的时候，这一格印的金额是少算的，得跟着一起说。
+
+    和下面那条的分别在这里：`None` 是**没比过**，非零是**比过、而且明确知道
+    缺了几条**。后者是真的信息——`$0.0100` 比实际少，不标出来就是拿下界冒充
+    账单，而这是这个项目在成本上守得最紧的一条。
+    """
+    settled = {**_report(cost=0.01), "unrecorded_llm_calls": 0}
+    short = {**_report(cost=0.01), "unrecorded_llm_calls": 2}
+    early = {**_report(cost=0.01), "unrecorded_llm_calls": -1}
+
+    def compare_to(after: dict[str, Any]) -> list[diff.Difference]:
+        return _find(
+            diff.compare(_snap(report=settled), _snap(run_id="run-b", report=after)),
+            diff.KIND_COST,
+        )
+
+    missing = compare_to(short)
+    assert missing, "缺了明细的那一侧金额是少算的，这一格不能和正常的一格长得一样"
+    assert "明细缺 2 条" in missing[0].after
+    assert "明细缺" not in missing[0].before
+
+    ahead = compare_to(early)
+    assert ahead
+    assert "明细多 1 条" in ahead[0].after
+
+
+def test_a_report_that_never_reconciled_does_not_invent_a_cost_difference() -> None:
+    """`None`（没对过账）在两份报告之间**不作声**。
+
+    `None` 和 `0` 是两件事——一个是"没比过"，一个是"比过且对上了"。但在**对比**
+    这个场景里把 `None` 也印成一格，升级前后的两次运行（一份有这个键、一份
+    没有）就会**每一次都凭空多出一条成本差**：那不是两次运行的差异，是版本的
+    差异，混进"这次比上次变了什么"里就是一条假警报，而假警报一多真警报就没人看了。
+
+    单看一份报告的地方才打这句（运行页、终端报告），那里没有"另一份"可赖。
+    """
+    legacy = _report(cost=0.01)  # 老版本写的报告，压根没有这个键
+    assert "unrecorded_llm_calls" not in legacy
+
+    for after in (
+        {**_report(cost=0.01), "unrecorded_llm_calls": 0},
+        {**_report(cost=0.01), "unrecorded_llm_calls": None},
+    ):
+        result = diff.compare(_snap(report=legacy), _snap(run_id="run-b", report=after))
+        assert diff.KIND_COST not in _kinds(result), (
+            "「没对过账」和「没这个键」在对比里不能算差异，否则每次升级都会多一条"
+        )
+
+
 def test_a_run_that_crashed_shows_the_error_not_just_a_red_verdict() -> None:
     """"没跑起来"和"跑起来了但没通过"是两回事，报告必须分得开。"""
     current = _snap(

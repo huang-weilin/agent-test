@@ -11,6 +11,11 @@
 
 **凭据**：真实上游的密钥只在这个文件里拼进请求头（`upstream_headers`），
 与非流式路径共用同一个函数。
+
+**落库不挂在请求的生命周期上**（`_DETACHED` / `drain_detached_records`）。这条
+是 2026-10-03 量出来的：取消不是只在"客户端中途跑掉"时才发生，而是每次调用收尾
+都会来，于是每次流式调用都丢明细、报告安静地少报调用次数与金额。上面那两件事
+（结算、明细）现在一个同步、一个被护住，各按各的理由。
 """
 
 from __future__ import annotations
@@ -41,6 +46,27 @@ log = structlog.get_logger(__name__)
 
 #: 真实上游的超时。流式下这是"两个帧之间"的上限，不是整个响应的上限。
 UPSTREAM_TIMEOUT = 120.0
+
+#: 已经**从请求生命周期上摘下来**的落库任务：键是任务，值是"已经没人等它了"。
+#:
+#: 存在的原因是一段实测（2026-10-03）：流式跑一遍三步脚本，网关真的转发了三次
+#: 调用、预算也结了三次账，库里却只落了 **1 条** `LlmCall`；报告于是写「1 次
+#: LLM 调用」，而真值是 3 次——**一个安静地错了三分之二的数**。取消不是发生在
+#: 客户端中途跑掉的时候，而是每次调用收尾时都会来：调用方读完最后一帧就关连接，
+#: starlette 的 task group 随即 cancel 掉整个 scope，而 anyio 的取消是**反复投递**
+#: 的——`finally` 里那个 `await` 一进去就被取消。
+#:
+#: 所以落库不能挂在请求的生命周期上。`asyncio.shield` 把它护住：外层被取消时
+#: 内层照样跑完（这个前提单独量过，`_probes/probe_stream_shield.py`，三支对照）。
+#: 键值对里的那个 `True` 是为**异常**留的：被护住的任务没人 await 它的返回值了，
+#: 它要是抛异常，除了这个回调没人会知道——而"落库失败了但没人记账"正是这一整块
+#: 要防的那种静默。
+_DETACHED: dict[asyncio.Task[Any], bool] = {}
+
+#: 等被摘下来的落库任务跑完的上限。**给得很宽**：一次 DB 写是毫秒级的，这里等 10
+#: 秒只可能是"库真的出事了"。等不到也不拦着运行结束，只是报告里那句"有 N 次调用
+#: 明细没落"会照实说出来（见 `scenario/runner.py` 里那个对账）。
+DRAIN_TIMEOUT = 10.0
 
 #: 输入/输出的字符→token 估算。**这里的注释原来写着"取 3 是往安全的方向估"，
 #: 那句话对英文成立、对中文是反的**——实测（2026-10-01，真上游，四种内容各一次）：
@@ -319,6 +345,38 @@ async def chain_first(first: str, rest: AsyncIterator[str]) -> AsyncIterator[str
         yield line
 
 
+def _forget_detached(task: asyncio.Task[Any]) -> None:
+    """任务收尾：从名单里划掉，并且**把没人听过的异常说出来**。
+
+    被 `shield` 护住的任务在外层取消之后没有人在 await 它。它要是抛了（库锁了、
+    盘满了、连接拿不到），asyncio 只会打一句"Task exception was never retrieved"
+    ——那句在日志里长得像噪音，而它其实是"这次调用的钱没进账"唯一的痕迹。
+    """
+    abandoned = _DETACHED.pop(task, False)
+    if not abandoned or task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("gateway.stream_record_failed", error=repr(exc))
+
+
+async def drain_detached_records(timeout: float = DRAIN_TIMEOUT) -> int:
+    """等被摘下来的落库任务跑完，返回**还剩几个没跑完**。
+
+    报告是在运行收尾时算的，而明细是它重算成本的唯一依据。不让这一步先走完的话，
+    刚被取消的那几次调用会"还没落库"，报告于是把它们算漏——**那正是这次要修的
+    那件事**，只是换了个时刻发生。所以收尾前先等它们回来。
+
+    返回值是"没等到的个数"，不是异常：等不到也要让运行结束（卡在这里比少一条明细
+    更糟），而那个数会被报告念出来（`scenario/runner.py` 里拿它和结账次数对账）。
+    """
+    pending = [t for t in _DETACHED if not t.done()]
+    if not pending:
+        return 0
+    _, still = await asyncio.wait(pending, timeout=timeout)
+    return len(still)
+
+
 async def relay_stream(
     lines: AsyncIterator[str],
     *,
@@ -335,6 +393,11 @@ async def relay_stream(
     断开（被看门狗掐掉、自己崩了、用户关了窗口）：生成器被取消时 `finally`
     照样跑，于是这次调用的账照结。断开的是接收方，上游那次调用是真的发生了——
     不结的话，一套"把 Agent 打断在流中间"的测试会系统性地少算钱。
+
+    两半的待遇不一样，这一点是量出来的、不是设计的：**账是同步结的**（取消吃不
+    掉），**明细是护住的**（`asyncio.shield`，取消之后它自己跑完）。写成"明细
+    直接 await"的时候，每次调用收尾都会丢掉那一条——不是只在客户端跑掉的时候，
+    而是**每一次**，因为取消正好落在那个 `await` 上。
     """
     acc = StreamAccumulator()
     try:
@@ -357,8 +420,8 @@ async def relay_stream(
                 run_id=ctx.run_id,
                 count=acc.unmerged_tool_fragments,
             )
-        try:
-            await settle_and_record(
+        task = asyncio.ensure_future(
+            settle_and_record(
                 ctx,
                 budget,
                 reserved=reserved,
@@ -369,9 +432,24 @@ async def relay_stream(
                 streaming=True,
                 request_bytes=request_bytes,
             )
+        )
+        _DETACHED[task] = False
+        task.add_done_callback(_forget_detached)
+        try:
+            # **护住它。** 这一行是这块代码的全部要点：客户端读完最后一帧就关连接，
+            # 取消随即落在下面这个 `await` 上——直接 await 的话，落库走不完，这次
+            # 调用就从明细里消失了（预算那本账不受影响，它是上面同步结的，丢的只是
+            # 明细。而报告是从明细重算的，于是钱少算、调用次数少报，两样都不出声）。
+            await asyncio.shield(task)
         except asyncio.CancelledError:
-            # 生成器正被取消。预算已经结清（上面那一行是同步的），**丢的是明细**：
-            # 成本是从明细重算的，所以这次调用会少算一次。这条日志是它唯一的痕迹，
-            # 别把它读成"没事"。
-            log.warning("gateway.stream_record_lost", run_id=ctx.run_id)
+            # 外层被取消，内层没有：它继续跑完，这一条明细照样落得下来。
+            # 标记成"没人等它了"，好让回调替它把异常说出来。
+            _DETACHED[task] = True
+            log.warning("gateway.stream_record_detached", run_id=ctx.run_id)
             raise
+        except Exception as exc:  # noqa: BLE001
+            # 落库失败（库锁了、盘满了、连接拿不到）。**转身就走**：帧已经发完
+            # 了，客户端那边没有任何错，让沙箱自己的账把它带崩是本末倒置。丢了
+            # 这一条明细由运行收尾时的对账说出去（`budget.calls` 对明细条数，
+            # 见 `scenario/runner.py`），而不是靠把流打断来引起注意。
+            log.error("gateway.stream_record_failed", run_id=ctx.run_id, error=repr(exc))

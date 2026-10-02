@@ -63,6 +63,7 @@ from sandbox.detectors.idempotency import ToolFacts
 from sandbox.formatting import TOOL_COST_TITLE, span_human, tool_cost_lines
 from sandbox.formatting import money as _money
 from sandbox.formatting import tokens as _tokens
+from sandbox.gateway.stream import drain_detached_records
 from sandbox.gateway.stub import scripted_upstream
 from sandbox.memory.adapters.file_memory import FileMemoryAdapter
 from sandbox.memory.observe import (
@@ -291,6 +292,22 @@ class ScenarioResult:
     # 只在类型检查里错——**正是那种"不响"的错**：等哪天有人对这类调
     # `get_type_hints()`（pydantic、FastAPI 都会）才当场炸。
     cost: CostRollup | None = None
+    # 结账次数减去明细条数（`budget.calls` 对 `LlmCall` 行数）。
+    #
+    # 为什么要有这么一栏：成本和调用次数是**从明细重算**的，明细少一条，上面那个
+    # 数就少一份钱、少一次调用——而它长得和真的一样。网关那本内存账是同步结的，
+    # 取消吃不掉它，所以它是"到底发生了几次调用"唯一不被取消影响的证人。两个数
+    # 一对，差额就是丢了明细的次数。
+    #
+    # **符号有意义**：正数 = 明细少了（金额是下界）；负数 = 明细比结账还多（报告
+    # 算得比某些落库还早，同样是下界，只是方向相反）。0 才是"对得上"。
+    # 同样是陈述不是判定：它不进 findings、不影响 ok——丢明细是沙箱自己的账没记
+    # 全，和被测对象做没做错事无关。
+    #
+    # `None` = **没对过账**，不是"对上了"。默认写成 0 的话，哪天有人构造出一个
+    # 没走过对账那条路的报告，它读起来会和一次干净的运行一模一样——而"NULL 与 0
+    # 是两件事"这条规矩就是为这种场合立的。
+    unrecorded_llm_calls: int | None = None
     session_costs: dict[int, CostRollup] = field(default_factory=dict)
     # 按工具拆的上下文占用（需求 3.5）。同样是**陈述不是判定**：它不进 findings、
     # 不影响 ok。里面没有"这个工具花了多少钱"——工具调用不花 token，钱花在它
@@ -366,6 +383,7 @@ class ScenarioResult:
             "session_diff": self.session_diff.to_dict() if self.session_diff else None,
             "call_chain": self.call_chain.to_dict() if self.call_chain else None,
             "cost": self.cost.to_dict() if self.cost else None,
+            "unrecorded_llm_calls": self.unrecorded_llm_calls,
             "session_costs": {str(k): v.to_dict() for k, v in sorted(self.session_costs.items())},
             "tool_costs": self.tool_costs.to_dict() if self.tool_costs else None,
             "budget": [
@@ -881,9 +899,26 @@ class ScenarioRunner:
         result.egress_charges = await self._charges(mk_port)
         result.expected_charges = scenario.expected_charges
 
+        # 先把还挂在后台的落库等回来。流式那条路把明细的落库从请求生命周期上摘
+        # 下来了（`gateway/stream.py` 的 `_DETACHED`），不等的直接后果是：**刚被
+        # 取消的那几次调用会被报告算漏**——正是这次修掉的那件事，只是换了个时刻
+        # 发生。等不到的个数下面会用来对账，不会让它静默。
+        leftover = await drain_detached_records()
+        if leftover:
+            log.warning("scenario.record_drain_timeout", run_id=run_id, pending=leftover)
+
         # 成本。放在 finish 之后——LlmCall 明细是网关结算时才落的，提前查会
         # 得到一份少了几次调用的账单，而它看起来同样是个正常的数字。
         result.cost = await cost.for_run(run_id)
+        # 账结了、明细没落：这件事只有网关那本内存账知道（`budget.calls` 在
+        # `settle` 里同步加一，取消吃不掉它）。两个数一比就是它。**两个方向都要
+        # 留着符号**：正数是明细少了（金额是下界），负数是明细比结账还多（报告算
+        # 早了，同样是下界）——把它们都折成 0 就是"把判不了折进某个具体判定"，
+        # 而这个项目已经为那个错法付过三次学费了。
+        result.unrecorded_llm_calls = reconcile_llm_calls(
+            settled=active.budget.calls,
+            recorded=result.cost.llm_calls if result.cost else 0,
+        )
         result.session_costs = await cost.by_session(run_id)
         result.tool_costs = await cost.by_tool(run_id=run_id)
         result.budget = await cost.budget_status()
@@ -1035,6 +1070,16 @@ def _add_tool_costs(add: Any, report: ToolCostReport | None) -> None:
     add(f"  {TOOL_COST_TITLE}:")
     for line in tool_cost_lines(report):
         add(line)
+
+
+def reconcile_llm_calls(*, settled: int, recorded: int) -> int:
+    """结账次数减明细条数。见 `ScenarioResult.unrecorded_llm_calls`。
+
+    单独做成一个函数是因为它是**一条规则**，不是一次减法：报告里那句"少算了几笔"
+    完全建立在它上面，而它有两个调用方（运行收尾、以及量它的那些测试）。写在调用
+    点上的话，两边各写一遍，漂了也没人知道——两处都还是"看起来正常的一个数"。
+    """
+    return settled - recorded
 
 
 def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
@@ -1256,6 +1301,31 @@ def render(result: ScenarioResult, scenario: Scenario | None = None) -> str:
                 f"  !! 注意：其中 {total.estimated_calls} 次调用没拿到上游的用量"
                 f"（流式请求未带 usage 帧，或被中途断开），token 数是网关按看到的"
                 f"内容估的。这几行不是账单。"
+            )
+        if result.unrecorded_llm_calls is None:
+            # 没对过账。**不是"对上了"**——这一支只在报告不是由 `_run` 收尾时
+            # 出现，而那种情况下谁也没比过"账结了几次"和"明细落了几条"。
+            add(
+                "  !! 注意：本次运行没有对账（结账次数与明细条数没比过），"
+                "上面的数可能少算。"
+            )
+        elif result.unrecorded_llm_calls < 0:
+            # 明细比结账还多。方向反了，但结论一样：上面的数算得比落库还早，
+            # 所以它是下界。这一支今天只有一条路能走到（`drain_detached_records`
+            # 等超时了，明细随后才落），写出来是因为**它是可发生的**——把它并进
+            # 上一支会报出一个符号相反的故事。
+            add(
+                f"  !! 注意：明细比结账次数多 {-result.unrecorded_llm_calls} 条，"
+                f"说明上面这几行算得比落库还早。实际只会更多，不是账单。"
+            )
+        elif result.unrecorded_llm_calls > 0:
+            # 明细少了几条。这是**沙箱自己的账没记全**，不是被测对象做了什么——
+            # 所以它不进判定，但它改变上面那几个数字的含义：调用次数少报、
+            # 金额少算。只在日志里留一句的话，读报告的人会拿一个错数去做决定。
+            add(
+                f"  !! 注意：有 {result.unrecorded_llm_calls} 次调用的账结了、"
+                f"明细没落（落库被取消或写失败）。上面的次数和金额都少算了这几笔，"
+                f"是下界，不是账单。"
             )
         if total.cache_read_tokens or total.cache_write_tokens:
             add(

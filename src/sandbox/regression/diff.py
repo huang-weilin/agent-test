@@ -499,8 +499,8 @@ def _compare_cost(baseline: Snapshot, current: Snapshot) -> list[Difference]:
     花了多少钱是事实陈述。成本变了不构成"行为回归"——把它算进判定，会让
     一个完全正常的运行因为多调了一次模型而变红。
     """
-    b = _cost_cell((baseline.report or {}).get("cost") or {})
-    c = _cost_cell((current.report or {}).get("cost") or {})
+    b = _cost_cell(baseline.report or {})
+    c = _cost_cell(current.report or {})
     if b is None and c is None:
         return []
     if b == c:
@@ -508,8 +508,8 @@ def _compare_cost(baseline: Snapshot, current: Snapshot) -> list[Difference]:
     return [Difference(KIND_COST, "成本", b or "未记录", c or "未记录")]
 
 
-def _cost_cell(cost: dict[str, Any]) -> str | None:
-    """报告里的一段成本 → 给人看的一格。**没有就是没有**，不补 0。
+def _cost_cell(report: dict[str, Any]) -> str | None:
+    """报告 → 给人看的一格。**没有就是没有**，不补 0。
 
     读的键是 `cost_usd`，因为那是 `CostRollup.to_dict()` 写出来的键。**这里
     原来读的是 `total_usd`，而运行器从来不写那个键**——于是成本对比在真实
@@ -523,7 +523,17 @@ def _cost_cell(cost: dict[str, Any]) -> str | None:
 
     估算也要标出来，而且**是另一句话**：token 数是网关估的（没拿到上游用量）
     和金额少算了一部分是两回事，说成同一句会让"下界"这个词失去它的意思。
+
+    **账对不上的缺口也说出来，而缺口的两种"没有"在这里待遇不同。** 缺口是个
+    非零数（`unrecorded_llm_calls`）的时候，这一行的金额和次数都是错的，光写
+    `$0.0000 → $0.0006` 等于把下界冒充账单，所以标一句「（明细缺 N 条）」。
+
+    缺口是 `None`（这份报告里没这个键，或者运行器没对过账）的时候这里**什么都
+    不说**。这是两份报告在比：升级前后各跑一次，本来就一份有一份没有，那不是
+    「差异」，是版本——标上去会让每一次跨版本的成本对比都凭空多出一格。
+    单看一份报告的地方（运行页、终端报告）才把它打出来，那里没有"另一份"可赖。
     """
+    cost = report.get("cost") or {}
     if "cost_usd" not in cost:
         return None
     text = f"${_money(cost['cost_usd'])}"
@@ -531,6 +541,12 @@ def _cost_cell(cost: dict[str, Any]) -> str | None:
         text += "（下界）"
     if cost.get("tokens_are_estimated"):
         text += "（token 数为估算）"
+    gap = report.get("unrecorded_llm_calls")
+    if gap:  # None（没对过账）和 0（对上了）都不作声
+        if gap > 0:
+            text += f"（明细缺 {gap} 条，金额也少算）"
+        else:
+            text += f"（明细多 {0 - gap} 条，算早了）"
     return text
 
 
