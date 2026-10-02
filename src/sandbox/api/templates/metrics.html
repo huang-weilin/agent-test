@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}指标{% endblock %}
+
+{% macro lat_row(label, stats, note) %}
+  <tr>
+    <td class="nowrap">{{ label }}</td>
+    <td class="num">{{ stats.count }}</td>
+    <td class="num">{{ stats.p50_ms | ms }}</td>
+    <td class="num">{{ stats.max_ms | ms }}</td>
+    <td class="dim">{{ note }}</td>
+  </tr>
+{% endmacro %}
+
+{% block body %}
+
+<h1>指标</h1>
+<p class="lede">
+  最近这批运行怎么样。这一页回答的是<strong>横着比</strong>的问题——
+  用例最近稳不稳、延迟在哪个量级、不通过的都是因为什么。
+  单次运行怎么样看运行记录，长期花了多少看<a href="/cost">成本</a>。
+</p>
+
+<nav class="tabs">
+  {% for n in [20, 50, 200] %}
+    <a href="/metrics?limit={{ n }}{% if report.scenario_id %}&scenario={{ report.scenario_id }}{% endif %}"
+       class="{{ 'on' if report.limit == n else '' }}">最近 {{ n }} 次</a>
+  {% endfor %}
+  {% if report.scenario_id %}
+    <a href="/metrics?limit={{ report.limit }}">看全部场景</a>
+  {% endif %}
+</nav>
+
+<p class="note">
+  范围：{{ report.scope_text }}。
+  <strong>下面每一格取的都是这一批</strong>，包括成本——一个按"最近 N 次"算、
+  另一个按全量算的话，页面上两栏说的就不是一回事，而它们看起来同样正常。
+</p>
+
+<section class="cards">
+  <div class="card {{ 'bad' if report.outcomes.failed else '' }}">
+    <div class="k">预期达成率</div>
+    {% if report.outcomes.rate is none %}
+      <div class="v dim">没有样本</div>
+      <div class="sub">这一批里没有一条留下结论</div>
+    {% else %}
+      <div class="v">{{ '%.1f' % (report.outcomes.rate * 100) }}%</div>
+      <div class="sub">
+        {{ report.outcomes.passed }} 通过 / {{ report.outcomes.failed }} 不通过
+      </div>
+    {% endif %}
+  </div>
+  <div class="card">
+    <div class="k">没有结论</div>
+    <div class="v">{{ report.outcomes.no_verdict }}</div>
+    <div class="sub">
+      {% if report.outcomes.no_verdict_by_status %}
+        {% for status, n in report.outcomes.no_verdict_by_status -%}
+          <code>{{ status }}</code> {{ n }} 条{% if not loop.last %}、{% endif %}
+        {%- endfor %}
+      {% else %}
+        这一批一条都不缺
+      {% endif %}
+    </div>
+  </div>
+  <div class="card">
+    <div class="k">这一批的花费</div>
+    <div class="v">{{ m.cost_cell(report.cost) }}</div>
+    <div class="sub">{{ report.cost.llm_calls }} 次模型调用</div>
+  </div>
+  <div class="card">
+    <div class="k">运行墙钟中位数</div>
+    <div class="v">{{ report.latency.run_wall.p50_ms | ms }}</div>
+    <div class="sub">
+      {{ report.latency.run_wall.count }} 次算得出来
+      {%- if report.latency.runs_without_wall %}；{{ report.latency.runs_without_wall }}
+        次没有收尾时刻{% endif %}
+    </div>
+  </div>
+</section>
+
+{% if report.outcomes.no_verdict %}
+<p class="note">
+  <strong>「没有结论」的 {{ report.outcomes.no_verdict }} 条不在达成率的分母里。</strong>
+  它们没留下结论（还在跑，或者没走到收尾）。把没结论读成"不通过"，等于替一条
+  没有结论的运行编一个结论出来——那正是这个工具最想避免的失效方式。
+</p>
+{% endif %}
+
+<h2>这个数不叫「Agent 合格率」</h2>
+<p class="note">
+  它答的是<strong>「这次运行的结果和场景里写下的预期一致吗」</strong>，不是
+  「这个 Agent 行不行」。一次未达成有两种方向相反的成因：出现了没被任何预期
+  覆盖的 fail 结论（多半是被测对象做了一件我们没料到的事），或者预期没命中
+  （<strong>多半是我们预料它做的那个错没出现</strong>——那往往说明用例要改，
+  或者检测器漏报了）。从运行记录里分不出"Agent 真的没犯错"和"检测器没报出来"，
+  所以这里只报"预期达成"，并把两种成因分开列在下面。
+</p>
+
+<h2>不通过的 {{ report.failures.failed }} 条，各是因为什么</h2>
+{% if report.failures.failed %}
+<table class="grid">
+  <thead>
+    <tr><th>原因</th><th class="num">条数</th><th>这句话在说什么</th></tr>
+  </thead>
+  <tbody>
+  {% for cause in report.failures.causes %}
+    <tr>
+      <td class="nowrap">{{ cause.label }}</td>
+      <td class="num">{{ cause.runs }}</td>
+      <td class="dim">
+        {{ cause.why }}
+        {%- if cause.code == 'expectation' and report.failures.missing_runs %}
+          <br>其中：预期没命中 {{ report.failures.missing_runs }} 条、出现没预料到的结论
+          {{ report.failures.unexpected_runs }} 条（同一条运行可能两种都占）。
+        {%- endif %}
+      </td>
+    </tr>
+  {% endfor %}
+    <tr>
+      <td class="nowrap">原因读不出来</td>
+      <td class="num">{{ report.failures.unreadable }}</td>
+      <td class="dim">
+        报告没留存，或者留存的那份缺了判通过与否要用的字段。按缺的那项反推原因是
+        编理由，所以它们不进制表里的任何一行。
+      </td>
+    </tr>
+  </tbody>
+</table>
+<p class="note">
+  <strong>一次运行可能同时占好几行</strong>（执行崩了，预期自然也没达成），
+  所以各行相加会大于不通过的 {{ report.failures.failed }} 条。
+</p>
+{% else %}
+<p class="note">这一批里没有不通过的运行。</p>
+{% endif %}
+
+<h2>延迟</h2>
+<table class="grid">
+  <thead>
+    <tr><th>口径</th><th class="num">样本</th><th class="num">中位数</th>
+        <th class="num">最大</th><th>边界</th></tr>
+  </thead>
+  <tbody>
+    {{ lat_row('模型调用', report.latency.model_calls, '请求发出到收到完整响应') }}
+    {{ lat_row('模型调用（流式）', report.latency.model_calls_streaming,
+               '到最后一帧为止——含义与上一行不同，所以不合并') }}
+    {{ lat_row('工具调用', report.latency.tool_calls,
+               '出口代理到目标系统的往返；不含看门狗的时间') }}
+    {{ lat_row('运行墙钟', report.latency.run_wall,
+               '运行登记到执行收尾；不含检测器与报告') }}
+  </tbody>
+</table>
+<p class="note">
+  <strong>报的是中位数不是平均。</strong> 一次被超时强杀的工具调用（默认 180 秒）
+  能把平均拉到一个任何一次真实调用都没见过的数，而它恰恰是最该看见的那个点——
+  被平均掉了。中位数看"通常多快"，最大值把长尾摆出来。<br>
+  <strong>工具调用那一行不是"Agent 等这个工具等了多久"</strong>：<code>latency_ms</code>
+  在出口代理的看门狗 <code>enforce</code> 之前就量完了，而看门狗是在这个请求里
+  同步跑的。看门狗自己有多慢量在别处（见 README 的已知缺口表）。<br>
+  <strong>"样本"是这一批里的调用次数，不是运行次数</strong>——0 表示这一批里
+  一次都没有，不是"耗时为 0"。
+</p>
+
+<h2>按场景</h2>
+{% if report.by_scenario %}
+<table class="grid">
+  <thead>
+    <tr><th>场景</th><th class="num">取到</th><th class="num">通过</th>
+        <th class="num">不通过</th><th class="num">没有结论</th><th class="num">达成率</th></tr>
+  </thead>
+  <tbody>
+  {% for row in report.by_scenario %}
+    <tr>
+      <td>
+        <a href="/metrics?limit={{ report.limit }}&scenario={{ row.scenario_id }}"><code>{{ row.scenario_id }}</code></a>
+      </td>
+      <td class="num">{{ row.tally.considered }}</td>
+      <td class="num">{{ row.tally.passed }}</td>
+      <td class="num">{{ row.tally.failed }}</td>
+      <td class="num">{{ row.tally.no_verdict }}</td>
+      <td class="num">
+        {% if row.tally.rate is none %}<span class="dim">没有样本</span>
+        {% else %}{{ '%.1f' % (row.tally.rate * 100) }}%{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  分场景看，是因为用例集一直在变：把不同版本的场景混进一个总数里，得到的
+  "达成率"没有任何一个场景对得上号。这一列每一行的分母都只含它自己。
+</p>
+{% else %}
+<p class="note">这一批里一次运行都没有。</p>
+{% endif %}
+
+<p class="note">
+  口径写在 <code>docs/metrics.md</code>；判定与结论三个标签的关系见
+  <code>docs/ui.md</code>。
+</p>
+
+{% endblock %}

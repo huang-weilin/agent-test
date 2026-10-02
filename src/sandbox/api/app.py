@@ -37,11 +37,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from sandbox import metrics
 from sandbox.api import paths, queries
 from sandbox.api.jobs import JobRegistry
 from sandbox.cost import aggregator as cost
 from sandbox.db.engine import init_db
-from sandbox.formatting import byte_size, money, span_human, tokens
+from sandbox.formatting import byte_size, millis, money, span_human, tokens
 from sandbox.memory.observe import phase_label
 from sandbox.regression import cases, diff
 from sandbox.scenario import identity, loader
@@ -52,6 +53,27 @@ log = structlog.get_logger(__name__)
 #: 界面只监听回环地址。**不要改成 0.0.0.0。** 见模块 docstring 第 1 点。
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+
+#: 指标看板默认看多少次运行。50 是"够回头看一眼最近的变化、又不至于把上个月的
+#: 场景版本混进来"的量级；页面上有 20 / 50 / 200 三个档，都可以点。
+DEFAULT_METRICS_LIMIT = 50
+
+#: 上限。地址栏里那个数是用户能改的，而这一页每次都要把 `report_json` 拉回来
+#: 解析——不封顶的话 `?limit=1000000` 会把整个库读进内存再逐个 `json.loads`。
+#: 截断在**入口**做，不在查询里做：读的人和写的人都看得到同一个数。
+MAX_METRICS_LIMIT = 200
+
+
+def _clamp_limit(value: int) -> int:
+    """把地址栏里的 limit 收进 [1, MAX_METRICS_LIMIT]。
+
+    **0 与负数按默认值处理，不按 1。** `?limit=0` 多半是参数没填上，把它当成
+    "只看最近 1 次"会让页面显示一个看起来正常、实际被截到只有一条的结论分布——
+    而"最近一条通过"读起来和"最近 50 条全通过"完全一样。宁可给默认值。
+    """
+    if value <= 0:
+        return DEFAULT_METRICS_LIMIT
+    return min(value, MAX_METRICS_LIMIT)
 
 _HERE = Path(__file__).parent
 _TEMPLATES = _HERE / "templates"
@@ -160,6 +182,9 @@ def create_app(
     # "没过去多久"，而它是一小时）。两份实现意味着网页和命令行可能对同一个
     # 数给出不同说法，读的人第一个念头是"哪个坏了"。
     templates.env.filters["span"] = span_human
+    # 毫秒 → 人话。**不能用上面那个顶替**：`span_human` 按秒取整，几十毫秒的
+    # 一次往返会被印成「0 秒」，而指标看板整张表讲的就是这个量级。
+    templates.env.filters["ms"] = millis
     # 会话边界的时点说法。和上面同一个理由：`会话 0 结束时`这个说法在检测结论、
     # 命令行报告、界面上必须是同一串字符——模板里手拼的话，少一个空格就是三种
     # 写法，而读的人只会觉得报告马虎。（过滤器收的是整条观测，不是两个参数——
@@ -412,6 +437,31 @@ def create_app(
                 "tool_calls": await queries.tool_calls_for_run(run_id),
                 "snapshots": await queries.snapshots_for_sequence(run.session_sequence_id),
                 "label": _verdict_label(run.verdict_ok),
+            },
+        )
+
+    # --- 指标看板（需求 3.7） ---------------------------------------------
+    #
+    # 这一页的难点不在查询（就三次），在**每个数的口径**：结论按 `verdict_ok`
+    # 分不按 `status` 分、没结论的不进分母、延迟有三个口径不合并。这些规矩
+    # 全在 `sandbox/metrics.py` 里，这里只负责把范围参数收干净。
+
+    @app.get("/metrics", response_class=HTMLResponse)
+    async def metrics_dashboard(
+        request: Request, limit: int = DEFAULT_METRICS_LIMIT, scenario: str | None = None
+    ) -> Response:
+        return templates.TemplateResponse(
+            request,
+            "metrics.html",
+            {
+                "report": await metrics.report(
+                    limit=_clamp_limit(limit),
+                    # 空串按"没给"处理：表单/链接拼出来一个 `scenario=` 是常见
+                    # 写法，而它当过滤条件用的话会筛出**零条**——页面上写着
+                    # "最近 50 次运行（实际取到 0 次）"，用户以为自己没跑过东西。
+                    scenario_id=scenario or None,
+                ),
+                "active": app.state.jobs.active,
             },
         )
 

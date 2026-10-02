@@ -199,6 +199,18 @@ def span_human(seconds: float) -> str:
     return f"{seconds / 86400:.1f} 天"
 
 
+def millis(ms: int) -> str:
+    """毫秒 → 人读的耗时。
+
+    **不把小于一秒的耗时交给 `span_human`。** 它按秒取整，几十毫秒的一次
+    模型往返会被印成「0 秒」——读的人看到的是"没花时间"，而在一张讲延迟的
+    表上，那一格恰恰是最要紧的。所以这个量级直接按毫秒印。
+    """
+    if abs(ms) < 1000:
+        return f"{ms} ms"
+    return f"{ms / 1000:.1f} s"
+
+
 def value_text(value: Any) -> str:
     """一个参数值的写法。超长就截断，并带上省略号。"""
     text = json.dumps(value, ensure_ascii=False, default=str)

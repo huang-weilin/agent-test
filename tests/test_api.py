@@ -2517,3 +2517,142 @@ async def test_run_page_without_the_per_tool_snapshot_still_renders(
     assert resp.status_code == 200
     assert "<h2>成本</h2>" in resp.text
     assert "按工具（上下文占用）" not in resp.text
+
+
+# --- 指标看板（需求 3.7）-------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def metrics_runs(db: AsyncSession) -> None:
+    """四条运行：一条通过、一条因为预期未达成而不通过、一条执行崩了、
+    一条没有结论（老运行）。
+
+    四种都在，是因为这一页最容易犯的错正是**把它们混起来数**。
+    """
+    from datetime import UTC, datetime
+
+    from sandbox.db.models import RunStatus
+
+    base = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+    rows = [
+        # 通过的
+        ("m-pass", True, RunStatus.COMPLETED.value, {"error": None,
+                                                     "premises_held": True,
+                                                     "charges_ok": True,
+                                                     "expectation": {"missing": [],
+                                                                     "unexpected": []}}),
+        # 不通过：预期没命中 + 出现了没预料到的结论
+        ("m-miss", False, RunStatus.COMPLETED.value, {"error": None,
+                                                      "premises_held": True,
+                                                      "charges_ok": True,
+                                                      "expectation": {
+                                                          "missing": [{"detector": "loop"}],
+                                                          "unexpected": [
+                                                              {"detector": "idempotency"}]}}),
+        # 不通过：执行崩了（预期那一项根本不存在）
+        ("m-crash", False, RunStatus.FAILED.value, {"error": "RuntimeError: boom",
+                                                    "premises_held": False,
+                                                    "charges_ok": False,
+                                                    "expectation": None}),
+        # 没有结论：加这个字段之前跑的历史运行
+        ("m-old", None, RunStatus.COMPLETED.value, None),
+    ]
+    for run_id, verdict, status, body in rows:
+        db.add(
+            TestRun(
+                id=run_id,
+                scenario_id="clean",
+                agent_version="react_demo@0.1",
+                config_hash="m" * 64,
+                status=status,
+                verdict_ok=verdict,
+                started_at=base,
+                completed_at=base,
+                report_json=json.dumps(body) if body is not None else None,
+            )
+        )
+    await db.commit()
+
+
+async def test_metrics_page_counts_the_three_verdict_states_apart(
+    client: httpx.AsyncClient, metrics_runs: None
+) -> None:
+    """分母只含留了结论的运行，而"没有结论"的那条单独说。"""
+    page = (await client.get("/metrics")).text
+
+    # 达成率 1/3：四条运行里有结论的是三条（通过 1、不通过 2）。
+    assert "33.3%" in page
+    assert "1 通过 / 2 不通过" in page
+    # 那条 NULL 的运行出现在"没有结论"那一格，**不在分母里**，而且按状态原样
+    # 拆开（它是 completed ——"跑完了但没留结论"，和"还在跑"是两回事）。
+    assert "<code>completed</code> 1 条" in page
+    assert "不在达成率的分母里" in page
+    # 分母是 3 不是 4：写成 4 的话这一页就在替那条没结论的运行编一个结论。
+    assert "3/4" not in page
+
+
+async def test_metrics_page_splits_the_failure_causes(
+    client: httpx.AsyncClient, metrics_runs: None
+) -> None:
+    page = (await client.get("/metrics")).text
+
+    # 三类原因都在，且各自是它自己那一行。
+    assert "没跑到能判定的地方" in page
+    assert "目标系统侧的扣款对不上" in page
+    assert "前提不成立" in page
+    assert "预期未达成" in page
+    # 一次运行可以同时占好几行——这句话必须写着，否则那几行看起来能相加。
+    assert "一次运行可能同时占好几行" in page
+    # 两类成因分开数（同一条运行两种都占）。
+    assert "预期没命中 1 条" in page
+    assert "出现没预料到的结论" in page
+
+
+async def test_metrics_page_does_not_call_the_rate_an_agent_grade(
+    client: httpx.AsyncClient, metrics_runs: None
+) -> None:
+    """页面必须说出这个数**不是**什么。
+
+    这一页最容易变成的假话是"通过率 33%"——读的人会当成 Agent 的合格率，
+    而预期没命中往往恰恰说明用例要改。措辞是这一页的承重墙，所以它由测试钉住。
+    """
+    page = (await client.get("/metrics")).text
+
+    assert "这个数不叫「Agent 合格率」" in page
+    assert "多半是我们预料它做的那个错没出现" in page
+    assert "预期达成率" in page
+
+
+async def test_metrics_page_on_an_empty_database_says_no_samples(
+    client: httpx.AsyncClient
+) -> None:
+    page = (await client.get("/metrics")).text
+
+    assert "没有样本" in page
+    assert "实际取到 0 次" in page
+    # 没有运行的时候不许印 0%——那会被读成"全都不达标"。
+    assert "0.0%" not in page
+
+
+async def test_metrics_limit_is_clamped(
+    client: httpx.AsyncClient, metrics_runs: None
+) -> None:
+    # 地址栏里那个数是用户能改的，而这一页会把 report_json 全拉回来解析。
+    assert "最近 200 次运行" in (await client.get("/metrics?limit=99999")).text
+    # 0 多半是参数没填上：按"只看最近 1 次"处理的话，页面会显示一个看起来正常、
+    # 实际被截到只剩一条的分布——而"最近一条通过"和"最近 50 条全通过"长得一样。
+    assert "最近 50 次运行" in (await client.get("/metrics?limit=0")).text
+    # 空串按"没给"处理，否则会筛出零条，用户以为自己没跑过东西。
+    assert "最近 50 次运行（实际取到 4 次）" in (await client.get("/metrics?scenario=")).text
+
+
+async def test_metrics_page_filters_by_scenario(
+    client: httpx.AsyncClient, metrics_runs: None
+) -> None:
+    page = (await client.get("/metrics?scenario=clean")).text
+    assert "场景 clean 的最近 50 次运行（实际取到 4 次）" in page
+
+    # 查一个不存在的场景：范围那句话要说清是**筛出来的零条**，不是一个空库。
+    missing = (await client.get("/metrics?scenario=nope")).text
+    assert "场景 nope 的最近 50 次运行（实际取到 0 次）" in missing
+    assert "没有样本" in missing
