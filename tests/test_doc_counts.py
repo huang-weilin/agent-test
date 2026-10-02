@@ -24,17 +24,24 @@
 模板里换行和缩进怎么写都行：两边都先把连续空白压掉再比。不然一句跨行的行内文案
 就会因为折行位置变了而红，那种红量不到任何东西。
 
-## 这道闸门**没有**盖住的东西
+## 测试计数也接上了
 
-README 里那两处测试计数（954 个单测）不在这里，而且**仍然没有东西在核**。它是同一种毛病
-（写下来的一句话，没有东西在它后面），只是真值要跑一次收集才数得出来，而
-"在测试里起一个 `--collect-only` 子进程"既慢又绕。写在这里是为了让人知道这个
-边界在哪儿——**"没有红"和"核过了"不是一回事**，这一点在这个仓库里反复出现。
+README 里那两处测试计数原先**没有东西在核**（同一种毛病：写下来的一句话，没有东西在它
+后面），只是真值要跑一次收集才数得出来。现在接上了：起一个 `--collect-only` 子进程数
+真值，和那两句比。量过：收集本身 1.5 秒，连解释器启动 7 秒。
+
+代价是**每加一条测试都要来改一次那两句**——和上面"句子改了也会红"是同一笔交易，同样
+是有意的。
+
+子进程那段输出是 pytest 的界面文字，不是稳定接口。所以认不出来时必须**报错**，不许
+当成"没意见"：一个什么都没数到的检查，看起来和数过了一模一样。
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -89,6 +96,51 @@ def _check(where: str, template: str, values: dict[str, int]) -> str:
             f"**这是这道闸门唯一想要的那一步**：改文案的人再看一眼那个数。"
         )
     return f"{where}：这句出现了 {hits} 次，闸门认不出该核哪一处：\n    {filled}"
+
+
+def _collected_count() -> int:
+    """起一个 `--collect-only` 子进程，问出这次会话一共收集多少条。
+
+    **不递归**：子进程带 `--collect-only`，一条都不会执行。认不出那句汇总就报错，
+    见文件头最后一段。
+    """
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=300,
+    )
+    match = re.search(r"(\d+) tests? collected", proc.stdout or "")
+    assert match, (
+        "子进程的输出里找不到那句「N tests collected」，这道闸门什么也没数到——"
+        "**一条什么都没数到的检查，看起来和数过了一模一样**。子进程的输出：\n"
+        + (proc.stdout or "")[-1500:]
+        + "\n--- stderr ---\n"
+        + (proc.stderr or "")[-1500:]
+    )
+    return int(match.group(1))
+
+
+def test_the_test_count_in_readme_is_real() -> None:
+    """README 里两处「N 个单测」是真的，不是抄剩下的。
+
+    真值只有一个来源：当前这一份代码收集出来是多少条。**不能从别处抄**——抄来的数
+    和真的数长得一模一样，直到有人加了一条测试。
+    """
+    real = _collected_count()
+    flat = _flat((ROOT / "README.md").read_text(encoding="utf-8"))
+    templates = ("{n} 个单测覆盖网关", "{n} 个单测；tests/corpus/ 是标注语料")
+    missing = [t.format(n=real) for t in templates if _flat(t.format(n=real)) not in flat]
+
+    # 这里**刻意不复用 `_check`**：它那句报错写死了"真值从 yaml 数出来""去改模板"，
+    # 对这条闸门两句都是假的——真值是收集出来的，要改的是 README。第一版复用了它，
+    # 探针跑出来的报错就在指一条错的路。
+    assert not missing, (
+        f"README 里的测试计数和真值（{real} 条，`--collect-only` 数出来的）对不上。"
+        f"要改的是 README，不是这里；这两句该长这样：\n  " + "\n  ".join(missing)
+    )
 
 
 def test_every_source_in_use_is_named_in_the_distribution() -> None:
