@@ -109,6 +109,11 @@ class ToolCallRow:
     args_json: str
     error: str | None
     latency_ms: int
+    #: 看门狗为这一次调用花掉的时间。**NULL 与 0 是两件事**：NULL = 这次调用没
+    #: 真的出到目标系统，看门狗没跑过（被边界拦下的那几支，见 `proxy/app.py`
+    #: 的 `_settle`）；0 = 跑了，快到一毫秒都量不出来。老库里的行也是 NULL
+    #: ——那时没量过，补不出来。报告里这两种要分开显示。
+    watchdog_ms: int | None
     ts: datetime
 
     @property
@@ -140,6 +145,7 @@ async def tool_calls_for_run(run_id: str) -> list[ToolCallRow]:
                 args_json=call.args_json,
                 error=call.error,
                 latency_ms=call.latency_ms,
+                watchdog_ms=call.watchdog_ms,
                 ts=call.ts,
             )
             for call, ordinal in (await db.execute(stmt)).all()

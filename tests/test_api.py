@@ -1763,6 +1763,128 @@ async def test_run_page_marks_invalid_args_too(
     assert "这算 Agent 的行为" in r.text
 
 
+#: 没跑到看门狗上的那一格印的话。它同时是**模板那一支的锚点**：这句话在，
+#: 说明走的是"没量到"那一支；它不在，那一格就印成了数字。
+_NEVER_RAN = "不是量到 0"
+
+
+def _rows_of(table_html: str) -> list[str]:
+    """把一段表格切成一行一行。
+
+    **不能用 `split("<tr")`。** 那个切法每一块都带着它后面所有的行，于是最后一块
+    里什么都有——"这一行印成了什么"就永远测不出来了，后面但凡有一行是对的，
+    断言就是绿的。
+    """
+    return [chunk.split("</tr>")[0] for chunk in table_html.split("<tr")[1:]]
+
+
+@pytest_asyncio.fixture
+async def watchdog_rows(seeded: dict) -> dict:
+    """在 seeded 那次运行里补两条调用：一条跑到看门狗上，一条没跑到。
+
+    `watchdog_ms` 的两种"空"在页面上必须**长得不一样**：`None` 说的是"这次调用没
+    跑到看门狗上"（被边界拦下的，或者这一列加出来之前落的行），`0` 说的是"跑了，
+    快到一毫秒都量不出来"。混成一种，报告就把一次没发生过的测量说成了"不花时间"。
+    """
+    import json as _json
+
+    from sandbox.db.engine import session_scope
+    from sandbox.db.models import ToolCall
+
+    async with session_scope() as db:
+        db.add(
+            ToolCall(
+                id="call-wd",
+                test_run_id=seeded["run_id"],
+                session_id="sess-1",
+                session_sequence_id=seeded["sequence_id"],
+                seq=5,
+                tool_name="create_payment",
+                args_json=_json.dumps({"order_id": "A2"}),
+                arg_hash="hw",
+                fingerprint="fpw",
+                status="ok",
+                is_write=True,
+                latency_ms=7,
+                watchdog_ms=137,
+            )
+        )
+        db.add(
+            ToolCall(
+                id="call-nowd",
+                test_run_id=seeded["run_id"],
+                session_id="sess-1",
+                session_sequence_id=seeded["sequence_id"],
+                seq=6,
+                tool_name="get_order",
+                args_json=_json.dumps({"order_id": "A3"}),
+                arg_hash="hn",
+                fingerprint="fpn",
+                status="denied",
+                is_write=False,
+                blocked_by_proxy=True,
+                latency_ms=2,
+                watchdog_ms=None,
+            )
+        )
+    return seeded
+
+
+async def test_run_page_separates_the_two_kinds_of_missing_watchdog(
+    client: httpx.AsyncClient, watchdog_rows: dict
+) -> None:
+    """「其中看门狗」这一列：跑过的那条印数字，没跑的那条印「—」。
+
+    这一列的存在理由就是"谁的错分开写"——那笔时间是我们的开销，而 `latency_ms`
+    在它之前就量完了，混在一起之后，一次因为我们太慢而超时的运行和一次 Agent
+    自己慢的运行，报告上分不开。
+    """
+    r = await client.get(f"/runs/{watchdog_rows['run_id']}")
+    assert r.status_code == 200
+    tbody = r.text.split("<h2>工具调用审计</h2>")[1].split("</tbody>")[0]
+
+    # 没跑到的那一格靠这一句读出来（它是那一支独有的话）。断言打在行上，
+    # 不打在整段上：整段里既有印了数的行、也有印了「—」的行，混着断言的话
+    # "这一行印成了 0" 这种退化根本测不出来。
+    assert "其中看门狗" in tbody, "这一列得有个表头，不然读的人不知道右边那格是什么"
+    data = [row for row in _rows_of(tbody) if "<td" in row]
+    assert len(data) == 6, "seeded 那 4 条 + 这一组补的 2 条"
+
+    measured = [row for row in data if "137ms" in row]
+    never_ran = [row for row in data if _NEVER_RAN in row]
+    assert len(measured) == 1, "跑过看门狗的那条该印出量到的耗时"
+    # **每一行都得落进这两支之一。** 落在中间的行就是这条闸门要抓的退化：那一格
+    # 什么都印、或者把没量到的印成 `0ms`，都算。只在"有 137ms""有那句话"上断言的话，
+    # 多出来的那种行谁也看不见——而它恰恰是"没量到被折成 0"的形状。
+    assert len(measured) + len(never_ran) == len(data), (
+        f"{len(data)} 条调用里有 {len(data) - len(measured) - len(never_ran)} 条"
+        "既没印出耗时、也没印「没跑到」——那一格被印成了别的东西"
+    )
+
+
+async def test_the_metrics_page_shows_our_own_time_as_its_own_row(
+    client: httpx.AsyncClient, watchdog_rows: dict
+) -> None:
+    """看板上那笔时间必须**单列一行**，而且要点明有多少次调用没跑到看门狗上。
+
+    只看中位数会把"其实一大半调用根本没扫"读成"看门狗很便宜"——分母里少了
+    多少，是这一行能不能读的前提。后半句同样要写：`NULL` 有两种来路（被边界拦下的、
+    这一列加出来之前落的行），把那句省掉，"N 次没跑到"就会被一律读成前者。
+    """
+    page = (await client.get("/metrics")).text
+    table = page.split("<h2>延迟</h2>")[1].split("</table>")[0]
+
+    assert "其中：看门狗" in table
+    assert "137 ms" in table
+    assert "没跑到" in page
+    assert "这一列加出来之前" in page, (
+        "NULL 的两种来路要在页面上分开写——只印一个数，读的人会以为"
+        "每一次都是被边界拦下的"
+    )
+    # 工具调用那一行**不含**看门狗，所以它是另一个数：7 ms / 2 ms 那两条。
+    assert "其中：看门狗" not in page.split("<h2>延迟</h2>")[0]
+
+
 def test_templates_do_not_render_markdown_asterisks() -> None:
     """模板里的强调要写成 `<strong>`，不能写成 Markdown 的 `**`。
 

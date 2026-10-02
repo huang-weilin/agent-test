@@ -16,8 +16,12 @@
    地面真值对得上、预期达成），而它们在运行列表里长得一模一样：一个红叉。
    把四种不同的毛病压成一个数，读者只能猜。
 
-3. **延迟有三个，口径不同的两个不合并。** 模型调用、工具调用、运行墙钟各有各
-   的边界，其中流式与非流式的模型调用连"一次"的含义都不同。
+3. **延迟有五个，口径不同的不合并。** 模型调用、工具调用、运行墙钟，加上
+   **看门狗**（我们自己在那次出口请求里花掉的时间）各有各的边界，其中流式与非
+   流式的模型调用连"一次"的含义都不同。看门狗那一栏是"谁的错分开写"：它记在
+   **被测会话的墙钟**上（Agent 正阻塞在那个请求上等我们扫完），并进工具调用那
+   一栏的话，一次"因为我们太慢而超时"的运行和一次"Agent 自己慢"的运行就分不开
+   了——而那正是这个工具最该说清的一件事。
 
 ## 那个数不叫「通过率」
 
@@ -207,7 +211,7 @@ class LatencyStats:
 
 @dataclass(frozen=True)
 class LatencyReport:
-    """三个口径的延迟。**不合并**，理由见模块注释与各字段。"""
+    """五个口径的延迟。**不合并**，理由见模块注释与各字段。"""
 
     #: 非流式模型调用：从请求发出到收到完整响应。
     model_calls: LatencyStats
@@ -218,8 +222,21 @@ class LatencyReport:
     #: `latency_ms` 在 `enforce` 之前就量完了，而看门狗是在请求里 `await` 的。
     #: 所以它不是"Agent 等这个工具等了多久"。
     tool_calls: LatencyStats
+    #: 看门狗：**我们自己**在那次出口请求里花掉的时间（`ToolCall.watchdog_ms`）。
+    #:
+    #: 单开一栏的理由就是"谁的错分开写"：这笔时间是我们的开销，而它记在**被测
+    #: 会话的墙钟**上——Agent 当时正阻塞在那个请求上等我们扫完。并进上面那栏的话，
+    #: 一次"因为我们太慢而超时"的运行和一次"Agent 自己慢"的运行在页面上分不开。
+    #: 它的量级随调用次数超线性涨，所以中位数和最大值都值得看（见
+    #: `docs/detectors.md`）。
+    watchdog: LatencyStats
+    #: **没跑到**看门狗上的调用数（`watchdog_ms IS NULL`：被边界拦下的，或者
+    #: 这一列加出来之前落的行）。这一栏必须和上面那栏
+    #: 一起看：`watchdog` 的 `count` 只数跑过的那批，光看 p50 会把"其实一大半
+    #: 调用根本没扫"读成"看门狗很便宜"。NULL 不是 0——被边界拦下的调用不扫。
+    calls_without_watchdog: int
     #: 运行墙钟：从运行登记到执行收尾。真实时间（虚拟时钟只拨世界时间，不拨它），
-    #: 但**不含检测器与报告**——收尾在检测之前。
+    #: 但**不含检测器与报告**——收尾在检测之前。**含看门狗**（它发生在请求里）。
     run_wall: LatencyStats
     #: 没有 `completed_at`、因而算不出墙钟的运行数（还在跑，或者没走到收尾）。
     runs_without_wall: int = 0
@@ -434,6 +451,8 @@ async def _latency(
             model_calls=empty,
             model_calls_streaming=empty,
             tool_calls=empty,
+            watchdog=empty,
+            calls_without_watchdog=0,
             run_wall=wall,
             runs_without_wall=without_wall,
         )
@@ -443,12 +462,22 @@ async def _latency(
         )
     ).all()
     tool_rows = (
-        await db.execute(select(ToolCall.latency_ms).where(ToolCall.test_run_id.in_(run_ids)))
-    ).scalars()
+        await db.execute(
+            select(ToolCall.latency_ms, ToolCall.watchdog_ms).where(
+                ToolCall.test_run_id.in_(run_ids)
+            )
+        )
+    ).all()
+    # `None` 只表示"这一列是空的"：这次调用没跑到看门狗上（被边界拦下的，
+    # 或者这一列加出来之前落的行）。**不能 `or 0`**：那会把"没量到"混进
+    # "量到 0"里，中位数和最大值跟着变——而它们看起来都正常。
+    watchdog_values = [int(r[1]) for r in tool_rows if r[1] is not None]
     return LatencyReport(
         model_calls=LatencyStats.of([int(r[1]) for r in llm_rows if not r[0]]),
         model_calls_streaming=LatencyStats.of([int(r[1]) for r in llm_rows if r[0]]),
-        tool_calls=LatencyStats.of([int(ms) for ms in tool_rows]),
+        tool_calls=LatencyStats.of([int(ms) for ms, _ in tool_rows]),
+        watchdog=LatencyStats.of(watchdog_values),
+        calls_without_watchdog=len(tool_rows) - len(watchdog_values),
         run_wall=wall,
         runs_without_wall=without_wall,
     )

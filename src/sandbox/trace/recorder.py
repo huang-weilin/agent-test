@@ -437,6 +437,25 @@ async def record_tool_call(
     return call_id
 
 
+async def record_watchdog_cost(call_id: str, watchdog_ms: int) -> None:
+    """把看门狗为这一次调用花掉的时间补写到那一行上。
+
+    **为什么是补写而不是在 `record_tool_call` 里一次写完。** 顺序是死的：看门狗
+    要看的是**包含本次调用**的整条轨迹（循环的判据里就有"这一次和上一次一不一样"），
+    所以这一行必须先落库，`enforce` 才扫得到它。反过来的话，三次相同调用要等到
+    第四次才判得出来——那是检测行为变更，不是省一次写。
+
+    找不到这一行就**什么都不做**，不抛：这一列是记账，不是判定。为了记一笔开销
+    让一次已经真实发生、也已经落库的调用对 Agent 报 500，代价和收益完全不成比例
+    （而 Agent 多半会重试，于是真的多扣一次款）。
+    """
+    async with session_scope() as db:
+        call = await db.get(ToolCall, call_id)
+        if call is None:
+            return
+        call.watchdog_ms = watchdog_ms
+
+
 async def record_llm_call(
     ctx: RunContext,
     *,

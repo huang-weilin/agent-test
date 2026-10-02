@@ -301,6 +301,23 @@ class ToolCall(Base):
     blocked_by_proxy: Mapped[bool] = mapped_column(Boolean, default=False)
 
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    # 看门狗为**这一次调用**花掉的时间（`watchdog.enforce` 的墙钟）。
+    #
+    # **为什么要单开一列。** 看门狗是在出口代理的请求处理里 `await` 的，而 Agent
+    # 正阻塞在这个请求上——这笔时间记在**被测会话的墙钟**上，是我们自己的开销，
+    # 不是被测对象的耗时。而它原先在轨迹里看不见：`latency_ms` 在 `enforce`
+    # 之前就量完了，于是一次因为看门狗太慢而超时的运行，报告里长得和"Agent 自己
+    # 慢"一模一样。单会话超时量的是 Agent 进程活了多久，两笔混在一起就没法分开
+    # 写。这一列就是把它们分开的那一半。
+    #
+    # **NULL 与 0 是两件事**（与 `result_bytes` 同一条规矩）：NULL = 看门狗**没跑**
+    # 过这一次——被边界拦下的那几支不扫（见 `proxy/app.py` 的 `_settle`），以及
+    # 这一列加出来之前落的老行（那时没量过，也就补不出来）；0 = 跑了，快到
+    # 一毫秒都量不出来。把没跑读成 0，等于替一次没发生过的测量报一个数。
+    #
+    # 这一列**不进任何判定**：检测器不看它，`ok` 不看它，熔断不看它。它只回答
+    # "这次运行里属于我们的时间有多少"。
+    watchdog_ms: Mapped[int | None] = mapped_column(Integer)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     test_run: Mapped[TestRun] = relationship(back_populates="tool_calls")

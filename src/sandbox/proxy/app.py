@@ -48,7 +48,7 @@ from sandbox.proxy.policy import (
 from sandbox.runtime import runs
 from sandbox.toolschema import describe, validate_arguments
 from sandbox.trace.normalize import looks_like_write
-from sandbox.trace.recorder import record_finding, record_tool_call
+from sandbox.trace.recorder import record_finding, record_tool_call, record_watchdog_cost
 
 log = structlog.get_logger(__name__)
 
@@ -104,8 +104,8 @@ async def _forward(
     return resp.status_code, body
 
 
-async def _settle(ctx: Any) -> None:
-    """一次调用**真的出到目标系统之后**，让看门狗扫一遍。
+async def _settle(ctx: Any, call_id: str) -> None:
+    """一次调用**真的出到目标系统之后**，让看门狗扫一遍，并把这次扫描的耗时记在它名下。
 
     **两条路由都要经过这里**：定目标的 `/tools/{name}`，和目标由调用方指定的
     `/fetch` 与 `/fetch/{name}`。原先只有前者接了，后者一次都不扫——而事后那轮
@@ -118,9 +118,36 @@ async def _settle(ctx: Any) -> None:
     它们在目标系统上什么都没留下，而这条通路要防的正是"循环把目标系统打爆"；
     那些路径上的 token 失控由网关的预算熔断独立负责。这是写下来的边界，不是
     遗漏——`watchdog.py` 与 `docs/detectors.md` 里原先那句"每次工具调用后重扫"
-    按这条改掉了。
+    按这条改掉了。这些路径上 `watchdog_ms` 留在 NULL：**没量到与量到 0 是两件事**。
+
+    **为什么要量。** 这一句 `await` 是记在**被测会话的墙钟**上的——Agent 就阻塞在
+    这个请求上等我们扫完，而 `tool_call.latency_ms` 在这之前已经量完了。于是
+    一次因为看门狗太慢而超掉的运行，报告里长得和"Agent 自己慢"一模一样。
+    耗时的走向是超线性的（n=320 时整个运行 80.8 秒，见 `watchdog.py` 那张表），
+    所以这笔账必须记在被叫的那一次调用上，事后才分得开谁的时间是谁的。
     """
-    await watchdog.enforce(ctx.run_id)
+    started = time.perf_counter()
+    try:
+        await watchdog.enforce(ctx.run_id)
+    finally:
+        # `finally` 而不是顺序写：扫描自己抛出去的时候，这段耗时**照样是花掉了的**
+        # ——它已经记在被测会话的墙钟上，不记下来就又是"报告里看不出这笔时间"。
+        #
+        # **记账失败不许改变这次调用的结果。** 这一列不进任何判定（检测器不看它、
+        # `ok` 不看它、熔断不看它），而它落在这里的时候，这次调用**已经真的发生、
+        # 也已经记成 ok 了**——让一笔记账把它变成 500，Agent 一重试就是重复扣款。
+        # 那是这个工具最不能产出的东西。日志里留一行，查得到。
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        try:
+            await record_watchdog_cost(call_id, elapsed_ms)
+        except Exception:
+            log.warning(
+                "proxy.watchdog_cost_lost",
+                run_id=ctx.run_id,
+                call_id=call_id,
+                watchdog_ms=elapsed_ms,
+                exc_info=True,
+            )
 
 
 @app.get("/healthz")
@@ -316,7 +343,7 @@ async def call_tool(
     # 它能阻止的是下一次，不是这一次。要"连这一次都不发生"，判定必须前移到放行
     # 之前（即根据已有轨迹预测本次是否属于循环）。这是 walking skeleton 已知的
     # 局限，不是疏忽：先证明熔断通路能真的终止进程，再决定预测逻辑值不值得做。
-    await _settle(ctx)
+    await _settle(ctx, call_id)
 
     # 响应对象在上面就建好了（为了量体量），这里只往上加两个头：
     # `call_id` 要等落库之后才知道，所以头只能后加。
@@ -588,7 +615,7 @@ async def _generic_egress(
 
     # 通用出口这条路上**同样**要跑看门狗。它原先漏了，而漏掉的表现是报告照常
     # 出结论、只是没人动手止损——见 `_settle`。
-    await _settle(ctx)
+    await _settle(ctx, call_id)
 
     response.headers["X-Sandbox-Run-Id"] = ctx.run_id
     response.headers["X-Sandbox-Tool-Call-Id"] = call_id
