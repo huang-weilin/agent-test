@@ -412,6 +412,53 @@ def test_ping_pong_is_a_fail(make_call) -> None:
     assert pp[0].detail["pair"] == ["get_order", "create_payment"]
 
 
+def test_a_long_ping_pong_is_still_one_finding(make_call) -> None:
+    """交替够长时，同一段振荡**也只许报一条**。
+
+    `a,b,a,b` 在 (a,b) 和 (b,a) 两个键下都成立。上面那条 6 次调用的测试只报一条，
+    是因为反向那对凑得出 1 个窗口、恰好低于阈值——不是有意如此。到了 7 次调用
+    两边都够，就会各报一条：实测在 τ-bench 上 `tau-airline-46-t3` 和
+    `tau-airline-11-t2` 各报 2 条，同一次现象数了两遍。
+    """
+    calls = [make_call(i, "get_order", {"order_id": "A1"}) for i in range(1, 8)]
+    for i in range(2, 8, 2):
+        calls[i - 1] = make_call(i, "create_payment", {"order_id": "A1", "amount": i})
+    findings = _detector().run(calls, ExemptionSet())
+
+    pp = _of(findings, ".ping_pong")
+    assert len(pp) == 1, f"同一段交替报了 {len(pp)} 条：{[f.detail['pair'] for f in pp]}"
+
+
+def test_ping_pong_says_what_it_saw_not_whether_it_converged(make_call) -> None:
+    """判词只许报观测量。
+
+    原先写死「没有收敛迹象」，而这条判据**从来没看过调用成功没有**，
+    只看了工具名交替——实测 `tau-airline-11-t2` 那段交替的最后一轮
+    （下标 34）预订成功了，那句话是在说一件它没量过的事。
+    """
+    def _run(*statuses: str):
+        calls = []
+        for i, st in enumerate(statuses, start=1):
+            name = "get_order" if i % 2 else "create_payment"
+            calls.append(make_call(i, name, {"order_id": "A1", "amount": i}, status=st))
+        return _of(_detector().run(calls, ExemptionSet()), ".ping_pong")
+
+    ended_ok = _run("ok", "ok", "ok", "ok", "ok", "ok", "ok")
+    ended_err = _run("ok", "ok", "ok", "ok", "ok", "ok", "error")
+
+    # **这句放在最前面**：它才是这条测试的要害。放在后面的话，老代码会先栽在
+    # 下一段的 KeyError 上，看着是红的，其实没咬住这句话——闸门是活的，
+    # 却没咬在要害上，和好闸门长得一模一样。
+    for f in ended_ok + ended_err:
+        assert "没有收敛迹象" not in f.summary
+
+    assert ended_ok[0].detail["converged"] is True
+    assert "返回成功" in ended_ok[0].summary
+
+    assert ended_err[0].detail["converged"] is False
+    assert "仍失败" in ended_err[0].summary
+
+
 def test_single_session_cross_session_check_is_inconclusive(make_call) -> None:
     """只有一个会话时，"跨会话循环"没测到就是没测到。"""
     calls = [make_call(1, "get_order", {"order_id": "A1"})]

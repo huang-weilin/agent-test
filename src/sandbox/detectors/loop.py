@@ -619,31 +619,64 @@ class LoopDetector:
         self, calls: list[CallView], exemptions: ExemptionSet
     ) -> list[Finding]:
         names = [c.tool_name for c in calls]
-        rounds: dict[tuple[str, str], list[int]] = defaultdict(list)
 
+        # **一段交替只算一次。** `a,b,a,b` 在 (a,b) 和 (b,a) 两个键下都能匹配，于是同一段
+        # 振荡会报两条（实测 tau-airline-46-t3 与 tau-airline-11-t2 各报 2 条，正是同一个
+        # 现象）。原先只报 1 条不是因为有意如此，而是因为 6 次调用时反向那对只凑得出
+        # 1 个窗口、恰好低于阈值——7 次以上两边都够，就会各报一条。
+        # 按**无序对**归类，方向由这段里第一个窗口决定；排序键仍取字典序，结论不随
+        # 集合迭代顺序摆动。
+        windows: dict[tuple[str, str], list[tuple[int, str, str]]] = defaultdict(list)
         for i in range(len(names) - 3):
             a, b = names[i], names[i + 1]
             if a == b:
                 continue
             if names[i + 2] == a and names[i + 3] == b:
-                rounds[(a, b)].append(i)
+                windows[(a, b) if a < b else (b, a)].append((i, a, b))
+
+        rounds: dict[tuple[str, str], list[int]] = {}
+        for key in sorted(windows):
+            found = windows[key]
+            a, b = found[0][1], found[0][2]  # 方向由第一个窗口定，同一段的另一种读法丢掉
+            rounds[(a, b)] = [i for i, x, y in found if (x, y) == (a, b)]
 
         findings: list[Finding] = []
         for (a, b), positions in sorted(rounds.items()):
             if len(positions) < 2:
                 continue
             involved = [calls[i] for p in positions for i in (p, p + 1, p + 2, p + 3)]
+
+            # 这段交替**结束时停在哪**：从最后一个窗口往后接着走，只要还是这两个工具之一
+            # 就算在同一段里。判词原先写死「没有收敛迹象」，而这个名字交替的判据
+            # **从来没看过调用成功没有**——实测 tau-airline-11-t2 那段交替的最后一轮
+            # （下标 34）预订成功了，那句话是在说一件它没量过的事。改成只报观测量。
+            end = positions[-1] + 3
+            while end + 1 < len(names) and names[end + 1] in (a, b):
+                end += 1
+            converged = calls[end].status == "ok"
+            tail = (
+                "这段交替最后一次调用返回成功，之后就走出来了"
+                if converged
+                else "这段交替最后一次调用仍失败，之后没有走出来"
+            )
+
             finding = Finding(
                 detector=f"{self.name}.ping_pong",
+                # 判定不动：**"所有调用都成功的交替要不要也熔断"是产品策略，不是这条改动能
+                # 定的**（`KILL_ON_DETECTORS` 里有这一条，FAIL 会当场掐掉运行；而现有
+                # `test_ping_pong_is_a_fail` 的每一次调用 status 都是 ok，说明"不看成败、
+                # 只看交替形状"原本就是在意的）。手头只有一条真实例子说它误杀，
+                # 不够推翻一个熔断语义。先只把没量过的那半句话换成量到的。
                 verdict=DetectorVerdict.FAIL,
                 summary=(
                     f"检测到委托乒乓：{a} → {b} 交替 {len(positions) + 1} 轮，"
-                    f"两个工具互相触发，没有收敛迹象。"
+                    f"两个工具互相触发；{tail}。"
                 ),
                 confidence=Confidence.HIGH,
                 detail={
                     "pair": [a, b],
                     "rounds": len(positions) + 1,
+                    "converged": converged,
                     "seqs": [c.seq for c in involved],
                     "call_ids": [c.id for c in involved],
                 },
