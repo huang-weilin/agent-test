@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from sandbox.db.models import DetectorVerdict
-from sandbox.detectors.base import Exemption, ExemptionSet, Finding
+from sandbox.detectors.base import CallView, Exemption, ExemptionSet, Finding
 from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
 from sandbox.scenario.loader import load_scenario
 from sandbox.scenario.runner import ScenarioResult, ScenarioRunner
 from sandbox.scenario.spec import Scenario
+from sandbox.trace.normalize import normalize_args, structural_hash
 from tests.control_pairs import assert_only_differs, entry_for
 
 PAY = {"order_id": "A1", "amount": 599}
@@ -121,6 +123,178 @@ def test_blocked_calls_do_not_count_as_duplicate_charges(make_call) -> None:
     assert all(f.verdict != DetectorVerdict.FAIL for f in findings), (
         f"被拦截的调用被算成了重复扣款：{_verdicts(findings)}"
     )
+
+
+# --- 没到目标系统 = 什么也没发生 -----------------------------------------------
+# 「谁拦的」和「到没到」是两个问题，而这四条钉的是它们**不许互相顶替**。
+# 判据必须是"到没到"：`blocked_by_proxy` 只盖住其中一半，另一半（参数被 schema
+# 拒、工具没声明）**刻意**不带这个标记——那是 Agent 自己写错了参数，不是策略在
+# 生效。拿标记当判据的话，三次参数写错的 create_payment 会拿到和三次真扣款
+# 一字不差的报告（量于 2026-10-02，`../_probes/measure_rejected_calls.py`）。
+
+
+@pytest.mark.parametrize(
+    ("status", "label"),
+    [("invalid_args", "参数被 schema 拒了"), ("blocked", "工具压根没声明")],
+)
+def test_a_write_that_never_left_the_boundary_is_not_a_duplicate_charge(
+    make_call, status: str, label: str
+) -> None:
+    """两次写调用一次都没发出去（这一组是参数被拒/工具没声明）——钱一笔没动。
+
+    结论必须是 inconclusive 而不是 fail：判「重复扣款」要求有扣款发生过，
+    而这正是没发生的那件事。也不能判 pass——没测到和没问题不是一回事。
+
+    这两种 `status` 都**刻意**不带 `blocked_by_proxy`（那是 Agent 自己写错了
+    参数，不是策略在生效），所以这一条同时钉着"判据是到没到、不是谁拦的"：
+    谁把过滤条件改回那个标记，这里立刻红。
+    """
+    calls = [
+        make_call(i, "create_payment", PAY, is_write=True, status=status)
+        for i in (1, 2)
+    ]
+    findings = IdempotencyDetector(UNPROTECTED).run(calls, ExemptionSet())
+
+    assert _verdicts(findings) == ["inconclusive"], (
+        f"{label}的两次调用被判成了 {_verdicts(findings)}——"
+        f"这两次在边界上就被拒了，`blocked_by_proxy` 是 False 是刻意的，"
+        f"不是「它到了目标系统」的证据。"
+    )
+    assert "写操作" in findings[0].summary
+    # 被拒的次数要说出来：报告读的人要能看出"这里是没东西可判"而不是"没测"。
+    assert findings[0].detail["rejected_at_boundary"] == 2
+
+
+def test_reaching_the_target_is_what_earns_a_duplicate_charge(make_call) -> None:
+    """上面那条的对照：同一段轨迹，唯一的变量是那两次调用有没有发出去。
+
+    少了这一条，把检测器改成"永远 inconclusive"也能让上面那条绿。
+    """
+    calls = [
+        make_call(i, "create_payment", PAY, is_write=True, status="ok")
+        for i in (1, 2)
+    ]
+    findings = IdempotencyDetector(UNPROTECTED).run(calls, ExemptionSet())
+
+    fails = [f for f in findings if f.verdict == DetectorVerdict.FAIL]
+    assert len(fails) == 1
+    assert "重复扣款" in fails[0].summary
+
+
+# --- 关于"钱"的那句话由 status 决定，不由判定分了哪一支决定 ---------------------
+# 四支判定分的是"工具声明了什么保护、Agent 怎么用键"，和这次调用成功没成功
+# 完全无关。原先这四支的文案和 status 一个字都不沾：三次全失败的写操作照样报
+# "这是重复扣款"（量于 2026-10-02，`../_probes/measure_idempotency_status.py`，
+# 四条分支 × 三种结果，文字一字不差）。
+
+
+def _three(
+    keys: list[str | None], status: str, *, enforces: bool
+) -> tuple[IdempotencyDetector, list[CallView]]:
+    """三次同一参数的写调用、同一种结果。返回（检测器, 轨迹）。"""
+    normalized = normalize_args(PAY)
+    calls = [
+        CallView(
+            id=f"c{i}",
+            seq=i,
+            tool_name="create_payment",
+            args=normalized,
+            fingerprint=structural_hash("create_payment", normalized),
+            is_write=True,
+            idempotency_key=key,
+            status=status,
+        )
+        for i, key in enumerate(keys, start=1)
+    ]
+    facts = {"create_payment": ToolFacts("create_payment", True, enforces)}
+    return IdempotencyDetector(facts), calls
+
+
+def _with_status(call: CallView, status: str) -> CallView:
+    return replace(call, status=status)
+
+
+@pytest.mark.parametrize(
+    ("keys", "enforces", "reason_code"),
+    [
+        ([None, None, None], False, None),
+        ([None, None, None], True, "missing_key"),
+        (["k1", "k2", "k3"], True, "key_rotated"),
+    ],
+)
+def test_all_failures_do_not_get_called_a_duplicate_charge(
+    keys: list, enforces: bool, reason_code: str | None
+) -> None:
+    """三次调用一次都没成功时，说"这是重复扣款"就是报告说了比观测更多的话。
+
+    超时和响应丢失都会在边界上留下一个 `error`，而钱可能已经出去了——所以
+    "钱到底动没动"这句话检测器**说不出来**，它手里只有一个粗粒度的结果类别。
+    判定不动（fail 照旧：失败之后重试一个写操作是最危险的模式），改的是措辞。
+    """
+    detector, calls = _three(keys, "error", enforces=enforces)
+    findings = detector.run(calls, ExemptionSet())
+
+    finding = next(f for f in findings if f.verdict == DetectorVerdict.FAIL)
+    assert finding.detail.get("reason_code") == reason_code
+
+    # 「重复扣款」这四个字可以出现——但只许出现在否定里。所以核的不是这四个字
+    # 在不在，而是那几句**断言它发生过**的话一句都不在。
+    for claim in ("这是重复扣款。", "重复扣款发生了。", "至少扣了一笔。"):
+        assert claim not in finding.summary, (
+            f"三次全失败，文案却断言了重复扣款（「{claim}」）：{finding.summary}"
+        )
+    assert "尚未证实" in finding.summary or "不是已证实的重复扣款" in finding.summary
+    assert finding.detail["statuses"] == {"error": 3}
+
+
+def test_all_successes_still_say_duplicate_charge() -> None:
+    """上面那组的对照：同样三次、同样没有保护，只是每次都被接受了。
+
+    这一条同时是措辞改动的反向闸门——一个"不再说重复扣款"的实现能让上面那条绿。
+    """
+    detector, calls = _three([None, None, None], "ok", enforces=False)
+    findings = detector.run(calls, ExemptionSet())
+
+    finding = next(f for f in findings if f.verdict == DetectorVerdict.FAIL)
+    assert "这是重复扣款。" in finding.summary
+    assert finding.detail["statuses"] == {"ok": 3}
+
+
+def test_partial_successes_say_at_least_one_charge() -> None:
+    """一次成功两次失败：至少扣了一笔（那一次 ok），总共几笔看不出来。"""
+    detector, calls = _three([None, None, None], "ok", enforces=False)
+    calls[1] = _with_status(calls[1], "error")
+    calls[2] = _with_status(calls[2], "error")
+    findings = detector.run(calls, ExemptionSet())
+
+    finding = next(f for f in findings if f.verdict == DetectorVerdict.FAIL)
+    assert "至少扣了一笔" in finding.summary
+    assert finding.detail["statuses"] == {"ok": 1, "error": 2}
+
+
+def test_protection_is_not_declared_effective_when_nothing_succeeded() -> None:
+    """复用同一个幂等键、但三次全失败：保护有没有真的去重，边界上看不出来。
+
+    原先这条一律说"保护生效，未产生重复扣款"——那是把**声明**读成了**事实**。
+    目标系统接受了第一次，才谈得上后面几次被它按幂等键去重掉。
+    """
+    detector, calls = _three(["k1", "k1", "k1"], "error", enforces=True)
+    findings = detector.run(calls, ExemptionSet())
+
+    assert _verdicts(findings) == ["warning"]
+    assert "未产生重复扣款" not in findings[0].summary, findings[0].summary
+    assert "看不出来" in findings[0].summary
+    assert findings[0].confidence.value == "low"
+
+
+def test_protection_effective_is_still_said_when_the_first_call_succeeded() -> None:
+    """对照：第一次被接受了，后面几次才谈得上去重。"""
+    detector, calls = _three(["k1", "k1", "k1"], "ok", enforces=True)
+    findings = detector.run(calls, ExemptionSet())
+
+    assert _verdicts(findings) == ["warning"]
+    assert "未产生重复扣款" in findings[0].summary
+    assert findings[0].confidence.value == "medium"
 
 
 def test_snapshot_replay_is_attributed_to_recovery_not_the_agent(make_call) -> None:

@@ -306,3 +306,31 @@ items:
         reason_code: missing_key
       loop: pass
       autonomy: inconclusive
+
+  # --- 没到目标系统的写操作：负样本 -----------------------------------------
+  # 与 idem-unprotected-write-repeat 同一条轨迹、同一个工具声明，唯一的不同是
+  # 那两次调用在边界上就没发出去。**"没到"有两种，而记录里只有一种带标记**：
+  # 被沙箱策略拦下的带 `blocked_by_proxy`，而参数被 schema 拒掉的刻意不带
+  # （那是 Agent 自己写错了参数，不是策略在生效，理由写在 proxy/app.py 里）。
+  # 所以判据只能是"到没到"；拿 `blocked_by_proxy` 当判据的话，这一条会报出
+  # 和上面那条一字不差的结论。
+
+  - id: idem-schema-rejected-writes-never-happened
+    source: 自造
+    why: >
+      两次 create_payment 的参数都被边界上的 schema 拒了，一次都没发出去。
+      钱一笔没动，所以这里既没有重复扣款、也没有可判的写操作——三族一律
+      「没测到」。这正是四态语义要的东西：把没测到读成通过是错的，把没发生的
+      事读成发生了同样是错的，而后者更危险——它会让用户去改一个没问题的 Prompt。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, status: invalid_args}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, status: invalid_args}
+    expect:
+      memory: none
+      idempotency: inconclusive
+      loop: inconclusive
+      autonomy: inconclusive

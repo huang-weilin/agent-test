@@ -132,16 +132,30 @@ class LoopDetector:
                 )
             ]
 
-        # 被代理拒绝的调用没有到达目标系统，不参与循环判定。
-        # 否则"沙箱拦了它"会被读成"Agent 在循环"——自己造出来的误报。
-        live = [c for c in ordered if not c.blocked_by_proxy]
+        # 没到达目标系统的调用不参与循环判定。否则"边界拦了它"会被读成
+        # "Agent 在循环"——自己造出来的误报。
+        #
+        # **判据是 `reached_target`，不是 `blocked_by_proxy`。** 后者只覆盖
+        # "沙箱策略拦下的"，而参数被 schema 拒（`invalid_args`）和工具没声明
+        # （`blocked`）同样一次都没发出去，却刻意不带那个标记——它们说的是
+        # "Agent 自己送错了"，是另一个问题。原先拿它当"到没到"用，于是三次
+        # 参数写错的 create_payment 和三次真调用得到一字不差的报告。
+        live = [c for c in ordered if c.reached_target]
         if not live:
+            # 被拒的两种在这里分开数：全被沙箱策略拦下意味着这份轨迹里
+            # Agent 自己做的事一件都没留下，全被 schema 拒则是它自己写错了参数。
+            # 结论一样是"判不了"，但报告读的人要能分清是哪一种。
+            by_proxy = sum(1 for c in ordered if c.blocked_by_proxy)
             return [
                 inconclusive(
                     self.name,
-                    f"全部 {len(ordered)} 次工具调用都被出口代理拒绝，未到达目标系统，"
-                    f"无法判定循环。",
-                    detail={"blocked_by_proxy": len(ordered)},
+                    f"全部 {len(ordered)} 次工具调用都在边界上被拒，未到达目标系统，"
+                    f"无法判定循环"
+                    + (f"（其中 {by_proxy} 次是出口代理按策略拦下的）。" if by_proxy else "。"),
+                    detail={
+                        "rejected_at_boundary": len(ordered),
+                        "blocked_by_proxy": by_proxy,
+                    },
                 )
             ]
 
@@ -157,7 +171,10 @@ class LoopDetector:
             ping_pong.extend(self._detect_ping_pong(occasion, exemptions))
 
         findings: list[Finding] = [*strict, *approximate, *ping_pong]
-        findings.extend(self._detect_cross_session(ordered))
+        # 跨会话那一支同样只吃到达了目标系统的调用。传 `ordered` 的话，被边界
+        # 拒下的调用照样进分组——同一个缺陷在三个地方各有一份，这一处原先连
+        # `blocked_by_proxy` 都没过滤。
+        findings.extend(self._detect_cross_session(live))
         if replay_calls:
             findings.extend(self._note_snapshot_replays(replay_calls))
 
@@ -540,8 +557,8 @@ class LoopDetector:
             return [
                 inconclusive(
                     f"{self.name}.cross_session",
-                    f"产生工具调用的会话只有 {len(ordinals)} 个，无法比对跨会话循环。"
-                    f"跨会话判定需要至少两个会话各留下调用记录。",
+                    f"有工具调用到达目标系统的会话只有 {len(ordinals)} 个，"
+                    f"无法比对跨会话循环。跨会话判定需要至少两个会话各留下调用记录。",
                     detail={"session_ordinals_with_calls": sorted(ordinals)},
                 )
             ]

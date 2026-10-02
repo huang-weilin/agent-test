@@ -222,11 +222,18 @@ async def test_different_orders_across_sessions_are_not_duplicates(temp_db: str)
 
 @pytest.mark.asyncio
 async def test_blocked_calls_do_not_count_across_sessions(temp_db: str) -> None:
-    """被出口代理拦下的那次没到目标系统，不构成跨会话重复扣款。"""
+    """被出口代理拦下的那次没到目标系统，不构成跨会话重复扣款。
+
+    `status` 必须一起给：真实边界上 `blocked_by_proxy=True` 永远和
+    `status="blocked"` 成对出现（`proxy/app.py` 四处写法一致，
+    `tests/test_call_status_vocabulary.py` 守着）。只给标记不给状态的话，
+    这里留下的是一条边界上产生不出来的记录——`status="ok"` 加
+    `blocked_by_proxy=True`，两个字段互相打架，而检测器只认得出其中一种说法。
+    """
     ctx = await start_run(scenario_id="ticket", agent_version="v1", declared_writes=WRITES)
     await _pay(ctx)
     await start_session(ctx)
-    await _pay(ctx, blocked_by_proxy=True)
+    await _pay(ctx, blocked_by_proxy=True, status="blocked")
 
     findings = _findings(await load_session_sequence(ctx.session_sequence_id))
     assert not [f for f in findings if f.verdict == DetectorVerdict.FAIL]

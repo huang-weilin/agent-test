@@ -79,6 +79,15 @@ _ABSENT = {
         "同上，住在仓库外面。README 的缺口表和 `docs/detectors.md` 都写着"
         "「链式聚类」这个出口**量过了、不通**，量的就是它。"
     ),
+    "_probes/measure_rejected_calls.py": (
+        "同上，住在仓库外面。量的是「被拒的调用各检测器拿它当什么」——"
+        "`docs/detectors.md` 第一节那条「三次参数写错会拿到和三次真扣款一字不差"
+        "的报告」就是它量出来的。"
+    ),
+    "_probes/measure_idempotency_status.py": (
+        "同上，住在仓库外面。量的是「幂等检测器每一句话跟调用成功没成功有没有"
+        "关系」（四支 × 三种结果），`docs/detectors.md` 第四节引它。"
+    ),
     "notes/a.md": (
         "`docs/detectors.md` 举的例子：讲「目录判据的粒度是整块」时，举的是**记忆"
         "目录里**的布局（`notes/` 下逐条声明各写一行），不是仓库里的文件。"

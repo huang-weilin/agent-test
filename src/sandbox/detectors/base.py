@@ -22,6 +22,39 @@ from typing import Any, Protocol
 
 from sandbox.db.models import Confidence, DetectorVerdict
 
+#: 边界上"这次调用有没有**到**目标系统"的判据：`status` 落在这里面的才算发生过。
+#:
+#: **它和 `blocked_by_proxy` 回答的不是同一个问题。** 后者回答"**是谁**拦的"：
+#: True 是沙箱自己的策略，False 是 Agent 自己送错了参数。两个问题在四种 status
+#: 上只重合两次：
+#:
+#:   * `ok` / `error`   —— 发出去了。`error` 是目标系统回的错，调用本身到了；
+#:   * `invalid_args`   —— 参数被 schema 拒了，一次都没发出去，**`blocked_by_proxy=False`**；
+#:   * `blocked`        —— 工具没声明（`proxy/app.py:151`），同样没发出去，同样是 False。
+#:
+#: 后两种**刻意**不带那个标记，理由写在 `proxy/app.py` 里，`tests/test_api.py` 的
+#: `test_an_invalid_args_call_is_not_marked_as_a_proxy_block` 守着它。所以检测器
+#: 不能拿 `blocked_by_proxy` 当"到没到"用：那样三次参数写错的 `create_payment`
+#: 会拿到和三次真扣款**一字不差**的报告（量于 2026-10-02，
+#: `../_probes/measure_rejected_calls.py`）。
+#:
+#: 取值来自 `proxy/app.py` 里那几处 `record_tool_call(...)`；
+#: `tests/test_call_status_vocabulary.py` 盯着这份名单有没有走样。
+REACHED_TARGET: frozenset[str] = frozenset({"ok", "error"})
+
+#: 补集：**在边界上就被拦下、一次都没发出去**的那些。两种都没到目标系统，
+#: 区别只在于是谁拦的——`blocked` 可能是沙箱策略（那时另有 `blocked_by_proxy=True`），
+#: 也可能是工具压根没声明（那时是 False，Agent 自己的错）。
+#:
+#: 单独的常量而不是"剩下的都是"，是为了让"补集"这句话可以被机械核对：
+#: 谁新加一种 status，谁就得在这里或在上面的名单里挑一边，挑漏了测试会红。
+REJECTED_AT_BOUNDARY: frozenset[str] = frozenset({"blocked", "invalid_args"})
+
+#: 边界上可能出现的一切 `status`。上面两个集合**不重不漏**地盖住它——
+#: 两个方向都由 `tests/test_call_status_vocabulary.py` 拿 `proxy/app.py`
+#: 的真实写法核对：生产里写过的每一种都在名单里，名单里的每一种生产里都写过。
+CALL_STATUSES: frozenset[str] = REACHED_TARGET | REJECTED_AT_BOUNDARY
+
 
 @dataclass(frozen=True)
 class CallView:
@@ -55,6 +88,14 @@ class CallView:
     replay_reason: str | None = None
     blocked_by_proxy: bool = False
     status: str = "ok"
+
+    @property
+    def reached_target(self) -> bool:
+        """这次调用到没到目标系统。没到的**一次都没发生过**，不进任何判定。
+
+        见 `REACHED_TARGET`：它问的和 `blocked_by_proxy` 不是同一件事，别互相顶替。
+        """
+        return self.status in REACHED_TARGET
 
 
 @dataclass(frozen=True)

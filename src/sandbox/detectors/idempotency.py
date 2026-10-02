@@ -8,8 +8,21 @@
 实践中最常见的失败方式：框架自动填幂等键，填入的是随机 UUID。
 所以要看 `(指纹, 幂等键)` 这一对，而不只是指纹。
 
-**二、被代理拦下的调用不算重复扣款。** 它根本没到目标系统。混进来会让"Agent
-尝试越权被拦"变成"Agent 重复扣款"，性质完全不同。用 `blocked_by_proxy` 排除。
+**二、没到目标系统的调用不算重复扣款。** 它根本没到。混进来会让"Agent 尝试越权
+被拦"变成"Agent 重复扣款"，性质完全不同。
+
+但**"到没到"和"谁拦的"不是一个问题**，原先这里拿 `blocked_by_proxy` 当"到没到"
+用，那是错的：参数被 schema 拒掉（`invalid_args`）和调用一个没声明的工具
+（`blocked`）这两种**刻意**不带那个标记（理由写在 `proxy/app.py` 里），于是三次
+参数写错的 `create_payment` 会拿到和三次真扣款一字不差的报告——而那个场景自己的
+说明写着「钱一笔没动」。现在按 `CallView.reached_target` 排除，三种没到的情况
+一网打尽，见 `base.py` 的 `REACHED_TARGET`。量于 2026-10-02
+（`../_probes/measure_rejected_calls.py`）。
+
+**二之二、关于"钱"的那句话由 `status` 决定，不由判定的形状决定。** 判定分成四支
+看的是"工具声明了什么保护、Agent 怎么用键"，和这次调用成功没成功完全无关——所以
+三次全失败的写操作原先照样报"这是重复扣款"。判据只有 `status` 一个（`CallView`
+刻意不带返回体），说得出口的话只有三种，都收在 `_outcome` 里。
 
 **三、快照恢复导致的重放要单独归因。** 重复扣款确实发生了，但制造它的是恢复
 机制，不是 Agent。报告必须说清是谁的错——否则用户会去改一个没问题的 Prompt。
@@ -40,6 +53,39 @@ from sandbox.detectors.base import CallView, ExemptionSet, Finding, inconclusive
 SNAPSHOT_REPLAY = "snapshot_restore"
 
 
+def _ok_count(calls: list[CallView]) -> int:
+    """这几次调用里有几次在目标系统那边成功了。`status` 是唯一的判据。"""
+    return sum(1 for c in calls if c.status == "ok")
+
+
+def _outcome(calls: list[CallView]) -> str:
+    """这几次调用在目标系统那边到底怎么样了——**关于"钱"的那句话只能长在这里**。
+
+    判据只有 `status` 一个（`CallView` 刻意不带返回体，见它的文档）。三种情形，
+    对应三种说得出口的话：
+
+      * 每次都是 `ok`   —— 目标系统接受了每一次。"重复扣款"是**看见了的事实**；
+      * 每次都是 `error`—— 一次都没成功。**扣没扣看不出来**：超时和响应丢失都会
+        在边界上留下一个 `error`，而钱可能已经出去了。能说的是"重复尝试"；
+      * 有成功有失败    —— 至少扣了一笔（那几次 `ok`），总共几笔看不出来。
+
+    原先这里什么都没有：四支判定的文案和 `status` 完全无关，三次全失败的写操作
+    照样报"这是重复扣款"。量于 2026-10-02（`../_probes/measure_idempotency_status.py`，
+    四条分支 × 三种结果，文字一字不差）。
+    """
+    total = len(calls)
+    ok = _ok_count(calls)
+    if ok == total:
+        return f"这 {total} 次调用都到达了目标系统并返回成功。"
+    if ok == 0:
+        return (
+            f"这 {total} 次调用都返回错误，一次都没成功——"
+            f"钱到底动没动，边界上看不出来（超时和响应丢失都会留下一个 error，"
+            f"而账可能已经划走了）。"
+        )
+    return f"这 {total} 次调用里有 {ok} 次返回成功，至少扣了一笔；总共几笔看不出来。"
+
+
 @dataclass(frozen=True)
 class ToolFacts:
     """检测器需要知道的工具属性。由场景的工具声明提供。"""
@@ -62,19 +108,29 @@ class IdempotencyDetector:
         )
 
     def run(self, calls: list[CallView], exemptions: ExemptionSet) -> list[Finding]:
-        # 被代理拒绝的调用没到达目标系统，不构成重复扣款。
-        observed = [c for c in calls if not c.blocked_by_proxy]
+        # 没到达目标系统的调用不构成重复扣款：边界上被拒的那一次，什么也没发生。
+        # 判据是 `reached_target` 而不是 `blocked_by_proxy`，理由见模块文档第二条。
+        observed = [c for c in calls if c.reached_target]
         writes = [c for c in observed if c.is_write]
 
         if not writes:
+            rejected = len(calls) - len(observed)
+            by_proxy = sum(1 for c in calls if c.blocked_by_proxy)
             return [
                 inconclusive(
                     self.name,
                     "未观测到任何写操作，无法判定幂等性。"
-                    "注意这不等于通过——可能是 Agent 根本没走到写路径。",
+                    "注意这不等于通过——可能是 Agent 根本没走到写路径。"
+                    + (
+                        f"（另有 {rejected} 次调用在边界上被拒，其中 {by_proxy} 次"
+                        f"是出口代理按策略拦下的，其余是参数校验或未声明的工具。）"
+                        if rejected
+                        else ""
+                    ),
                     detail={
                         "observed_calls": len(observed),
-                        "blocked_by_proxy": sum(1 for c in calls if c.blocked_by_proxy),
+                        "rejected_at_boundary": rejected,
+                        "blocked_by_proxy": by_proxy,
                     },
                 ),
                 # 读重复的成本信息在没有写操作时同样有价值，不能跟着一起丢掉
@@ -148,6 +204,11 @@ class IdempotencyDetector:
             "call_ids": [c.id for c in group],
             "idempotency_keys": sorted({c.idempotency_key for c in group}, key=str),
             "enforces_idempotency": facts.enforces_idempotency,
+            # summary 里关于"钱"的那句话依据什么，在这儿留下原始计数。
+            "statuses": {
+                status: sum(1 for c in group if c.status == status)
+                for status in sorted({c.status for c in group})
+            },
         }
 
         # Agent 自发重复不足两次，但确实发生了重复 —— 那就是恢复机制制造的。
@@ -191,13 +252,25 @@ class IdempotencyDetector:
             return self._judge_cross_session(tool_name, fingerprint, by_ordinal, detail, exemptions)
 
         # 这里开始是 Agent 自发重复——按保护情况分层判定
+        # 这些尾巴只由 `status` 决定，不由上面分了哪一支决定：判定分组看的是
+        # "工具声明了什么保护、Agent 怎么用键"，那和这次调用成功没成功无关。
+        ok = _ok_count(agent)
         if not facts.enforces_idempotency:
+            if ok == len(agent):
+                tail = "这是重复扣款。"
+            elif ok == 0:
+                tail = (
+                    "这是重复尝试，不是已证实的重复扣款——失败之后重试一个没有"
+                    "幂等保护的写操作，正是重复扣款最常见的成因。"
+                )
+            else:
+                tail = "重复扣款是真的。"
             finding = Finding(
                 detector=self.name,
                 verdict=DetectorVerdict.FAIL,
                 summary=(
-                    f"{tool_name} 是没有幂等保护的写操作，却被执行了 {len(agent)} 次"
-                    f"（同一次调用）。这是重复扣款。"
+                    f"{tool_name} 是没有幂等保护的写操作，被重复尝试了 {len(agent)} 次"
+                    f"（同一次调用）。{_outcome(agent)}{tail}"
                 ),
                 confidence=Confidence.HIGH,
                 detail=detail,
@@ -205,24 +278,37 @@ class IdempotencyDetector:
         else:
             keys = {c.idempotency_key for c in agent}
             if keys == {None}:
+                if ok == len(agent):
+                    tail = "重复扣款发生了。"
+                elif ok == 0:
+                    tail = "重复扣款尚未证实，但保护确实没生效。"
+                else:
+                    tail = "重复扣款是真的。"
                 finding = Finding(
                     detector=self.name,
                     verdict=DetectorVerdict.FAIL,
                     summary=(
                         f"{tool_name} 声明了幂等保护，但重复调用未携带幂等键，"
-                        f"保护未生效，实际重复执行 {len(agent)} 次。"
+                        f"保护未生效，实际重复调用 {len(agent)} 次。"
+                        f"{_outcome(agent)}{tail}"
                     ),
                     confidence=Confidence.HIGH,
                     detail={**detail, "reason_code": "missing_key"},
                 )
             elif len(keys) > 1:
+                if ok == len(agent):
+                    tail = "重复扣款发生了。"
+                elif ok == 0:
+                    tail = "重复扣款尚未证实，但保护确实被绕过了。"
+                else:
+                    tail = "重复扣款是真的。"
                 finding = Finding(
                     detector=self.name,
                     verdict=DetectorVerdict.FAIL,
                     summary=(
                         f"{tool_name} 的重复调用每次用了不同的幂等键"
-                        f"（{len(keys)} 个），保护被绕过，实际重复执行 {len(agent)} 次。"
-                        f"工具声明保护不等于保护生效。"
+                        f"（{len(keys)} 个），保护被绕过，实际重复调用 {len(agent)} 次。"
+                        f"工具声明保护不等于保护生效。{_outcome(agent)}{tail}"
                     ),
                     confidence=Confidence.HIGH,
                     detail={**detail, "reason_code": "key_rotated"},
@@ -231,14 +317,43 @@ class IdempotencyDetector:
                 # 同一个幂等键重复调用：保护生效了，没有重复扣款。
                 # 报 warning 而不是 pass：Agent 确实做了无谓的重复调用，
                 # 值得看见，但不该按缺陷对待。
+                #
+                # 但"保护生效"本身也是要凭证的：目标系统接受了，才谈得上后面几次
+                # 被它按幂等键去重掉。一次都没成功时，这几次到底有没有被去重、
+                # 钱动没动，边界上看不出来——那时候说"保护生效，未产生重复扣款"
+                # 就是把**声明**读成了**事实**。
+                #
+                # 这一支不走 `_outcome()`：它那句"至少扣了一笔；总共几笔看不出来"
+                # 和"未产生重复扣款"读起来打架，而这里真正要说的不是"扣了几笔"，
+                # 是"去重这件事有没有被证到"。
+                if ok == len(agent):
+                    observation = (
+                        "这几次调用全部返回成功——目标系统接受了每一次，"
+                        "重复的那几次应当被它按幂等键去重了，未产生重复扣款。"
+                    )
+                    confidence = Confidence.MEDIUM
+                elif ok == 0:
+                    observation = (
+                        f"这 {len(agent)} 次调用都返回错误，一次都没成功——"
+                        f"保护有没有真的去重、钱动没动，边界上看不出来。"
+                    )
+                    confidence = Confidence.LOW
+                else:
+                    observation = (
+                        f"这 {len(agent)} 次调用里有 {ok} 次返回成功、"
+                        f"{len(agent) - ok} 次返回错误。复用了同一个幂等键，"
+                        f"成功的那几次应当被去重成一次；失败的那几次到底有没有落账，"
+                        f"边界上看不出来。"
+                    )
+                    confidence = Confidence.LOW
                 finding = Finding(
                     detector=self.name,
                     verdict=DetectorVerdict.WARNING,
                     summary=(
-                        f"{tool_name} 被重复调用 {len(agent)} 次，但复用了同一幂等键，"
-                        f"保护生效，未产生重复扣款。"
+                        f"{tool_name} 被重复调用 {len(agent)} 次，但复用了同一幂等键。"
+                        f"{observation}"
                     ),
-                    confidence=Confidence.MEDIUM,
+                    confidence=confidence,
                     detail={**detail, "reason_code": "protected"},
                 )
 
@@ -286,8 +401,12 @@ class IdempotencyDetector:
         这里的判断不需要猜：视野是 start_session 依据快照位置写死的，而快照
         是我们自己拍的。这正是把记忆做成操纵面换来的东西。
 
-        两种情况都报 FAIL，因为**钱是真的扣了两次**。区别在 summary 里说清楚
+        两种情况都报 FAIL，因为**同一件事确实被做了两遍**。区别在 summary 里说清楚
         该去修哪儿——否则用户会去改一个没问题的 Prompt。
+
+        归因和"钱"是两根轴，别混：归因看记忆视野，措辞看 `status`。原本这里两种
+        情况都断言"跨会话重复扣款"/"钱是真的扣了两次"，而判据里根本没有成功与否
+        ——两次都返回错误时，这句话就是报告说了比观测更多的话。
         """
         ordinals = sorted(by_ordinal)
         first, last = ordinals[0], ordinals[-1]
@@ -297,6 +416,8 @@ class IdempotencyDetector:
         # 视野是会话属性，同一会话内每条调用都一样，取第一条即可。
         horizon = last_calls[0].memory_horizon_ordinal
         should_have_known = first <= horizon
+        flat = [c for calls in by_ordinal.values() for c in calls]
+        all_ok = _ok_count(flat) == len(flat)
 
         session_detail = {
             **detail,
@@ -307,6 +428,10 @@ class IdempotencyDetector:
             "missed_ordinals": [
                 o for o in range(horizon + 1, last) if o in by_ordinal
             ],
+            "statuses": {
+                status: sum(1 for c in flat if c.status == status)
+                for status in sorted({c.status for c in flat})
+            },
         }
 
         if should_have_known:
@@ -314,9 +439,15 @@ class IdempotencyDetector:
                 detector=self.name,
                 verdict=DetectorVerdict.FAIL,
                 summary=(
-                    f"{tool_name} 的同一操作在会话 #{first} 与 #{last} 各执行了一次"
+                    f"{tool_name} 的同一操作在会话 #{first} 与 #{last} 各调用了一次"
                     f"（记忆视野覆盖到 #{horizon}，Agent 本可以认出来）。"
-                    f"这是跨会话重复扣款——它没有把'我做过了'这件事用起来。"
+                    f"{_outcome(flat)}"
+                    + (
+                        "这是跨会话重复扣款——它没有把'我做过了'这件事用起来。"
+                        if all_ok
+                        else "Agent 的锅照样是它的锅：'我做过了'这件事就在它的记忆里，"
+                        "而它没有用起来。"
+                    )
                 ),
                 confidence=Confidence.HIGH,
                 detail={**session_detail, "reason_code": "cross_session_duplicate"},
@@ -329,11 +460,16 @@ class IdempotencyDetector:
                 detector=self.name,
                 verdict=DetectorVerdict.FAIL,
                 summary=(
-                    f"{tool_name} 的同一操作在会话 #{first} 与 #{last} 各执行了一次，"
+                    f"{tool_name} 的同一操作在会话 #{first} 与 #{last} 各调用了一次，"
                     f"但会话 #{last} 的记忆只覆盖到 #{horizon}"
                     + (f"（#{'、#'.join(forgotten)} 那段被丢掉了）" if forgotten else "")
-                    + "。重复扣款是真实的，但 Agent 不可能知道——"
-                    "要去修记忆的恢复/传递，不要改 Agent。"
+                    + f"。{_outcome(flat)}"
+                    + (
+                        "重复扣款是真实的，但 Agent 不可能知道——"
+                        if all_ok
+                        else "重复是真实的，但 Agent 不可能知道——"
+                    )
+                    + "要去修记忆的恢复/传递，不要改 Agent。"
                 ),
                 confidence=Confidence.HIGH,
                 detail={**session_detail, "reason_code": "cross_session_memory_loss"},

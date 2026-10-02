@@ -105,7 +105,7 @@ def build_places(values: dict[str, int]) -> list[tuple[str, str]]:
         ("tests/corpus/README.md", '人手挑出来的 {总} 条轨迹"'),
         ("tests/corpus/README.md", "{总} 条里一条误报就能让精确率掉几个百分点"),
         # --- 检测器文档：标定表的小标题 + 结论里重复的那个数 ---
-        ("docs/detectors.md", "### 实测（2026-10-01，{总} 条语料）"),
+        ("docs/detectors.md", "### 实测（2026-10-02，{总} 条语料）"),
         ("docs/detectors.md", "{总} 条里一条误报就能让精确率掉几个百分点"),
         ("docs/detectors.md", "已交付 {总} 条手写并逐条标注的轨迹"),
         # --- 顶层 README：四处正文 ---

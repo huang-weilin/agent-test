@@ -366,7 +366,62 @@ def test_all_blocked_calls_is_inconclusive(make_call) -> None:
     findings = _detector().run(calls, ExemptionSet())
 
     assert _verdicts(findings) == ["inconclusive"]
-    assert "出口代理拒绝" in findings[0].summary
+    assert "边界上被拒" in findings[0].summary
+    # 被代理拦下的次数要单独说出来：全部被拒和大部分被拒是两件事，
+    # 而"全是沙箱策略干的"意味着这份轨迹里 Agent 自己做的事一件都没留下。
+    assert "3 次是出口代理按策略拦下的" in findings[0].summary
+    assert findings[0].detail["blocked_by_proxy"] == 3
+
+
+def test_a_rejected_call_is_inconclusive_even_without_the_proxy_flag(make_call) -> None:
+    """判据是「到没到」，不是「谁拦的」——参数被 schema 拒掉的刻意不带那个标记。
+
+    这一条和上面那条只差一点：三次调用同样一次都没发出去，但它们是 Agent 自己
+    写错了参数，记录里 `blocked_by_proxy=False`。看标记的实现在这里会说
+    「三次调用都在原地打转」，而那三次一次都没发生过。
+    """
+    calls = [
+        make_call(i, "create_payment", {"order_id": "A1"}, status="invalid_args")
+        for i in range(1, 4)
+    ]
+    findings = _detector().run(calls, ExemptionSet())
+
+    assert _verdicts(findings) == ["inconclusive"]
+    assert "边界上被拒" in findings[0].summary
+    assert findings[0].detail["blocked_by_proxy"] == 0
+    assert findings[0].detail["rejected_at_boundary"] == 3
+
+
+def test_a_rejected_call_does_not_join_a_cross_session_group(make_call) -> None:
+    """跨会话那一支也只吃到达了目标系统的调用。
+
+    会话 #0 有一次真调用，会话 #1 那次在边界上被拒了——只有**一次**调用真的
+    发生过，谈不上跨会话重复。原先跨会话那里连 `blocked_by_proxy` 都没过滤，
+    传的是整份 `ordered`；同一个缺陷在三个地方各有一份。
+    """
+    calls = [
+        make_call(1, "create_payment", {"order_id": "A1"}, session_ordinal=0),
+        make_call(
+            1,
+            "create_payment",
+            {"order_id": "A1"},
+            session_ordinal=1,
+            memory_horizon_ordinal=0,
+            status="invalid_args",
+        ),
+    ]
+    findings = _detector().run(calls, ExemptionSet())
+
+    cross = _of(findings, ".cross_session")
+    assert len(cross) == 1
+    # 铁证在 detail 里：进分组的会话只有 #0，被拒的那次压根没进去。
+    assert cross[0].detail["session_ordinals_with_calls"] == [0], (
+        f"被拒的那次进了跨会话分组：{cross[0].detail}"
+    )
+    # 只有一个会话留下调用记录 -> 判不了。既不是"没发现跨会话循环"，也不是
+    # "发现了"——「没测到」和「没问题」是两件事。
+    assert cross[0].verdict == DetectorVerdict.INCONCLUSIVE
+    assert "到达目标系统的会话只有 1 个" in cross[0].summary
 
 
 def test_no_calls_is_inconclusive() -> None:
