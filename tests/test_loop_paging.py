@@ -1,19 +1,32 @@
 """分页：近似层的两个分支各有一个活样本，以及"它们靠什么分开"。
 
 **这个文件要回答的问题只有一个**：近似层凭什么把"翻了很多页"判成正常遍历、
-把"翻得更多"判成要人看一眼？答案是**场景声明的那张字段权重表**——`page` 是
-光标，不是这个操作的身份。不声明它，检测器只能拿数值的相对差去猜，而那个猜法
-有个实测出来的后果：页码从 1 涨到 10，第 1 次和第 6 次的相似度只剩 0.72，
-一串连续翻页被切成好几个簇，每个簇都够不着告警条数（8）——**于是那条
-"翻了很多页也不停"的 warning 永远不成立，而报告上看起来只是"检测器没报警"。**
+把"翻得更多"判成要人看一眼？
+
+最初的答案只有一条：**场景声明的那张字段权重表**——`page` 是光标，不是这个
+操作的身份。不声明它，检测器只能拿数值的相对差去猜，而那个猜法有个实测出来的
+后果：页码从 1 涨到 10，第 1 次和第 6 次的相似度只剩 0.72，一串连续翻页被切成
+好几个簇，每个簇都够不着告警条数（8）——**于是那条"翻了很多页也不停"的 warning
+永远不成立，而报告上看起来只是"检测器没报警"。**
+
+**2026-10-02 加上了第二条路**（`LoopDetector._advancing_field`）：认得出"整组就是
+一串往前走的游标"时整组判，不再靠簇长去够阈值。加它的理由是量出来的
+（`../_probes/measure_warn_threshold.py`）：那句"8 页"的实际值是不给权重时
+13~36 页，而声明权重也救不了"唯一的字段就是光标"的形状（权重是相对的，
+只给一个字段声明等于没声明）。**方向是危险的那一头**——阈值说 8、实际要 30 多，
+中间那些次报的是 `pass`「判为正常遍历」。
+
+这件事改变了下面第 2 层的**对照方向**：原先"带着声明 → warning、拿掉声明 →
+一串 pass"这组对比就是那条缺陷本身，它被修掉之后，两次的结论**必须一样**
+（都是 warning），而"分簇仍然只由权重决定"改由 `_cluster` 直接钉。**对照组
+不能因为结论变一致就删掉**——那两张表仍然是场景作者能改的唯一旋钮。
 
 所以这里有三层，缺一层就有一条路能蒙混过去：
 
   1. **受控实验**：两份场景只差页数。世界、工具、Agent、判卷标准都得一样，
      否则"结论不同"就有第二种解释。
-  2. **接线**：那张表真的走到了检测器手里——用同一串调用跑两遍，一遍带着
-     声明、一遍把声明拿掉，两次的结论必须不同。这是"装上了但没接线"那条
-     准则在这里的落点。
+  2. **接线**：那张表真的走到了检测器手里，而且**两条路都对同一段轨迹给出
+     同一个结论**。
   3. **看门狗**：运行**当中**读的是注册表，不是场景对象。表没过去的话，
      熔断与事后报告会拿着两把尺子量同一段轨迹。
 """
@@ -155,10 +168,24 @@ def test_the_declared_weights_are_what_turns_the_cluster_into_one() -> None:
     """**这个文件的核心。** 同一串 10 次调用，跑两遍，只有声明在不在的差别。
 
     带着声明的：10 次落进同一个簇，越过告警条数 → warning。
-    拿掉声明的：被切成好几个小簇，最大的那个也够不着 8 → 一条 warning 都没有。
+    拿掉声明的：**簇是散的**（`counts(None) != [10]`，`_cluster` 一个字没改），
+    但**结论也是同一条 warning**——`_advancing_field` 认得出"整组就是一串往前
+    走的游标"，不必再靠簇长去够阈值。
 
-    第二组断言是这条测试的**对照**，不是补充说明：少了它，一个"看到翻页就报
-    warning"的检测器也能全绿，而那种检测器在真实使用里的下场是被关掉。
+    **这条测试原先的对照方向是反的，而且是 2026-10-02 修掉的那个缺陷本身。**
+    它当年断言"没有权重就一条 warning 都没有"，把 13~36 页才报（而不是 8 页）
+    当成"权重在起作用"的证据。这个缺陷的代价在
+    `LoopDetector._advancing_field` 的文档字符串里写着：阈值说 8、实际要 30 多，
+    中间那些次报出来的是 `pass`「判为正常遍历」——一句做过的判定。
+
+    修完之后的诚实版本是**把两件事分开钉**：
+
+      * 分簇仍然只由权重决定（下面直接打 `_cluster`，不经过判定）；
+      * 结论不再由它决定，两条路必须给出同一个结论。
+
+    "一个看到翻页就报 warning 的检测器也能全绿"那条警戒线**没有被丢掉**，
+    它在 `test_the_two_branches_are_separated_by_the_page_count_alone` 里：
+    7 页仍然 PASS、9 页才 WARNING。
     """
     calls = _paging_calls(10)
 
@@ -169,18 +196,27 @@ def test_the_declared_weights_are_what_turns_the_cluster_into_one() -> None:
     assert with_weights[0].detail["values_monotonic"] is True
 
     without = _approximate(_without_weights(UNBOUNDED), 10)
-    counts = sorted((f.detail["count"] for f in without), reverse=True)
-    assert len(counts) >= 2, "没有权重表却还是聚成了一个簇——那说不好是权重在起作用"
-    assert all(f.verdict == DetectorVerdict.PASS for f in without), (
-        "没有权重表时每一簇都不足告警条数，于是这一串看起来像正常遍历"
+    assert [f.verdict for f in without] == [DetectorVerdict.WARNING], (
+        "拿掉权重表之后结论必须照旧——这条 warning 的判据是'整组就是一串往前走的"
+        "游标'，不依赖那张表。它曾经依赖过，那正是缺陷。"
     )
-    assert counts[0] < WARN_AFTER, (
-        "没有权重表却还是聚到了告警条数——那这条测试证明不了是权重在起作用"
-    )
-    assert sum(counts) < 10, (
-        "不足 approximate_min_repeats（3）次的小簇连结论都不会出，所以簇加起来"
-        "少于 10 次调用。**这恰恰是这条测试要说的事**：那一串调用被拆散之后，"
-        "有一截连被看见的机会都没有——报告上不会留下任何痕迹"
+    assert without[0].detail["count"] == 10, "整组判：次数是整串的长度，不是某个簇的长度"
+    assert without[0].detail["differing_fields"] == ["page"]
+    assert without[0].detail["reason_code"] == "monotonic_unbounded"
+
+    # 分簇这一半**没有变**：权重表仍然是唯一能改变它的东西。打的是私有方法——
+    # 刻意的：这条要钉的就是"聚成几簇"，而判定层已经不再复述这个数了。
+    def cluster_sizes(scenario: Scenario) -> list[int]:
+        detector = LoopDetector(key_weights=scenario.loop_field_weights())
+        return sorted((len(c) for c in detector._cluster(calls)), reverse=True)
+
+    assert cluster_sizes(load_scenario(UNBOUNDED)) == [10], "带着声明：整串一个簇"
+    scattered = cluster_sizes(_without_weights(UNBOUNDED))
+    assert len(scattered) >= 2, "拿掉声明：被切成好几个簇"
+    assert min(scattered) < 3, (
+        "有一簇小到不足 approximate_min_repeats（3）——**如果只走聚类这条路**，"
+        "那一截调用连结论都不会出，报告上不留任何痕迹。这就是为什么"
+        "`_advancing_field` 要整组判，而不是接着数簇。"
     )
 
     # 与上面那串**同一段构造**，只把页数换成世界里的真实页数。
@@ -212,12 +248,21 @@ def test_the_two_branches_are_separated_by_the_page_count_alone() -> None:
 def test_a_weight_on_the_only_field_changes_nothing() -> None:
     """**权重是相对的**，所以只有一个参数时它压不动任何东西。
 
-    分母上只有它自己：`0.1 × s / 0.1` 还是 `s`。一个工具的参数里如果**只有光标、
-    没有稳定部分**，"同一个操作"就没有证据可依——声明造不出不存在的稳定性。
+    分母上只有它自己：`0.1 × s / 0.1` 还是 `s`。声明造不出不存在的稳定性。
 
-    这条不是补充说明，它划的是这个机制的边界：想把这类工具也判准，得改聚类方式
-    本身（链式而非首成员），那是检测器行为变更，还没做（`tests/corpus/README.md`
-    待决清单第 4 条）。写在这里，是因为"加了权重却没变化"最容易被读成接线断了。
+    这条划的是**分簇**这个机制的边界，**不是**判定层的边界——原先它下面写着
+    "想把这类工具也判准，得改聚类方式本身（链式而非首成员），那是检测器行为变更，
+    还没做"。那个说法两头都不对了（2026-10-02）：
+
+      * 链式那条路早就被量翻过（`../_probes/measure_cluster_linkage.py`：形状依赖
+        确实没了，十二个真不同的订单号从"不成簇"变成"一簇十二个"，漏报误报一起
+        变多）——"还没做"应该改成"这条路不通";
+      * 而这类工具**已经判得准了**，只是**没有走聚类**：`_advancing_field` 认得出
+        "整组就是一串往前走的游标"，直接整组判。所以这张权重表对
+        `list_orders` 这种"只有光标"的工具不再是那条 warning 的必要条件。
+
+    写在这里，是因为"加了权重却没变化"最容易被读成接线断了——现在还得再补一句
+    "而且它本来也不需要这张表"。
     """
     only_page = [
         CallView(
@@ -331,21 +376,44 @@ def test_the_detector_is_built_from_the_run_not_from_a_module_global() -> None:
 async def test_the_watchdog_judges_the_trace_by_the_declared_weights(temp_db: str) -> None:
     """**熔断与事后报告必须拿同一把尺子。** 同一串 10 次调用，跑两遍。
 
-    带着声明的那个运行，看门狗看见的是 warning；没带声明的那个，看见的是一串
-    pass。这不是风格问题：报告那一侧读的是场景对象，看门狗这一侧只能读注册表，
-    表没过去的话，两边会对同一段轨迹说出相反的话——而两边看起来都对。
+    报告那一侧读的是场景对象，看门狗这一侧只能读注册表。所以这条测试真正要问的是：
+    注册表里那份声明**有没有走过去**，以及过去之后**两边说的是不是同一句话**。
+
+    原先它是拿"带着声明 → warning、没带 → 一串 pass"当证据的。那条对照 2026-10-02
+    被修掉了：没带声明的那个运行现在**也**是 warning（`_advancing_field` 认得出
+    整组游标，不再靠簇长够阈值）。**对照消失不等于这条测试可以删**——判据改成
+    更直接的那个：把看门狗看到的结论和事后报告算出来的结论**逐字比一比**。
+    两把尺子有一把没接上，这里就红了，而原先那种"一边 warning、一边 pass"的
+    比法恰恰是拿缺陷当证据。
     """
     declared = await _run_with_pages(10, weights={"page": 0.1})
     plain = await _run_with_pages(10)
 
-    findings = [
-        f for f in await inspect_run(declared) if f.detector == "loop.approximate"
-    ]
-    assert [f.verdict for f in findings] == [DetectorVerdict.WARNING]
-    assert findings[0].detail["count"] == 10
+    # 事后报告那一侧：场景对象 → 检测器。
+    expected = _approximate(load_scenario(UNBOUNDED), 10)
 
-    bare = [f for f in await inspect_run(plain) if f.detector == "loop.approximate"]
-    assert bare and all(f.verdict == DetectorVerdict.PASS for f in bare)
+    for run_id, note in ((declared, "带声明"), (plain, "没带声明")):
+        seen = [
+            f for f in await inspect_run(run_id) if f.detector == "loop.approximate"
+        ]
+        assert [f.verdict for f in seen] == [DetectorVerdict.WARNING], (
+            f"{note}的那次运行：看门狗必须认出这是一串没收敛的推进"
+        )
+        assert seen[0].detail["count"] == 10
+        assert seen[0].detail["reason_code"] == "monotonic_unbounded"
+        assert seen[0].detail["differing_fields"] == expected[0].detail["differing_fields"]
+        assert seen[0].summary == expected[0].summary, (
+            "熔断和事后报告对同一段轨迹说了两句话——而两边看起来都对"
+        )
+
+    # 注册表真的拿到了那张表（不是"反正结论一样所以无所谓"）。
+    active = runs.get(declared)
+    assert active is not None and active.loop_field_weights == {"page": 0.1}
+    bare = runs.get(plain)
+    assert bare is not None and bare.loop_field_weights == {}, (
+        "没声明的那次运行注册表里是空表，不是 None——两种都表示'没有权重'，"
+        "但钉住实际值，免得哪天它变成 None 而这里安静地过"
+    )
 
 
 # --- 端到端：真的拉起 Agent 子进程 ---------------------------------------------

@@ -294,6 +294,21 @@ class LoopDetector:
         for tool_name, group in sorted(by_tool.items()):
             if len(group) < self.approximate_min_repeats:
                 continue
+            # 整组就是一串往前走的游标、而且够得着告警条数？那就**整组判**，
+            # 不再切簇。切簇会把这一串切成 3~5 一块（理由见 `_advancing_field`），
+            # 于是同一批调用既报"连续推进 12 次…需要人工确认"、又报好几条
+            # "重复出现 3 次…判为正常遍历"——两句话说的是同一批调用，读的人
+            # 没法拿它做决定。
+            #
+            # 整组判**不会漏掉"打转"**：唯一的变量非降，那它的每一个子序列也非降，
+            # 簇一级的判定只可能是 pass 或这条 warning，不可能是 fail。所以这里
+            # `continue` 跳过的是几条约等于重复的结论，不是一条更重的结论。
+            field = self._advancing_field(group)
+            if field is not None and len(group) >= self.monotonic_warn_after:
+                findings.append(
+                    self._judge_advancing(tool_name, group, field, exemptions)
+                )
+                continue
             for cluster in self._cluster(group):
                 if len(cluster) < self.approximate_min_repeats:
                     continue
@@ -368,29 +383,41 @@ class LoopDetector:
         }
 
         if monotonic:
+            if len(cluster) >= self.monotonic_warn_after:
+                # 页码在涨，但涨了这么多页还没停。分不清"遍历一个很大的结果集"
+                # 和"停不下来"，就报 warning 让人看一眼——这个方向错了只是多看一眼，
+                # 反方向错了是账单不封顶。
+                #
+                # **这条也要过豁免那道门。** 原先它直接在 `exemptions.find(...)`
+                # 之前返回，于是给 `loop.approximate` 写的规则只静音得了下面那条
+                # pass，静音不了这一条——而 pass 本来就已经是"没告警"了。量于
+                # 2026-10-02：写了规则和没写规则，40 页那串的 warning 一字不差地
+                # 照出，`exempted_by` 是 `None`。**豁免对这条 warning 是完全无效的**，
+                # 而报告里"没有这条结论"和"这条结论被豁免了"长得一样。
+                return self._apply_exemption(
+                    Finding(
+                        detector=f"{self.name}.approximate",
+                        verdict=DetectorVerdict.WARNING,
+                        summary=(
+                            f"{tool_name} 已连续推进 {len(cluster)} 次"
+                            f"（变化字段 {sorted(differing)}），单调但未见收敛。"
+                            f"可能是正常遍历大结果集，也可能是停不下来，需要人工确认。"
+                        ),
+                        confidence=Confidence.LOW,
+                        detail={**detail, "reason_code": "monotonic_unbounded"},
+                    ),
+                    tool_name,
+                    cluster,
+                    exemptions,
+                )
+            # 唯一在变的字段是单调推进的 —— 这是正常分页/正常遍历。
+            # 报 PASS，但要留下记录说明为什么没告警。
             exemption = exemptions.find(
                 f"{self.name}.approximate",
                 tool_name,
                 is_write=anchor.is_write,
                 differing_fields=tuple(sorted(differing)),
             )
-            if len(cluster) >= self.monotonic_warn_after:
-                # 页码在涨，但涨了这么多页还没停。分不清"遍历一个很大的结果集"
-                # 和"停不下来"，就报 warning 让人看一眼——这个方向错了只是多看一眼，
-                # 反方向错了是账单不封顶。
-                return Finding(
-                    detector=f"{self.name}.approximate",
-                    verdict=DetectorVerdict.WARNING,
-                    summary=(
-                        f"{tool_name} 已连续推进 {len(cluster)} 次"
-                        f"（变化字段 {sorted(differing)}），单调但未见收敛。"
-                        f"可能是正常遍历大结果集，也可能是停不下来，需要人工确认。"
-                    ),
-                    confidence=Confidence.LOW,
-                    detail={**detail, "reason_code": "monotonic_unbounded"},
-                )
-            # 唯一在变的字段是单调推进的 —— 这是正常分页/正常遍历。
-            # 报 PASS，但要留下记录说明为什么没告警。
             return Finding(
                 detector=f"{self.name}.approximate",
                 verdict=DetectorVerdict.PASS,
@@ -416,6 +443,114 @@ class LoopDetector:
             detail=detail,
         )
         return self._apply_exemption(finding, tool_name, cluster, exemptions)
+
+    def _advancing_field(self, group: list[CallView]) -> str | None:
+        """这一组调用是不是"**只有一个字段在变、而且它一路往前**"。
+
+        返回那个字段名；不是就返回 `None`（= 这条路不表态，交给聚类）。
+
+        **为什么需要它。** `monotonic_warn_after`（8）判的是**簇长**，而簇是拿
+        "第一个成员"当代表去比加权平均相似度聚出来的。代表不动，相对差衰减得又快，
+        于是**一串单调推进的调用永远长不到 8**——它涨到一定程度就自己断了，
+        重新起一个簇。量于 2026-10-02（`../_probes/measure_warn_threshold.py`），
+        那句"8 页"的实际值：
+
+          * 不给权重：`{page}` 要 **36** 页、`{status,page}` 要 19 页、
+            `{query,status,page,page_size}` 要 13 页；
+          * 声明 `field_weights: {page: 0.1}`：多字段形状回到 8 页，
+            **但"唯一的字段就是光标"的形状（`{page}`）仍然是 36 页**——
+            权重是**相对**的（`args_similarity` 里 `score = total/total_w`），
+            只给一个字段声明权重等于没声明。于是最朴素的那种分页工具，
+            用现成的逃生口也救不回来。
+
+        错的方向是危险的那一头：阈值写着 8，实际要 13~36 页，中间那些次报出来的是
+        `pass`「判为正常遍历」——**一句做过的判定**。而 `monotonic_warn_after`
+        上面那段注释说得很清楚，代价不对称的那一头正是"停不下来却没告警"。
+
+        **它不替聚类做判定。** 认出来的组只在够得着告警条数时说话（见
+        `_detect_approximate`）；不够条数时照旧走聚类，免得凭空多出一条
+        "判为正常遍历"——那句话得由"我比过这些调用"撑着，不能由"它们的形状像
+        光标"撑着。
+
+        判据刻意收得很紧，四条全中才算：
+
+        1. `normalize_args` 之后**键集合完全一致**——中途多出一个筛选条件，
+           那是换了次查询，不是同一串游标；
+        2. **恰好一个字段在变**；
+        3. 它**全是数值**——`bool` 不算（Python 里 `True` 是 `int` 的实例）；
+        4. 它**非降**（只进不退）。
+
+        所以字符串游标（`tok000`、`tok001`…）不走这条路：字符串上没有序，
+        "它在前还是在回退"给不出证据——那是 `b0abfee` 定下的三态里的"判不了"，
+        照样沉默。同理，`字段A` 递减的那一串也不走（那是 `_monotonic_state`
+        报 fail 的那一支）。
+        """
+        if len(group) < 2:
+            return None
+        normalized = [normalize_args(call.args) for call in group]
+        keys = set(normalized[0])
+        if any(set(item) != keys for item in normalized[1:]):
+            return None
+
+        first = normalized[0]
+        changing = [
+            key
+            for key in sorted(keys)
+            if any(item.get(key) != first.get(key) for item in normalized[1:])
+        ]
+        if len(changing) != 1:
+            return None
+
+        field = changing[0]
+        values: list[int | float] = []
+        for item in normalized:
+            value = item.get(field)
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                return None
+            values.append(value)
+        if any(b < a for a, b in zip(values, values[1:], strict=False)):
+            return None
+        return field
+
+    def _judge_advancing(
+        self,
+        tool_name: str,
+        group: list[CallView],
+        field: str,
+        exemptions: ExemptionSet,
+    ) -> Finding:
+        """整组就是一串往前走的光标、且够得着告警条数：报那条 warning。
+
+        和 `_judge_approximate` 里那条 warning 是**同一句话**（同一个
+        `reason_code`、同样 `Confidence.LOW`、同样要过豁免那道门），差别只在次数
+        从"簇长"换成了"整组的长度"——因为这一串本来就是一个操作，切碎了看它
+        永远够不着阈值。
+        """
+        return self._apply_exemption(
+            Finding(
+                detector=f"{self.name}.approximate",
+                verdict=DetectorVerdict.WARNING,
+                summary=(
+                    f"{tool_name} 已连续推进 {len(group)} 次"
+                    f"（变化字段 {[field]}），单调但未见收敛。"
+                    f"可能是正常遍历大结果集，也可能是停不下来，需要人工确认。"
+                ),
+                confidence=Confidence.LOW,
+                detail={
+                    "tool_name": tool_name,
+                    "count": len(group),
+                    "differing_fields": [field],
+                    "seqs": [c.seq for c in group],
+                    "call_ids": [c.id for c in group],
+                    "values_monotonic": True,
+                    "is_write": group[0].is_write,
+                    "reason_code": "monotonic_unbounded",
+                },
+            ),
+            tool_name,
+            group,
+            exemptions,
+        )
 
     def _union_differing_fields(
         self, cluster: list[CallView], anchor: CallView
@@ -524,7 +659,7 @@ class LoopDetector:
                     verdict=DetectorVerdict.PASS,
                     summary=f"{finding.summary}{exemption.note()}",
                     confidence=Confidence.MEDIUM,
-                    detail={**finding.detail, "would_have_been": "fail"},
+                    detail={**finding.detail, "would_have_been": finding.verdict.value},
                     exempted_by=exemption.label,
                 )
             findings.append(finding)
@@ -670,6 +805,11 @@ class LoopDetector:
             verdict=DetectorVerdict.PASS,
             summary=f"{finding.summary}{exemption.note()}",
             confidence=Confidence.MEDIUM,
-            detail={**finding.detail, "would_have_been": "fail"},
+            # `would_have_been` 报的是**这条结论本来是什么**。写死 "fail" 的话，
+            # 一条被静音的 warning 会说自己本来是个 fail——而 warning 和 fail
+            # 在这个项目里是两个档（前者是"看一眼"，后者是"这就是缺陷"）。
+            # 另外两个检测器（`autonomy`、`idempotency`）一直取的就是
+            # `finding.verdict.value`，loop 这两处是漏网的。
+            detail={**finding.detail, "would_have_been": finding.verdict.value},
             exempted_by=exemption.label,
         )

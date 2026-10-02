@@ -258,6 +258,142 @@ def test_long_monotonic_pagination_warns_instead_of_passing(make_call) -> None:
     assert approx[0].detail["reason_code"] == "monotonic_unbounded"
 
 
+def test_a_bare_cursor_reaches_the_warning_without_any_weight_table(make_call) -> None:
+    """**唯一的字段就是光标**时，那条 warning 也要按声明的阈值出来。
+
+    这条钉的是 2026-10-02 修的那个缺陷。原先判 warning 用的是**簇长**，而簇是拿
+    "第一个成员"当代表比的加权平均相似度——代表不动，一串单调推进的调用涨到
+    一定程度就自己断了。量出来的后果（`../_probes/measure_warn_threshold.py`）：
+    声明"8 页"的那句阈值，实际要 `{page}` 36 页、`{status,page}` 19 页、
+    四字段形状 13 页才报。**中间那些次报的是 `pass`「判为正常遍历」——一句做过
+    的判定**，而错的方向正是代价不对称的那一头（停不下来却没告警）。
+
+    `{page}` 这一格还有第二层：`field_weights: {page: 0.1}` **救不了它**。
+    权重是相对的（`score = total/total_w`），只给一个字段声明等于没声明。
+    所以最朴素的那种分页工具——参数里只有页码——用现成的逃生口也回不到 8 页。
+    """
+    calls = [make_call(i, "list_orders", {"page": i}) for i in range(1, 13)]
+    # 刻意**不给权重表**：这一格要证明的正是"没有它也对"。
+    findings = LoopDetector(key_weights={}).run(calls, ExemptionSet())
+
+    approx = _of(findings, ".approximate")
+    assert len(approx) == 1, "整组判：不该再切成好几条各自说一小段的结论"
+    assert approx[0].verdict == DetectorVerdict.WARNING
+    assert approx[0].detail["reason_code"] == "monotonic_unbounded"
+    assert approx[0].detail["count"] == 12, "次数是整串的长度，不是某个簇的长度"
+    assert approx[0].detail["differing_fields"] == ["page"]
+
+
+def test_the_bare_cursor_path_sits_exactly_on_the_declared_threshold(make_call) -> None:
+    """那条路也得**停在阈值上**，不是"看见一串翻页就报"。
+
+    少了这条，一个对任何长度都报 warning 的实现也能让上面那条全绿——而那种检测器
+    在真实使用里的下场是被关掉。
+    """
+    threshold = LoopDetector.monotonic_warn_after
+
+    below = LoopDetector(key_weights={}).run(
+        [make_call(i, "list_orders", {"page": i}) for i in range(1, threshold)], ExemptionSet()
+    )
+    assert all(
+        f.verdict != DetectorVerdict.WARNING for f in _of(below, ".approximate")
+    ), f"{threshold - 1} 次就报了 warning——阈值不在它声明的位置上"
+
+    at = LoopDetector(key_weights={}).run(
+        [make_call(i, "list_orders", {"page": i}) for i in range(1, threshold + 1)],
+        ExemptionSet(),
+    )
+    approx = _of(at, ".approximate")
+    assert [f.verdict for f in approx] == [DetectorVerdict.WARNING]
+    assert approx[0].detail["count"] == threshold
+
+
+def test_the_bare_cursor_path_stays_shut_on_the_shapes_it_cannot_read(make_call) -> None:
+    """四条判据各自的**负样本**——少一条就是"整组判"变成一台误报机器。
+
+    `_advancing_field` 认的是"键集合一致 + 恰好一个字段在变 + 它是数值 + 它非降"，
+    这里把后三条各撞一次。字符串游标那一格尤其要紧：它在 `b0abfee` 里被定成
+    "判不了"，沉默是对的（字符串上没有序），报 warning 就是凭空造一条观测。
+    """
+    n = LoopDetector.monotonic_warn_after + 4
+
+    def warns(calls) -> bool:
+        findings = LoopDetector(key_weights={}).run(calls, ExemptionSet())
+        return any(
+            f.verdict == DetectorVerdict.WARNING for f in _of(findings, ".approximate")
+        )
+
+    assert not warns(
+        [make_call(i, "list_orders", {"cursor": f"tok{i:03d}"}) for i in range(1, n)]
+    ), "字符串游标没有序——那是'判不了'那一档，不该报 warning"
+
+    assert not warns(
+        [make_call(i, "search", {"page": i, "size": 10 + i}) for i in range(1, n)]
+    ), "两个字段一起变：认不出哪个是光标，这条路不表态"
+
+    assert not warns(
+        [make_call(i, "quote", {"amount": 30 - i}) for i in range(1, n)]
+    ), "递减不是'往前推进'，那是 `_monotonic_state` 报 fail 的那一支"
+
+    changing_keys = [make_call(i, "list_orders", {"page": i}) for i in range(1, n)]
+    changing_keys[-1] = make_call(n, "list_orders", {"page": n, "filter": "x"})
+    assert not warns(changing_keys), "中途多出一个筛选条件 = 换了次查询，不是同一串游标"
+
+
+def test_an_exemption_actually_silences_the_unbounded_warning(make_call) -> None:
+    """**给它写的豁免规则得真的静音得了它。**
+
+    修之前不行：那条 warning 在 `exemptions.find(...)` 之前就返回了，于是给
+    `loop.approximate` 写的规则只静音得了下面那条 pass——而 pass 本来就已经是
+    "没告警"。量于 2026-10-02：写了规则和没写，40 页那串的 warning 一字不差地
+    照出，`exempted_by` 是 `None`。**规则对这条 warning 完全无效**，而报告里
+    "没有这条结论"和"这条结论被豁免了"长得一样——写规则的人以为自己处理过了。
+    """
+    calls = [make_call(i, "list_orders", {"page": i}) for i in range(1, 13)]
+    silenced = LoopDetector(key_weights={}).run(
+        calls,
+        ExemptionSet(
+            [
+                Exemption(
+                    detector="loop.approximate",
+                    tool="list_orders",
+                    reason="本场景就是要把整个目录翻完，已知没有终点",
+                )
+            ]
+        ),
+    )
+
+    approx = _of(silenced, ".approximate")
+    assert [f.verdict for f in approx] == [DetectorVerdict.PASS]
+    assert approx[0].exempted_by == "exemption:loop.approximate/list_orders"
+    # 记的是**这条结论本来是什么**。写死 "fail" 的话，一条被静音的 warning
+    # 会说自己本来是个 fail——而这两档在这个项目里不是一回事
+    # （warning 是"看一眼"，fail 是"这就是缺陷"）。
+    assert approx[0].detail["would_have_been"] == "warning"
+
+
+def test_a_narrow_exemption_that_does_not_match_lets_the_warning_through(make_call) -> None:
+    """豁免的门是点名的：`arg_differs_on` 写别的字段就拦不住这一条。"""
+    calls = [make_call(i, "list_orders", {"page": i, "status": "unpaid"}) for i in range(1, 13)]
+    findings = LoopDetector(key_weights={}).run(
+        calls,
+        ExemptionSet(
+            [
+                Exemption(
+                    detector="loop.approximate",
+                    tool="list_orders",
+                    reason="只想放行'筛选条件在变'的那一类",
+                    match={"arg_differs_on": ["status"]},
+                )
+            ]
+        ),
+    )
+
+    approx = _of(findings, ".approximate")
+    assert [f.verdict for f in approx] == [DetectorVerdict.WARNING]
+    assert approx[0].exempted_by is None
+
+
 def test_ping_pong_is_a_fail(make_call) -> None:
     """委托乒乓：A→B→A→B 交替，两个工具互相触发。"""
     calls = [

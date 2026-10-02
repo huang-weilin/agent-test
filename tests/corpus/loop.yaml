@@ -233,6 +233,39 @@ items:
       idempotency: inconclusive
       autonomy: inconclusive
 
+  - id: loop-bare-cursor-paging-still-warns
+    source: 自造
+    why: >
+      和上一条同一个行为，换的只是参数形状：这个工具的参数里只有页码，没有查询词、
+      没有筛选条件、没有任何恒定的部分。形状不该决定结论——阈值写着 8 页，那就该是
+      8 页。修之前不是：那句 warning 判的是簇长，而这一串在聚类里会被切成两个两个的
+      小簇（页码相邻两次的相似度只有 0.5，又没有恒定字段把它摊薄），量出来要翻到
+      36 页才够得着。逃生口也救不了它：field_weights 是相对权重（score = total /
+      total_w），唯一一个字段声明了等于没声明。所以这条钉的是最朴素的那种分页工具——
+      语料量的是没声明权重的检测器，而它恰好是那种无论怎么声明都不管用的形状。
+      9 页够得着阈值（8），报 warning（reason_code: monotonic_unbounded）。
+    tools:
+      fetch_page: {is_write: false}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: fetch_page, args: {page: 1}}
+      - {tool: fetch_page, args: {page: 2}}
+      - {tool: fetch_page, args: {page: 3}}
+      - {tool: fetch_page, args: {page: 4}}
+      - {tool: fetch_page, args: {page: 5}}
+      - {tool: fetch_page, args: {page: 6}}
+      - {tool: fetch_page, args: {page: 7}}
+      - {tool: fetch_page, args: {page: 8}}
+      - {tool: fetch_page, args: {page: 9}}
+    expect:
+      memory: none
+      loop.approximate:
+        verdict: warning
+        reason_code: monotonic_unbounded
+      idempotency: inconclusive
+      autonomy: inconclusive
+
   # --- 委托乒乓 -------------------------------------------------------------
 
   - id: loop-ping-pong

@@ -88,6 +88,19 @@ _ABSENT = {
         "同上，住在仓库外面。量的是「幂等检测器每一句话跟调用成功没成功有没有"
         "关系」（四支 × 三种结果），`docs/detectors.md` 第四节引它。"
     ),
+    "_probes/measure_warn_threshold.py": (
+        "同上，住在仓库外面。量的是「那句写着 8 的告警阈值，在五种参数形状下"
+        "实际要多少页才够得着」——`docs/detectors.md` 第三节那张表就是它算出来的。"
+    ),
+    "_probes/measure_cursor_axis.py": (
+        "同上，住在仓库外面。量的是「换成按变化字段本身判之后，正负样本各是什么"
+        "结论」：左列跑产品代码、右列是探针自己照判据算的，两边对账；`docs/detectors.md` "
+        "第三节末段引它。"
+    ),
+    "_probes/probe_advancing_cursor.py": (
+        "同上，住在仓库外面。改一处源码锚点看谁红（拆快路 / 不看阈值 / 放宽非降 / "
+        "豁免 / would_have_been / 绿灯对照），`docs/detectors.md` 第三节末段引它。"
+    ),
     "notes/a.md": (
         "`docs/detectors.md` 举的例子：讲「目录判据的粒度是整块」时，举的是**记忆"
         "目录里**的布局（`notes/` 下逐条声明各写一行），不是仓库里的文件。"
