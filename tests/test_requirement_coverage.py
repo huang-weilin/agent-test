@@ -19,6 +19,11 @@
    查不出"表里漏了真的"。少了这一条，新加一整块能力而不进表，可以一路绿下去。
    （同一条理由见 `tests/test_reason_codes.py`：每一个产出方要么被场景走到，要么在一张
    写明理由的待办清单里。）
+5. **别的文档里"某个级别做完了"这种话，必须和末尾那张汇总表对得上**。这条是表立起来
+   当天加的：README 在目录树下面写着"需求里的 P1 已经全部做完"，而 3.1 的「回归集管理」
+   也是 P1（需求原文第 120 行）、且没做——那句话是照 3.2 那张表数出来的，漏掉了 3.1
+   那一栏。**手写的话配算出来的表，错的永远是话**；现在这句话有东西在核，判据就是
+   汇总表本身（那个级别只要还有一行不在 `已交付`，说它做完了就是假的）。
 
 ## 这道闸门**不**核什么
 
@@ -371,3 +376,87 @@ def test_the_tally_matches_the_rows() -> None:
             f"汇总表里 {level} 那一行是 {row[1:]}（已交付/部分交付/未做/不适用），"
             f"覆盖表里数出来是 {expected}。要改的是 docs/requirements.md"
         )
+
+
+#: 「某个级别已经做完了」这种话，可能写在任何一份面向读者的文档里。它必须和覆盖表
+#: 对得上：覆盖表里的数是**算出来**的，这句话是手写的。
+#:
+#: 这句话真的漂过。README 原先在目录树下面写着"需求里的 P1 已经全部做完"，而 3.1 的
+#: 「回归集管理」也是 P1（需求原文第 120 行）、且没做——那句话是照 3.2 那张表数出来的，
+#: 漏掉了 3.1 那一栏。**手写的话配算出来的表，错的永远是话**，所以让话有东西在核。
+#:
+#: 引号里的话不算"我们在声明"——那是引用或转述，不是我们在说这件事做完了。
+#: 四对：中文的「」、两种弯引号、ASCII 直引号（这一条是被真实需求逼出来的：覆盖表自己
+#: 要在正文里记下"README 原先那句话是错的"，而记下它就得提到那句话——不许提，
+#: 改正的记录就只能写一半）。
+#:
+#: **代价写在明处**：一句假话只要加上引号就能溜过去。这道闸门是绊线不是证明，
+#: 它挡的是"顺手写下的进展汇报"，不是"存心绕过去"（同一条见 `test_unwired_claims.py`）。
+_QUOTE_PAIRS = (("「", "」"), ("“", "”"), ("\x22", "\x22"))
+_COMPLETION_CLAIM = re.compile(r"P([012])[^。\n]{0,8}(?:全部做完|做完了|清空)")
+
+
+def _unquoted(text: str) -> str:
+    """把成对的引号连同里面的内容换成等长空白（行号与位置感都留着）。"""
+    for opening, closing in _QUOTE_PAIRS:
+        text = re.sub(
+            f"{re.escape(opening)}[^{re.escape(closing)}\n]*{re.escape(closing)}",
+            lambda m: " " * len(m.group(0)),
+            text,
+        )
+    return text
+
+
+def _completion_claims(text: str) -> set[str]:
+    """这段文字在说哪几个级别已经做完了。引号里的不算（见常量处的代价说明）。"""
+    return {f"P{m.group(1)}" for m in _COMPLETION_CLAIM.finditer(_unquoted(text))}
+
+
+def _claiming_docs() -> list[Path]:
+    """扫哪几份文档：README 与 `docs/` 下所有的 Markdown。
+
+    `docs/requirements.md` 自己也在里面——它当然可以谈级别，但它也**只能说实话**，
+    而它那句实话的判据就是它自己的汇总表。
+    """
+    return sorted({ROOT / "README.md", *(ROOT / "docs").rglob("*.md")})
+
+
+def test_no_document_claims_a_level_is_finished_while_the_table_says_otherwise() -> None:
+    """手写的"做完了"必须跟着算出来的数走。
+
+    判据是**汇总表本身**：那个级别只要还有一行不在 `已交付`，说它"做完了"就是假的。
+    `不适用` 也算没交付——它说的正是"这条我们没做，理由是这套形态下没有对象可测"，
+    把那一条读成"做完"等于替它改口。
+    """
+    incomplete = {level for level, row in _tally_rows().items() if row[0] != row[1]}
+    hits = {
+        # `as_posix`：本仓库的报错里路径一律是正斜杠，这样它跟别处的指路长得一样，
+        # 也能直接拿去 grep（Windows 上 `str()` 会给反斜杠）。
+        path.relative_to(ROOT).as_posix(): sorted(found)
+        for path in _claiming_docs()
+        if (found := _completion_claims(path.read_text(encoding="utf-8")) & incomplete)
+    }
+    assert not hits, (
+        "这些文档在说某个级别已经做完了，而 docs/requirements.md 数出来它不是：\n  "
+        + "\n  ".join(f"{f}：{'、'.join(v)}" for f, v in sorted(hits.items()))
+        + f"\n\n剩着的是：{'、'.join(sorted(incomplete))}。覆盖表里的数是算出来的，"
+        "这句话是手写的——要么把话改准（说清还剩哪一条），要么去把那一类做完，"
+        "**别改这道闸门**"
+    )
+
+
+def test_the_completion_scanner_finds_a_claim_when_there_is_one() -> None:
+    """自证：喂它三句真的声明、两句不是声明的、一句引号里的转述。
+
+    **没有这一条，"扫描器写错了"和"文档里确实没有这种话"长得一模一样。**
+    """
+    assert _completion_claims("需求里的 P1 已经全部做完") == {"P1"}
+    assert _completion_claims("（需求 3.2 的 P1，P1 由此清空）") == {"P1"}
+    assert _completion_claims("P2 那三条都做完了") == {"P2"}
+    # 不带级别的话不是这类声明：界面模块那一句说的是六个页面，不是某个优先级。
+    assert _completion_claims("需求第 229 行的六个界面模块全部做完") == set()
+    # 引号里的是转述，不是声明——三种引号都算（`_QUOTE_PAIRS`），代价写在常量处。
+    assert _completion_claims("上面那句「P1 全部做完」从前是错的") == set()
+    assert _completion_claims("它原先写着“P1 已经全部做完”") == set()
+    # 引号**没配对**时按没引号算：宁可咬，不可漏。
+    assert _completion_claims("它原先写着“P1 已经全部做完") == {"P1"}
