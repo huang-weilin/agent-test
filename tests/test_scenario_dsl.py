@@ -527,6 +527,32 @@ def test_an_unmet_expectation_is_missing_not_passed() -> None:
     assert len(result.missing) == 1
 
 
+def test_a_count_in_an_expectation_is_honored() -> None:
+    """场景的 `expect` 也能写 `count`：**问几条就得有几条**。
+
+    场景这一边本来就有兜底（多出来的 fail 进 `unexpected`），所以 `count` 在这里
+    多半用不上。它仍然要能写、写得对：语料和场景共用同一套预期语义，一边认得、
+    另一边不认的话，"同一个词在两处意思不同"就是这么长出来的。
+
+    两半都要：够数时通过；**不够数时按缺的条数报**（要两条只来一条，不是"没报"）。
+    """
+    scenario = _scenario_model([{"detector": "loop.strict", "verdict": "fail", "count": 2}])
+    enough = evaluate(
+        scenario,
+        [
+            _finding("loop.strict", DetectorVerdict.FAIL, summary="a"),
+            _finding("loop.strict", DetectorVerdict.FAIL, summary="b"),
+        ],
+    )
+    assert enough.ok
+    assert len(enough.matched) == 2
+
+    short = evaluate(scenario, [_finding("loop.strict", DetectorVerdict.FAIL, summary="a")])
+    assert not short.ok
+    assert len(short.missing) == 1, "要两条、来了一条：缺的是一条，不是两条"
+    assert len(short.matched) == 1
+
+
 def test_an_uncovered_failure_is_unexpected_and_fails_the_run() -> None:
     scenario = _scenario_model([])
     result = evaluate(scenario, [_finding("loop.strict", DetectorVerdict.FAIL)])

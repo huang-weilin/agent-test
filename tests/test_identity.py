@@ -80,6 +80,7 @@ MUTATIONS: dict[str, tuple[str, str, str]] = {
     "改了工具声明": ("    is_write: false", "    is_write: true", "tools"),
     "改了脚本": ("order_id: A1", "order_id: B9", "script"),
     "改了期望": ("verdict: pass", "verdict: fail", "expect"),
+    "改了条数": ("verdict: pass", "verdict: pass\n    count: 2", "expect"),
     "换了 Agent 版本": ("version: react_demo@0.1", "version: react_demo@0.2", "agent"),
     "改了世界里的备注": (
         "A1: 客户备注：工作日送达。",
@@ -121,6 +122,23 @@ def test_reformatting_is_not_a_config_change() -> None:
         == []
     )
     assert _hash(_scenario()) == _hash(_scenario(REFORMATTED))
+
+
+def test_unset_optional_expectation_fields_stay_out_of_the_fingerprint() -> None:
+    """预期上**没写**的可选字段不进指纹；写了就一定进（见 `改了条数` 那条变体）。
+
+    "不写 `count`"和"不写 `reason_code`"都是"没提这件事"，不是"提了，值是空"。
+    把它们照原样塞进指纹，症状是往模型上加一个可选字段就让**所有**场景的指纹
+    变一次——报告会说"判卷标准变了"，而实际一个字都没变。**假警报一多，真警报
+    就没人看了**，而真警报正是这个指纹存在的理由。
+
+    两半必须同时成立：这一条管"没写的不进"，`改了条数` 那条管"写了的进"——
+    只做前一半，指纹会变成"预期怎么改都不报"。
+    """
+    payload = identity.sections(_scenario())["expect"]["expect"]
+    assert payload == [{"detector": "idempotency", "verdict": "pass"}], (
+        f"预期的指纹里出现了没写的可选字段（或者少了写了的内容）：{payload}"
+    )
 
 
 def test_renaming_a_session_is_not_a_test_change() -> None:

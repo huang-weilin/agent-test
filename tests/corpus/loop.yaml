@@ -290,7 +290,7 @@ items:
       - {tool: get_user, args: {user_id: U1}}
     expect:
       memory: none
-      loop.strict: fail
+      loop.strict: {verdict: fail, count: 2}
       loop.ping_pong: fail
       idempotency: inconclusive
       idempotency.read_repeats: pass

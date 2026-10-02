@@ -166,10 +166,23 @@ class ItemResult:
     uncovered: list[Finding]
     #: 命中了 `absent` 的结论：明说了不许出现，还是出现了。
     violated_absent: list[Finding] = field(default_factory=list)
+    #: **这一族该报，但这一条没被任何预期消费掉。** 报得比标注多。
+    #:
+    #: 和 `forbidden` 是一对：那条管"不该报的族报了"（族级标注是 False），
+    #: 这条管"该报的族报多了"（族级标注是 True，可这一条没人在等）。后者原先
+    #: 是**掉在地上**的：`forbidden` 按族级标注过滤，族一旦该张口，里面多报几条
+    #: 就一条都不算错，报告于是说了比标注更多的话，而统计上完全看不出来。
+    #: 多报要写出来才作数——`expect` 里的 `count` 就是写它的地方。
+    over_reported: list[Finding] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.missing and not self.forbidden and not self.violated_absent
+        return (
+            not self.missing
+            and not self.forbidden
+            and not self.violated_absent
+            and not self.over_reported
+        )
 
     def fired_families(self) -> set[str]:
         return {
@@ -314,6 +327,7 @@ def _parse_expectations(
                     verdict=DetectorVerdict(group["verdict"]),
                     reason_code=group.get("reason_code"),
                     note=group.get("note", ""),
+                    count=_parse_count(group, path, key),
                 )
             )
         # 判 `is not None` 而不是真假：`_verdict_of` 要么给 None，要么给一个
@@ -345,11 +359,31 @@ def _verdict_of(value: Any, path: str, key: str) -> dict[str, Any] | None:
     if isinstance(value, str):
         return {"verdict": value}
     if isinstance(value, dict):
-        _reject_unknown(value, {"verdict", "reason_code", "note"}, f"expect.{key}", path)
+        _reject_unknown(value, {"verdict", "reason_code", "note", "count"}, f"expect.{key}", path)
         if "verdict" not in value:
             raise CorpusError(f"{path}: expect.{key} 写了对象却没写 verdict。")
         return dict(value)
     raise CorpusError(f"{path}: expect.{key} 的写法不认识：{value!r}。")
+
+
+def _parse_count(group: dict[str, Any], path: str, key: str) -> int | None:
+    """`count`：这条预期该命中几条。不写 = 1 条。
+
+    **只在这里校验，不指望 pydantic 顺手拦下来**：`count: 2`（YAML 里是 int）
+    和 `count: "2"`（字符串）在 pydantic 的宽松模式下都能过，而 `count: 1` 和
+    不写是同一件事、`count: 0` 则是一句"该报零条"——那种话属于族级的 `none`
+    或 `absent`，写在这里会读成"我问了，答案是零"，两件事分不清。
+    """
+    raw = group.get("count")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise CorpusError(
+            f"{path}: expect.{key} 的 count 要写一个不小于 1 的整数（收到 {raw!r}）。\n"
+            f"    '这族一条都不许报'不写在这儿——族级写 `{NONE}`，"
+            f"具体某一条不许出现写进 `absent`。"
+        )
+    return raw
 
 
 def _parse_absent(raw: Any, path: str) -> list[tuple[str, DetectorVerdict | None]]:
@@ -628,11 +662,19 @@ def run_item(item: CorpusItem) -> ItemResult:
         memory_rules=item.memory_rules,
     )
     matched, missing, remaining = match_expectations(item.expect, findings)
+    loud = (DetectorVerdict.FAIL, DetectorVerdict.WARNING)
     forbidden = [
         f
         for f in remaining
-        if not item.family_labels.get(family_of(f.detector), False)
-        and f.verdict in (DetectorVerdict.FAIL, DetectorVerdict.WARNING)
+        if not item.family_labels.get(family_of(f.detector), False) and f.verdict in loud
+    ]
+    # 剩下那些"族该张口、可这一条没人在等"的，和上面那一栏**互补、不重叠**：
+    # 上面是族级标注说 False，这里是族级标注说 True。两栏合起来就是"标注没盖住
+    # 的 fail/warning 全都有人看"。
+    over_reported = [
+        f
+        for f in remaining
+        if item.family_labels.get(family_of(f.detector), False) and f.verdict in loud
     ]
     uncovered = [f for f in remaining if f.verdict == DetectorVerdict.INCONCLUSIVE]
     violated_absent = [
@@ -651,6 +693,7 @@ def run_item(item: CorpusItem) -> ItemResult:
         forbidden=forbidden,
         uncovered=uncovered,
         violated_absent=violated_absent,
+        over_reported=over_reported,
     )
 
 

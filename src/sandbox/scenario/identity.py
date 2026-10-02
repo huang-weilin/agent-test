@@ -154,7 +154,16 @@ def sections(scenario: Scenario) -> dict[str, Any]:
         # 不是被测对象的行为。它落在这里，加规则的那次运行就会被判成
         # "测试变了、比不了"，而不是"失败少了几个"——后者是把静音读成修复。
         "expect": {
-            "expect": [e.model_dump(mode="json") for e in scenario.expect],
+            # `exclude_defaults`：预期上"没写"的字段不进指纹——不写 `count`
+            # 就是 1 条、不写 `reason_code` 就是不在乎是哪一种、`note` 空着就是
+            # 没话，它们和"写成默认值"是同一件事。不排除的话，往模型上加一个
+            # 可选字段就让**所有**场景的指纹变一次，报告会说"判卷标准变了"，
+            # 而它一个字都没变。**假警报一多，真警报就没人看了。**
+            # 反过来，写了就一定进：`count: 2` 改的是判卷标准，`tests/test_identity.py`
+            # 里 `改了条数` 那条变体盯着它。
+            "expect": [
+                e.model_dump(mode="json", exclude_defaults=True) for e in scenario.expect
+            ],
             "exemptions": [e.model_dump(mode="json") for e in scenario.exemptions],
             # 记忆判据也是判卷标准。**声明本身就是观测的过滤器**：去掉一条
             # must_hold，原本报 fail 的那条会变成 inconclusive——差异报告里

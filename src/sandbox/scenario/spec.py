@@ -447,6 +447,16 @@ class Expectation(BaseModel):
     刻意用"检测器 + 结论 + 可选的 reason_code"，而不是"期望输出全文"：
     后者一改措辞就红，于是没人愿意维护它。reason_code 是稳定的机器可读标识，
     文案则可以随便改。
+
+    **`count`：这条预期该命中几条结论，默认 1。** 加它是因为"报了几条"原先
+    根本没地方写：标注说"loop.strict 该报 fail"，而实际报出三条，比对只消费掉
+    一条，**另外两条谁也不看**——报告于是说了比标注更多的话，而统计上完全看不
+    出来（精确率按族算，族一旦"该张口"，里面多报几条不算错）。一条轨迹上真能
+    合理地报出多条的情况是有的（两个工具各自在原地打转，严格的循环检测各报
+    一条），所以这不是"默认不许"的问题，是"多报得说出来"的问题。
+
+    `count` 写小了的后果由消费方兜着：语料那边多出来的 fail/warning 会进
+    `over_reported`（见 `sandbox/corpus.py`），场景那边本来就按 unexpected 算失败。
     """
 
     model_config = {"extra": "forbid"}
@@ -455,6 +465,17 @@ class Expectation(BaseModel):
     verdict: DetectorVerdict
     reason_code: str | None = None
     note: str = ""
+    #: 该命中几条。`None` = 不写 = 1 条——**不写的和写成 1 的是同一件事**，
+    #: 所以指纹那边把空值排除掉（见 `identity.sections`），别让一次"加了个可选
+    #: 字段"变成所有场景的"判卷标准变了"。
+    count: int | None = None
+
+    @field_validator("count")
+    @classmethod
+    def _count_is_positive(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError(f"count 至少是 1（收到 {v}）：'该报零条'要写成族级的 `none`/`absent`")
+        return v
 
 
 class ExemptionDecl(BaseModel):

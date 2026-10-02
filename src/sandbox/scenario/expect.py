@@ -84,6 +84,11 @@ def match_expectations(
     """一条预期**各自**去找一条没被占用的实际结论，而不是按顺序配对——
     同一批结论可能同时满足多条预期，按顺序配对会让结果依赖于字典序。
 
+    **`count` 说的是这条预期该命中几条**（默认 1）。够不着就按缺的条数往
+    `missing` 里放几份——`matched` 加上 `missing` 里那条预期的份数，正好等于
+    它声明的条数。这样"要两条只来了一条"和"一条都没来"在数据上是两件事，
+    而报告里那一栏本来就只列预期、不列条数。
+
     单独抽出来给 `tests/corpus` 用：语料的标注和场景的 `expect` 是同一套语义，
     共用这一份实现才不会出现"语料里判通过、场景里判不通过"这种两套标准。
     """
@@ -91,12 +96,13 @@ def match_expectations(
     matched: list[tuple[Expectation, Finding]] = []
     missing: list[Expectation] = []
     for expectation in expectations:
-        hit = next((f for f in remaining if _matches(expectation, f)), None)
-        if hit is None:
-            missing.append(expectation)
-        else:
-            remaining.remove(hit)
-            matched.append((expectation, hit))
+        for _ in range(expectation.count or 1):
+            hit = next((f for f in remaining if _matches(expectation, f)), None)
+            if hit is None:
+                missing.append(expectation)
+            else:
+                remaining.remove(hit)
+                matched.append((expectation, hit))
     return matched, missing, remaining
 
 

@@ -51,6 +51,10 @@ def _print_item(result: ItemResult, *, verbose: bool) -> None:
         print("        报了标注里说这一族不该报的：")
         for finding in result.forbidden:
             print(f"          - {_finding_line(finding)}：{finding.summary}")
+    if result.over_reported:
+        print("        这一族该报，但这一条标注里没有它（多报要么改 `count`，要么改标注）：")
+        for finding in result.over_reported:
+            print(f"          - {_finding_line(finding)}：{finding.summary}")
     if result.violated_absent:
         print("        报了 `absent` 里明令不许出现的：")
         for finding in result.violated_absent:
@@ -96,6 +100,7 @@ def _print_caveats(results: list[ItemResult]) -> None:
     print("  · 标着公开来源的那几条，复现的是威胁类型，不是论文/案例库里的原始轨迹。")
     print("  · 真实脱敏轨迹（需签授权）尚未收进语料。")
     print(f"  · 一条误报就能让 n={total} 上的精确率掉几个百分点——结论要更硬，得先把语料做大。")
+    print("  · 条数也是标注的一部分：报得比 `count`（不写 = 1 条）多的进 `over_reported`。")
 
 
 def main() -> int:
@@ -132,6 +137,7 @@ def main() -> int:
                     "ok": r.ok,
                     "missing": [e.model_dump(mode="json") for e in r.missing],
                     "forbidden": [_finding_line(f) for f in r.forbidden],
+                    "over_reported": [_finding_line(f) for f in r.over_reported],
                     "violated_absent": [_finding_line(f) for f in r.violated_absent],
                 }
                 for r in results

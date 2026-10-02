@@ -7,8 +7,12 @@
 2. **加载校验** —— 写错的语料必须**在加载时**报错。不报的话，一条写坏的语料会
    以"未命中"的形式出现在结果里，而那看起来和"检测器漏报"一模一样——
    一个格式笔误会被读成检测器的缺陷。
-3. **机制自检** —— `forbidden` / `absent` / 族级标注这些东西本身要能抓到问题。
-   一个永远为空的检查比没有检查更坏：它会让准确率看起来是 1.00。
+3. **机制自检** —— `forbidden` / `absent` / `count` / 族级标注这些东西本身要能抓到
+   问题。一个永远为空的检查比没有检查更坏：它会让准确率看起来是 1.00。
+
+第 3 层"真的会咬吗"另有一段探针在仓库外：`_probes/probe_corpus_count.py`
+（标注侧改 `count`、实现侧拆掉 `over_reported`、外加一条只改散文的绿灯对照）。
+它住在仓库外，所以**没有东西会提醒它过期**——改了这一层的东西记得手动跑一遍。
 """
 
 from __future__ import annotations
@@ -51,7 +55,12 @@ def test_every_item_matches_its_labels(results) -> None:
     """每一条语料都要命中标注。红了先看是哪一栏：
 
     `missing` = 该报的没报；`forbidden` = 不该报的报了；
+    `over_reported` = 该报的族报多了（比标注多出来的那些）；
     `violated_absent` = 明令不许出现的出现了。
+
+    **`over_reported` 那一栏是后补的，它原先掉在地上**：比对一条预期只消费一条
+    结论，剩下的按族级标注过滤——族一旦"该张口"，里面多报几条就一条都不算错。
+    标注说"报一条"、实际报三条，报告于是说了比标注更多的话，而统计上看不出来。
     """
     failures = []
     for result in results:
@@ -62,6 +71,7 @@ def test_every_item_matches_its_labels(results) -> None:
             f"  标注依据：{result.item.why}\n"
             f"  该报未报：{[f'{e.detector} {e.verdict.value}' for e in result.missing]}\n"
             f"  不该报却报：{[f'{f.detector} {f.verdict.value}' for f in result.forbidden]}\n"
+            f"  比标注多报：{[f'{f.detector} {f.verdict.value}' for f in result.over_reported]}\n"
             f"  明令禁止：{[f'{f.detector} {f.verdict.value}' for f in result.violated_absent]}\n"
             f"  实际结论：{[f'{f.detector} {f.verdict.value}' for f in result.findings]}"
         )
@@ -374,6 +384,116 @@ def test_a_wrong_label_shows_up_as_missing_and_forbidden() -> None:
     result = run_item(parse_item(quiet, "t.yaml"))
     assert not result.ok
     assert [e.detector for e in result.missing] == ["idempotency"]
+
+
+#: 两个工具交替六次：严格层给**每个工具**各报一条重复，乒乓再报一条。
+#: 也就是说这条轨迹上 `loop.strict` 真的会报两条——`count` 是写这件事的地方。
+PING_PONG_ITEM = {
+    "id": "t-ping-pong",
+    "source": "自造",
+    "why": "两个工具交替出现，严格层各报一条，乒乓报一条。",
+    "tools": {"get_order": {"is_write": False}, "get_user": {"is_write": False}},
+    "sessions": [{"ordinal": 0}],
+    "calls": [
+        {"tool": "get_order", "args": {"order_id": "A1"}},
+        {"tool": "get_user", "args": {"user_id": "U1"}},
+        {"tool": "get_order", "args": {"order_id": "A1"}},
+        {"tool": "get_user", "args": {"user_id": "U1"}},
+        {"tool": "get_order", "args": {"order_id": "A1"}},
+        {"tool": "get_user", "args": {"user_id": "U1"}},
+    ],
+    "expect": {
+        "loop.strict": "fail",
+        "loop.ping_pong": "fail",
+        "idempotency": NONE,
+        "autonomy": NONE,
+        "memory": NONE,
+    },
+}
+
+
+def test_over_reporting_is_not_silent() -> None:
+    """标注说"报一条"、实际报两条：**第二条例外了，得说出来**。
+
+    这一条原先掉在地上。比对一条预期只消费一条结论，剩下的按**族级**标注过滤
+    ——族一旦"该张口"，里面多报几条就一条都不算错。于是报告说了比标注更多的
+    话，而语料这边的统计（精确率按族算）完全看不出来。
+
+    它掉得还很自然：`loop-ping-pong` 那条语料的 `why` 里**人话早就写着**
+    "标注里写两条 strict 是因为两个工具各命中一次"，而标注根本表达不了"两条"。
+    手写的话配算出来的表，错的永远是话——这次错的是表。
+    """
+    result = run_item(parse_item(PING_PONG_ITEM, "t.yaml"))
+    assert [f.detector for f in result.over_reported] == ["loop.strict"]
+    assert not result.ok, "多报一条却判了通过"
+
+
+def test_a_declared_count_lets_the_same_detector_fire_twice() -> None:
+    """`count: 2`：同一份轨迹，标注把"两条"写出来了，于是它是**对的**。
+
+    和上一条是同一条轨迹、只差这一个字段——所以红的和绿的理由只可能是它。
+    """
+    declared = dict(
+        PING_PONG_ITEM,
+        expect={**PING_PONG_ITEM["expect"], "loop.strict": {"verdict": "fail", "count": 2}},
+    )
+    result = run_item(parse_item(declared, "t.yaml"))
+    assert result.over_reported == []
+    assert result.ok
+    assert [(e.detector, f.detector) for e, f in result.matched].count(
+        ("loop.strict", "loop.strict")
+    ) == 2
+
+
+def test_a_count_shortfall_is_counted_per_missing_finding() -> None:
+    """要两条只来一条是"缺一条"，一条都没来是"缺两条"——**报告里得能分开**。
+
+    `matched` 加上 `missing` 里那条预期的份数，正好等于声明的条数，所以缺几条
+    是数得出来的；写成一份的话，两种缺法长得一模一样。
+    """
+    declared = dict(
+        WRITE_ITEM,
+        expect={
+            "loop": NONE,
+            "idempotency": {"verdict": "fail", "count": 2},
+            "autonomy": NONE,
+            "memory": NONE,
+        },
+    )
+    # 这个工具声明了幂等保护，两次相同的写调用不会报 fail（幂等被挡下了）
+    quiet = dict(
+        declared,
+        tools={"create_payment": {"is_write": True, "enforces_idempotency": True}},
+        calls=[
+            {"tool": "create_payment", "args": {"order_id": "A1"}, "idempotency_key": "k"},
+            {"tool": "create_payment", "args": {"order_id": "A1"}, "idempotency_key": "k"},
+        ],
+    )
+    result = run_item(parse_item(quiet, "t.yaml"))
+    assert [e.detector for e in result.missing] == ["idempotency", "idempotency"]
+    assert not result.ok
+
+
+def test_a_count_that_cannot_mean_what_it_says_is_rejected() -> None:
+    """`count` 写不出来、写 0、写成字符串，都在加载期报错。
+
+    `count: 0` 尤其要拦：那是"该报零条"，而这句话属于族级的 `none` 或者
+    `absent`——让它在这儿通过，读的人会以为"我问了，答案是零"，而实际是
+    "这条预期永远不用满足"。
+    """
+    for bad in (0, -1, "2", 2.0, True):
+        item = dict(
+            WRITE_ITEM,
+            expect={
+                "loop": NONE,
+                "idempotency": {"verdict": "fail", "count": bad},
+                "autonomy": NONE,
+                "memory": NONE,
+            },
+        )
+        with pytest.raises(CorpusError) as excinfo:
+            parse_item(item, "t.yaml")
+        assert "count" in str(excinfo.value), f"count={bad!r} 的报错里没说 count"
 
 
 def test_absent_catches_a_finding_the_family_labels_cannot() -> None:
