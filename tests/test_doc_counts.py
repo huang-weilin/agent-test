@@ -45,7 +45,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "tests" / "corpus"
 
 #: 语料族以外的来源标签。分布里的每一个都要在文档里写出来。
-SOURCES = ("自造", "公开-PERSIST", "公开-GhostWriter")
+SOURCES = ("自造", "公开-PERSIST", "公开-GhostWriter", "公开-tau-bench")
 
 
 def _flat(text: str) -> str:
@@ -91,6 +91,25 @@ def _check(where: str, template: str, values: dict[str, int]) -> str:
     return f"{where}：这句出现了 {hits} 次，闸门认不出该核哪一处：\n    {filled}"
 
 
+def test_every_source_in_use_is_named_in_the_distribution() -> None:
+    """语料里真用到的来源，每一个都必须在上面那份名单里。
+
+    上面那份 `SOURCES` 是**第二份**名单：真值在 `sandbox.corpus.SOURCES`（加载期按它
+    拦来源），文档那句分布句是照它拼的。两份名单原先没有东西对上，于是加一个新来源
+    时坏的那一边是静默的：分布里数不到它，文档那句也就不必提它——**少写一个来源和
+    全都数过长得一模一样**，而"来源"正是读报告的人判断可信度的依据。
+
+    比的是"语料里真用到的"而不是"白名单里的"：白名单里有还没用上的词（`访谈`），
+    那不该逼着文档写一条 `访谈 0`。
+    """
+    used = {item.source for item in load_corpus(CORPUS)}
+    missing = sorted(used - set(SOURCES))
+    assert not missing, (
+        f"语料里用到了这些来源 {missing}，但这份名单和文档里的分布句都没跟上。"
+        f"补进 `SOURCES`，再改三份文档里那句分布句（模板在本文件 `build_places`）。"
+    )
+
+
 def build_places(values: dict[str, int]) -> list[tuple[str, str]]:
     """各处要核的原句。占位符和 `values` 的键一一对应。"""
     return [
@@ -100,7 +119,7 @@ def build_places(values: dict[str, int]) -> list[tuple[str, str]]:
             "{总} 条：`loop.yaml` {loop} 条、`idempotency.yaml` {idempotency} 条、"
             "`autonomy.yaml` {autonomy} 条、`memory.yaml` {memory} 条。"
             "来源分布：自造 {自造}、公开-PERSIST {公开-PERSIST}、"
-            "公开-GhostWriter {公开-GhostWriter}。",
+            "公开-GhostWriter {公开-GhostWriter}、公开-tau-bench {公开-tau-bench}。",
         ),
         ("tests/corpus/README.md", '人手挑出来的 {总} 条轨迹"'),
         ("tests/corpus/README.md", "{总} 条里一条误报就能让精确率掉几个百分点"),

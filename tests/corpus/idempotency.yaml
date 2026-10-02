@@ -315,6 +315,40 @@ items:
   # 所以判据只能是"到没到"；拿 `blocked_by_proxy` 当判据的话，这一条会报出
   # 和上面那条一字不差的结论。
 
+  # --- 公开轨迹：同一个工具连改三张订单，天经地义 ---------------------------
+  # 前一条（`idem-single-write`）证明"一次写"干净；这一条证明"连着四次写、
+  # 同一个工具、参数几乎一样"也可以干净——只要**改的不是同一个目标**。
+
+  - id: idem-same-tool-distinct-targets
+    source: 公开-tau-bench
+    why: >
+      来自一条真实成功轨迹（reward=1）的一段：用户要改收货地址，Agent 连着调了
+      三次 `modify_pending_order_address`，改的是三张不同的待处理订单——四个参数里
+      只有 `order_id` 不同，地址一模一样；最后又调了一次 `modify_user_address`
+      改用户档案。四次写操作、四个不同指纹，一次重复都没有。
+      这是这一族里最容易被未来改动误伤的形状。上面「指纹是逐字比参数」那条里
+      写了想抓"同一件事、两种拆法"的诱惑：最顺手的一步就是改成按"同工具"或
+      "同实体"归类。一旦那么做，这条轨迹当场变成"重复扣款"——改地址不是扣款，
+      连着改三张单也不是重复。留着它，那个改动会立刻在这里红。
+      参数按仓库自己的写法重写过（`A1`/`B1`/`C1`/`U1`，地址 `X1`），形状取自该轨迹
+      的下标 24/26/28/34；原轨迹的其它调用（查用户、逐张查订单）没有判定意义，
+      没有搬进来。
+    tools:
+      modify_pending_order_address: {is_write: true}
+      modify_user_address: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: modify_pending_order_address, args: {order_id: A1, address1: X1}}
+      - {tool: modify_pending_order_address, args: {order_id: B1, address1: X1}}
+      - {tool: modify_pending_order_address, args: {order_id: C1, address1: X1}}
+      - {tool: modify_user_address, args: {user_id: U1, address1: X1}}
+    expect:
+      memory: none
+      idempotency: pass
+      loop: pass
+      autonomy: inconclusive
+
   - id: idem-schema-rejected-writes-never-happened
     source: 自造
     why: >

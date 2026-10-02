@@ -60,7 +60,9 @@ from sandbox.trace.normalize import fingerprint, normalize_args
 #: 语料来源。**白名单**：来源是给读报告的人判断可信度的依据，写个没见过的词
 #: 就等于那句话没人能核对。PERSIST / GhostWriter 是公开来源（见 docs/detectors.md
 #: 第八节），"自造"是自己构造的，"访谈"需要授权才能收进仓库。
-SOURCES: frozenset[str] = frozenset({"自造", "公开-PERSIST", "公开-GhostWriter", "访谈"})
+SOURCES: frozenset[str] = frozenset(
+    {"自造", "公开-PERSIST", "公开-GhostWriter", "公开-tau-bench", "访谈"}
+)
 
 #: 检测器族。每一族都必须在语料里表态，缺一个就加载失败。
 FAMILIES: tuple[str, ...] = ("loop", "idempotency", "autonomy", "memory")
