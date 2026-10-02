@@ -26,6 +26,23 @@
 现在任何一份文档里的同类声明都得跟着下面那张汇总表走：那个级别只要还有一行不在
 `已交付`，说它做完了就是假的。
 
+### 最后一栏：卡在哪
+
+最右边那一栏回答的不是"交付没有"，而是**"还欠着吗"**。一条需求可以「已交付」而同一行的
+「边界」栏里点名了一件还没做的事（幂等检测那条的漏报就是这样），所以这一栏得逐行看
+「边界」栏才写得出来，它不是从「现状」栏推出来的。
+
+| 值 | 什么时候写它 |
+|---|---|
+| `没欠着` | 这条需求不缺活。**「边界」栏照样可能是满的**——那里写的是"这套形态下能做到哪一步"，是取舍，不是欠账 |
+| `卡在人或者钱` | 要人力、要钱、或者要一份授权才能动 |
+| `卡在没真实用例` | 形状取决于真实用例长什么样，现在做只能靠猜 |
+| `卡在部署形态` | 要做的那件事在这套形态下没有对象可测（多节点、Agent 进程内部、并发执行器） |
+
+两条规矩：**「现状」不是 `已交付` 的行，这一栏不许写 `没欠着`**（那是"这条需求还欠着"的
+同义句）；**末尾那三堆就是按这一栏分的**，堆名与这一栏的字面一致，成员和条数都由
+`tests/test_requirement_coverage.py` 现算一遍再去核那段散文。
+
 ## 这张表**不**能保证什么
 
 **需求文档本身没有闸门。** 它在仓库外，普通 CI 上根本没有那个路径，所以闸门读不到它。
@@ -42,88 +59,89 @@
 
 ### 3.1 行为回归集
 
-| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 |
-|---|---|---|---|---|
-| 异常行为保存：用户将测试中发现的异常行为一键保存为回归用例 | P1 | 已交付 | `tests/test_regression_cases.py::test_a_run_with_a_conclusion_is_accepted` | 保存的是**那次运行的结论快照**（判定 + 配置指纹 + 扣款数），不是把那段轨迹剪下来重放。没有结论的运行**拒收**——冻一个没结论的东西当基线，之后所有比较都建在空地上 |
-| 回归集管理：支持按场景、按 Agent、按异常类型组织回归用例 | P1 | 未做 | `tests/test_api.py::test_saving_a_run_as_a_case_freezes_its_conclusion` | 用例存下来了，但那证明的是"能存"，不是"能组织"：`/regression` 是一张平表，每行显示它属于哪个场景，**没有筛选、没有分组、没有标签**，`/api/regression` 也不接查询参数。三个维度一个都没做。**写这张表时第一版这一格填的是"能按场景筛"**——需求原文里"支持按场景…组织"读起来太顺，顺到像已经有了。要加得先看真实用例长什么样再定维度（拿结论码、检测器名、还是扣款数当"异常类型"），猜一个维度加进去就是猜 |
-| 一键回归测试：修改 Prompt 或工具后，自动重放历史异常场景 | P1 | 已交付 | `tests/test_regression_diff.py::test_a_passing_run_that_starts_failing_is_a_regression` | 重放是真的重跑（走 runner），不是拿旧轨迹比对。**先报"这次比较算不算数"再报"差在哪"**：配置指纹一变，两次运行就不可比，而不可比时差异照列、结论不判 |
-| 跨会话差异报告：对比同一场景在不同会话中的行为差异 | P1 | 已交付 | `tests/test_session_diff.py::test_two_leftovers_on_one_side_are_not_paired_up` | 只比**工具调用**。Agent 说的话不在边界上，工具返回体的正文刻意不落库（只留字节数），所以"两段调用一样但做的事完全不同"这种情况看不出来。这条边界写在面板上，见 `docs/session-diff.md` |
+| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 | 卡在哪 |
+|---|---|---|---|---|---|
+| 异常行为保存：用户将测试中发现的异常行为一键保存为回归用例 | P1 | 已交付 | `tests/test_regression_cases.py::test_a_run_with_a_conclusion_is_accepted` | 保存的是**那次运行的结论快照**（判定 + 配置指纹 + 扣款数），不是把那段轨迹剪下来重放。没有结论的运行**拒收**——冻一个没结论的东西当基线，之后所有比较都建在空地上 | 没欠着 |
+| 回归集管理：支持按场景、按 Agent、按异常类型组织回归用例 | P1 | 未做 | `tests/test_api.py::test_saving_a_run_as_a_case_freezes_its_conclusion` | 用例存下来了，但那证明的是"能存"，不是"能组织"：`/regression` 是一张平表，每行显示它属于哪个场景，**没有筛选、没有分组、没有标签**，`/api/regression` 也不接查询参数。三个维度一个都没做。**写这张表时第一版这一格填的是"能按场景筛"**——需求原文里"支持按场景…组织"读起来太顺，顺到像已经有了。要加得先看真实用例长什么样再定维度（拿结论码、检测器名、还是扣款数当"异常类型"），猜一个维度加进去就是猜 | 卡在没真实用例 |
+| 一键回归测试：修改 Prompt 或工具后，自动重放历史异常场景 | P1 | 已交付 | `tests/test_regression_diff.py::test_a_passing_run_that_starts_failing_is_a_regression` | 重放是真的重跑（走 runner），不是拿旧轨迹比对。**先报"这次比较算不算数"再报"差在哪"**：配置指纹一变，两次运行就不可比，而不可比时差异照列、结论不判 | 没欠着 |
+| 跨会话差异报告：对比同一场景在不同会话中的行为差异 | P1 | 已交付 | `tests/test_session_diff.py::test_two_leftovers_on_one_side_are_not_paired_up` | 只比**工具调用**。Agent 说的话不在边界上，工具返回体的正文刻意不落库（只留字节数），所以"两段调用一样但做的事完全不同"这种情况看不出来。这条边界写在面板上，见 `docs/session-diff.md` | 没欠着 |
 
 ### 3.2 工具调用仿真与审计
 
-| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 |
-|---|---|---|---|---|
-| 工具 Mock：模拟外部 API（HTTP、数据库、消息队列），支持 YAML 配置 | P0 | 部分交付 | `tests/test_scenario_dsl.py::test_script_calling_an_undeclared_tool_is_rejected` | YAML 配置有（场景的 `tools` 表 + `_shared/` 工具库 + 场景内 `use:` 引用 + 整块字段覆盖）。**只做了 HTTP**：数据库与消息队列没有。它们在黑盒边界上和 HTTP 同形（都是一次出网请求），要加的是 mock 服务端而不是采集通道——先有真实用例再定 |
-| 调用拦截：拦截 Agent 的每一次工具调用，记录输入、输出、参数 | P0 | 已交付 | `tests/test_proxy.py::test_declared_tool_is_forwarded_recorded_and_marked_write` | **返回体的正文不落库**，只留体量与参数指纹（`tests/test_storage_minimization.py::test_声明工具的返回体不落库_体量留下`）。被测对象引出来的内容不该在库里长住，代价是"Agent 当时到底看到了什么"事后查不到 |
-| 幂等检测：检测单次运行和跨会话的重复执行 | P0 | 已交付 | `tests/test_detector_idempotency.py::test_repeated_reads_pass_but_are_reported` | 判据是**工具名 + 参数指纹**，逐字比。所以"同一件事、两种拆法"配不上对——实测在 660 条真实轨迹上留了一条未修的漏报，见 `docs/detectors.md` 第四节末尾 |
-| 参数 Schema 校验：校验工具调用参数与声明的 Schema 是否一致 | P0 | 已交付 | `tests/test_tool_schema.py::test_an_undeclared_key_set_is_not_a_declaration_of_no_keys` | 只支持 JSON Schema 的一个**子集**（9 个关键字，8 个有场景真的用过）；`oneOf`、`$ref`、正则这些写不出来，写了会让场景加载失败。不合规的调用**在到达目标系统之前被拒** |
-| 调用链可视化：展示错误如何在工具调用链中传播 | P1 | 已交付 | `tests/test_call_chain.py::test_the_chain_lists_every_call_in_the_order_it_happened` | 链上写的是**顺序，不是因果**。"它在重试"这句话不写——因果不在边界上，猜错了没有任何一处会报错。另有两条边界：不数"几次算异常"、只列前 30 次与前 8 种失败（超了自报） |
+| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 | 卡在哪 |
+|---|---|---|---|---|---|
+| 工具 Mock：模拟外部 API（HTTP、数据库、消息队列），支持 YAML 配置 | P0 | 部分交付 | `tests/test_scenario_dsl.py::test_script_calling_an_undeclared_tool_is_rejected` | YAML 配置有（场景的 `tools` 表 + `_shared/` 工具库 + 场景内 `use:` 引用 + 整块字段覆盖）。**只做了 HTTP**：数据库与消息队列没有。它们在黑盒边界上和 HTTP 同形（都是一次出网请求），要加的是 mock 服务端而不是采集通道——先有真实用例再定 | 卡在没真实用例 |
+| 调用拦截：拦截 Agent 的每一次工具调用，记录输入、输出、参数 | P0 | 已交付 | `tests/test_proxy.py::test_declared_tool_is_forwarded_recorded_and_marked_write` | **返回体的正文不落库**，只留体量与参数指纹（`tests/test_storage_minimization.py::test_声明工具的返回体不落库_体量留下`）。被测对象引出来的内容不该在库里长住，代价是"Agent 当时到底看到了什么"事后查不到 | 没欠着 |
+| 幂等检测：检测单次运行和跨会话的重复执行 | P0 | 已交付 | `tests/test_detector_idempotency.py::test_repeated_reads_pass_but_are_reported` | 判据是**工具名 + 参数指纹**，逐字比。所以"同一件事、两种拆法"配不上对——实测在 660 条真实轨迹上留了一条未修的漏报，见 `docs/detectors.md` 第四节末尾 | 卡在没真实用例 |
+| 参数 Schema 校验：校验工具调用参数与声明的 Schema 是否一致 | P0 | 已交付 | `tests/test_tool_schema.py::test_an_undeclared_key_set_is_not_a_declaration_of_no_keys` | 只支持 JSON Schema 的一个**子集**（9 个关键字，8 个有场景真的用过）；`oneOf`、`$ref`、正则这些写不出来，写了会让场景加载失败。不合规的调用**在到达目标系统之前被拒** | 卡在没真实用例 |
+| 调用链可视化：展示错误如何在工具调用链中传播 | P1 | 已交付 | `tests/test_call_chain.py::test_the_chain_lists_every_call_in_the_order_it_happened` | 链上写的是**顺序，不是因果**。"它在重试"这句话不写——因果不在边界上，猜错了没有任何一处会报错。另有两条边界：不数"几次算异常"、只列前 30 次与前 8 种失败（超了自报） | 没欠着 |
 
 ### 3.3 循环检测与熔断
 
-| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 |
-|---|---|---|---|---|
-| 循环模式识别：识别相同工具 + 相似参数的重复调用 | P0 | 已交付 | `tests/test_detector_loop.py::test_strict_repeat_is_a_fail` | 三层（严格 / 近似 / 乒乓）。**近似层的告警阈值依赖参数形状**：聚类拿簇的第一个成员当代表比相似度，数字相似度按相对差衰减，所以 `{query, status, page}` 那种参数里只有光标的工具，忘了声明 `field_weights` 就会静默漏报 |
-| 委托乒乓检测：检测 Agent A→B→A 的循环委托模式 | P0 | 已交付 | `tests/test_detector_loop.py::test_ping_pong_is_a_fail` | 判的是**调用序列里 A→B→A→B 的交替、窗口内 ≥ 2 轮**——"委托"在我们这边就是两次交替调用，不是真的有两个 Agent 进程。真的多 Agent 委托（A 调 B、B 再调 A）今天测不了：被叫的那个 B 是 mock，它不会反过来发起调用 |
-| 跨会话循环识别：识别跨会话反复出现的循环模式 | P1 | 已交付 | `tests/test_detector_loop.py::test_cross_session_repeat_of_reads_is_flagged` | 判据按会话切开（`split_by_occasion`）再比。**单会话运行时这一层报 `inconclusive` 而不是 pass**：一个会话里看不出跨会话的事，读成 pass 是替一次没发生的观测下结论 |
-| 超时熔断：达到步骤上限或时间上限时自动终止 | P0 | 已交付 | `tests/test_watchdog.py::test_a_loop_without_a_declared_exemption_is_killed` | 两条独立的闸门：**看门狗就地终止**（循环，进程级 kill）与**单会话超时**（`tests/test_session_timeout.py::test_a_process_that_will_not_exit_is_given_up_on`）。熔断发生在**副作用之后**——它能阻止下一次，阻止不了当前这次，这条写在 README 缺口表里 |
-| 重放审计：记录重试次数和重放路径 | P0 | 已交付 | `tests/test_detector_loop.py::test_bounded_retry_after_errors_is_not_a_loop` | 重试是 `loop` 族的一层（`loop.retry`），"失败之后又来一次同样的调用"会被单独认出来，且**有界的重试不算循环**。重放路径本身落在审计表与调用链上（`tests/test_call_chain.py::test_the_call_right_after_a_failure_is_described_plainly`） |
+| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 | 卡在哪 |
+|---|---|---|---|---|---|
+| 循环模式识别：识别相同工具 + 相似参数的重复调用 | P0 | 已交付 | `tests/test_detector_loop.py::test_strict_repeat_is_a_fail` | 三层（严格 / 近似 / 乒乓）。**近似层的告警阈值依赖参数形状**：聚类拿簇的第一个成员当代表比相似度，数字相似度按相对差衰减，所以 `{query, status, page}` 那种参数里只有光标的工具，忘了声明 `field_weights` 就会静默漏报 | 没欠着 |
+| 委托乒乓检测：检测 Agent A→B→A 的循环委托模式 | P0 | 已交付 | `tests/test_detector_loop.py::test_ping_pong_is_a_fail` | 判的是**调用序列里 A→B→A→B 的交替、窗口内 ≥ 2 轮**——"委托"在我们这边就是两次交替调用，不是真的有两个 Agent 进程。真的多 Agent 委托（A 调 B、B 再调 A）今天测不了：被叫的那个 B 是 mock，它不会反过来发起调用 | 卡在没真实用例 |
+| 跨会话循环识别：识别跨会话反复出现的循环模式 | P1 | 已交付 | `tests/test_detector_loop.py::test_cross_session_repeat_of_reads_is_flagged` | 判据按会话切开（`split_by_occasion`）再比。**单会话运行时这一层报 `inconclusive` 而不是 pass**：一个会话里看不出跨会话的事，读成 pass 是替一次没发生的观测下结论 | 没欠着 |
+| 超时熔断：达到步骤上限或时间上限时自动终止 | P0 | 已交付 | `tests/test_watchdog.py::test_a_loop_without_a_declared_exemption_is_killed` | 两条独立的闸门：**看门狗就地终止**（循环，进程级 kill）与**单会话超时**（`tests/test_session_timeout.py::test_a_process_that_will_not_exit_is_given_up_on`）。熔断发生在**副作用之后**——它能阻止下一次，阻止不了当前这次，这条写在 README 缺口表里 | 没欠着 |
+| 重放审计：记录重试次数和重放路径 | P0 | 已交付 | `tests/test_detector_loop.py::test_bounded_retry_after_errors_is_not_a_loop` | 重试是 `loop` 族的一层（`loop.retry`），"失败之后又来一次同样的调用"会被单独认出来，且**有界的重试不算循环**。重放路径本身落在审计表与调用链上（`tests/test_call_chain.py::test_the_call_right_after_a_failure_is_described_plainly`） | 没欠着 |
 
 ### 3.4 跨会话记忆管理
 
-| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 |
-|---|---|---|---|---|
-| 记忆快照：每次会话前后记录 Agent 的完整记忆状态 | P1 | 已交付 | `tests/test_memory_snapshot.py::test_capture_then_restore_is_identity` | 快照是**操纵面不是观测面**：记忆在 Agent 进程内，网络边界拦不到（ADR 001）。所以这里做的不是"看见它的记忆"，而是"回滚到某个时刻，看它会不会因此重复扣款"。恢复会拒绝适配器不匹配、格式漂移、路径逃逸、损坏条目 |
-| 记忆漂移检测：检测同一信息在不同会话中的一致性 | P1 | 已交付 | `tests/test_memory_drift.py::test_a_rollback_explains_the_vanished_key` | 观测点**只在会话边界**：中途改了又改回来的看不见，所以措辞里不许出现"全程""一直"。三种"对不上"（键不见了 / 内容变了 / 换了名字）给三种不同结论，且**回滚造成的对不上要单独说**——说成"Agent 弄丢了"会把人送去改一个没问题的 Prompt |
-| 记忆中毒检测：检测恶意内容注入记忆后是否影响后续行为 | P1 | 已交付 | `tests/test_memory_drift.py::test_the_poison_pair_really_runs_and_says_who_is_who` | 只覆盖**场景声明的标记**（`forbidden` 里写下的那句话）。通用的做法要拿工具返回体正文和记忆内容对一遍，而正文刻意不落库。受控实验里注入的那句话是我们自己写的，所以那一半够用 |
-| 记忆同步验证：验证多节点同步时记忆是否保持一致 | P2 | 不适用 | `docs/requirements.md`（本行） | 沙箱里**没有多节点**：被测对象是一个进程，记忆是一个目录。多节点同步的一致性在这套形态下没有对象可测——真去造两个节点，造出来的是我们自己的同步实现，测它就变成测自己。README 缺口表里那条写的是它**表现为漂移检测**（同一份记忆在多个时点上一致就是漂移检测本身），单独报一行"同步一致性：通过"会是一句没有观测在后面的空话 |
-| 记忆版本追踪：追踪记忆的修改历史 | P2 | 已交付 | `tests/test_memory_drift.py::test_a_changed_value_is_drift` 与 `tests/test_agent_memory.py::test_records_are_append_only` | 粒度是**会话边界**，不是"每一次写入"（同上：记忆在进程内）。每个时点相对上一个时点列「新出现 / 消失 / 内容变了」（`src/sandbox/memory/observe.py` 的 `summarize_observations`，运行页有那张表）。**版本回溯**指回滚到某个快照；**差异对比**指相邻时点的差集。两条都不判轻重——该不该不一样由声明的判据管 |
+| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 | 卡在哪 |
+|---|---|---|---|---|---|
+| 记忆快照：每次会话前后记录 Agent 的完整记忆状态 | P1 | 已交付 | `tests/test_memory_snapshot.py::test_capture_then_restore_is_identity` | 快照是**操纵面不是观测面**：记忆在 Agent 进程内，网络边界拦不到（ADR 001）。所以这里做的不是"看见它的记忆"，而是"回滚到某个时刻，看它会不会因此重复扣款"。恢复会拒绝适配器不匹配、格式漂移、路径逃逸、损坏条目 | 没欠着 |
+| 记忆漂移检测：检测同一信息在不同会话中的一致性 | P1 | 已交付 | `tests/test_memory_drift.py::test_a_rollback_explains_the_vanished_key` | 观测点**只在会话边界**：中途改了又改回来的看不见，所以措辞里不许出现"全程""一直"。三种"对不上"（键不见了 / 内容变了 / 换了名字）给三种不同结论，且**回滚造成的对不上要单独说**——说成"Agent 弄丢了"会把人送去改一个没问题的 Prompt | 没欠着 |
+| 记忆中毒检测：检测恶意内容注入记忆后是否影响后续行为 | P1 | 已交付 | `tests/test_memory_drift.py::test_the_poison_pair_really_runs_and_says_who_is_who` | 只覆盖**场景声明的标记**（`forbidden` 里写下的那句话）。通用的做法要拿工具返回体正文和记忆内容对一遍，而正文刻意不落库。受控实验里注入的那句话是我们自己写的，所以那一半够用 | 没欠着 |
+| 记忆同步验证：验证多节点同步时记忆是否保持一致 | P2 | 不适用 | `docs/requirements.md`（本行） | 沙箱里**没有多节点**：被测对象是一个进程，记忆是一个目录。多节点同步的一致性在这套形态下没有对象可测——真去造两个节点，造出来的是我们自己的同步实现，测它就变成测自己。README 缺口表里那条写的是它**表现为漂移检测**（同一份记忆在多个时点上一致就是漂移检测本身），单独报一行"同步一致性：通过"会是一句没有观测在后面的空话 | 卡在部署形态 |
+| 记忆版本追踪：追踪记忆的修改历史 | P2 | 已交付 | `tests/test_memory_drift.py::test_a_changed_value_is_drift` 与 `tests/test_agent_memory.py::test_records_are_append_only` | 粒度是**会话边界**，不是"每一次写入"（同上：记忆在进程内）。每个时点相对上一个时点列「新出现 / 消失 / 内容变了」（`src/sandbox/memory/observe.py` 的 `summarize_observations`，运行页有那张表）。**版本回溯**指回滚到某个快照；**差异对比**指相邻时点的差集。两条都不判轻重——该不该不一样由声明的判据管 | 没欠着 |
 
 ### 3.5 成本统计
 
-| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 |
-|---|---|---|---|---|
-| Token 统计：按运行、按会话、按天统计输入、输出、缓存读写 | P1 | 已交付 | `tests/test_cost_aggregator.py::test_costs_split_by_session_ordinal` | 计数点是**网关**，不信任 Agent 侧的任何计数（这是预算能真正止损的前提）。缓存读写单列。**未定价的模型成本记 0 但报告必须标"下界"**——`$0.00` 会被读成"这次不要钱" |
-| 重复计费识别：识别同一工具被多次执行导致的重复计费 | P1 | 已交付 | `tests/test_detector_idempotency.py::test_repeated_reads_pass_but_are_reported` | 与幂等检测同一判据（工具名 + 参数指纹）。**"重复"本身不是缺陷**：读操作重复只报 warning，写操作重复才是钱的问题——而"这一次是不是写"由声明决定，不由参数猜 |
-| 跨会话成本报告：按 Agent、工具、会话维度生成成本报告并触发阈值预警 | P1 | 已交付 | `tests/test_cost_aggregator.py::test_breakdown_by_agent_version` | 终端出口是 `scripts/cost_report.py`（按天/周/月 + 按场景/Agent/模型）。**按工具拆的那一栏报的是"上下文占用"，不是"这个工具花了多少钱"**——工具调用本身不花 token，是它返回的内容让后续每次 LLM 调用继续付钱。所以报三个各有口径的数（返回体 / 实测增量 / 租金），见 `docs/cost.md` |
-| 长期预算预警：超过日、周、月预算阈值时触发告警 | P1 | 已交付 | `tests/test_gateway.py::test_budget_ceiling_blocks_and_leaves_a_finding` | **超预算不算这次运行失败**：那是累计花费，和被测 Agent 这次做没做错事无关，压成同一个结论会让一次干净的运行因为上个月跑太多而报 fail |
+| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 | 卡在哪 |
+|---|---|---|---|---|---|
+| Token 统计：按运行、按会话、按天统计输入、输出、缓存读写 | P1 | 已交付 | `tests/test_cost_aggregator.py::test_costs_split_by_session_ordinal` | 计数点是**网关**，不信任 Agent 侧的任何计数（这是预算能真正止损的前提）。缓存读写单列。**未定价的模型成本记 0 但报告必须标"下界"**——`$0.00` 会被读成"这次不要钱" | 没欠着 |
+| 重复计费识别：识别同一工具被多次执行导致的重复计费 | P1 | 已交付 | `tests/test_detector_idempotency.py::test_repeated_reads_pass_but_are_reported` | 与幂等检测同一判据（工具名 + 参数指纹）。**"重复"本身不是缺陷**：读操作重复只报 warning，写操作重复才是钱的问题——而"这一次是不是写"由声明决定，不由参数猜 | 没欠着 |
+| 跨会话成本报告：按 Agent、工具、会话维度生成成本报告并触发阈值预警 | P1 | 已交付 | `tests/test_cost_aggregator.py::test_breakdown_by_agent_version` | 终端出口是 `scripts/cost_report.py`（按天/周/月 + 按场景/Agent/模型）。**按工具拆的那一栏报的是"上下文占用"，不是"这个工具花了多少钱"**——工具调用本身不花 token，是它返回的内容让后续每次 LLM 调用继续付钱。所以报三个各有口径的数（返回体 / 实测增量 / 租金），见 `docs/cost.md` | 没欠着 |
+| 长期预算预警：超过日、周、月预算阈值时触发告警 | P1 | 已交付 | `tests/test_gateway.py::test_budget_ceiling_blocks_and_leaves_a_finding` | **超预算不算这次运行失败**：那是累计花费，和被测 Agent 这次做没做错事无关，压成同一个结论会让一次干净的运行因为上个月跑太多而报 fail | 没欠着 |
 
 ### 3.6 长时运行与主动行为评估
 
-| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 |
-|---|---|---|---|---|
-| 时间加速：将长时间跨度压缩到测试可接受的时长 | P1 | 已交付 | `tests/test_long_run.py::test_real_time_is_not_affected_by_the_virtual_clock` | 加速的是**沙箱自己的时钟与世界**（`after_gap_s`），真实等待是零。**Agent 进程内的定时器不受影响**——要改它的进程，而云端常驻 Agent 的进程测试者拿不到（ADR 001）。这条写在 `docs/longrun.md` 的不支持清单里 |
-| 状态快照 / 恢复：支持在任意时间点保存和恢复 Agent 完整状态 | P1 | 部分交付 | `tests/test_memory_snapshot.py::test_restore_brings_back_deleted_content` | 能保存与恢复的是**记忆**（Agent 的跨会话状态）和**世界**（场景的初始状态）。**"任意时间点"做不到**：只有会话边界，且 Agent 进程内的东西（上下文、图状态）不在我们手上。"完整状态"这三个字在这套形态下只覆盖到边界看得见的那一部分 |
-| 主动行为审计：检测未经授权的主动行为 | P1 | 已交付 | `tests/test_autonomy.py::test_a_write_in_an_unattended_session_is_unauthorized` | 判的是**授权关系**：没人看着的那段会话里，写操作有没有被声明允许。三条条件缺一不可，且**没测到不报通过**（"这一夜它什么都没做"是 inconclusive 不是 pass）。声明**不拦截**——要拦用出口放行名单，这个取舍写在 `docs/detectors.md` 里，不假装它是道闸门 |
-| 主动行为合理性评估：评估主动行为是否在用户预期范围内 | P2 | 未做 | README 缺口表 | 那是另一层判断：得先把**意图**写进场景，而不只是写"这个工具许不许碰"。P2，先把手上的判定做扎实 |
+| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 | 卡在哪 |
+|---|---|---|---|---|---|
+| 时间加速：将长时间跨度压缩到测试可接受的时长 | P1 | 已交付 | `tests/test_long_run.py::test_real_time_is_not_affected_by_the_virtual_clock` | 加速的是**沙箱自己的时钟与世界**（`after_gap_s`），真实等待是零。**Agent 进程内的定时器不受影响**——要改它的进程，而云端常驻 Agent 的进程测试者拿不到（ADR 001）。这条写在 `docs/longrun.md` 的不支持清单里 | 没欠着 |
+| 状态快照 / 恢复：支持在任意时间点保存和恢复 Agent 完整状态 | P1 | 部分交付 | `tests/test_memory_snapshot.py::test_restore_brings_back_deleted_content` | 能保存与恢复的是**记忆**（Agent 的跨会话状态）和**世界**（场景的初始状态）。**"任意时间点"做不到**：只有会话边界，且 Agent 进程内的东西（上下文、图状态）不在我们手上。"完整状态"这三个字在这套形态下只覆盖到边界看得见的那一部分 | 卡在部署形态 |
+| 主动行为审计：检测未经授权的主动行为 | P1 | 已交付 | `tests/test_autonomy.py::test_a_write_in_an_unattended_session_is_unauthorized` | 判的是**授权关系**：没人看着的那段会话里，写操作有没有被声明允许。三条条件缺一不可，且**没测到不报通过**（"这一夜它什么都没做"是 inconclusive 不是 pass）。声明**不拦截**——要拦用出口放行名单，这个取舍写在 `docs/detectors.md` 里，不假装它是道闸门 | 没欠着 |
+| 主动行为合理性评估：评估主动行为是否在用户预期范围内 | P2 | 未做 | README 缺口表 | 那是另一层判断：得先把**意图**写进场景，而不只是写"这个工具许不许碰"。P2，先把手上的判定做扎实 | 卡在人或者钱 |
 
 ### 3.7 评测基础设施
 
-| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 |
-|---|---|---|---|---|
-| 评测用例集管理：管理评测用例（基于开源数据集和用户自定义） | P2 | 部分交付 | `tests/test_control_pairs.py::test_every_scenario_is_in_the_ledger_or_has_a_reason` | 用户自定义那半边是齐的：场景 YAML（29 个）+ 工具库 + 受控对照账本 + 界面里的编辑器与一键回归。**"基于开源数据集"那半边没有**：语料是 55 条**手写**轨迹（`tests/corpus/`），公开来源的几条是**复现或重写的形状**——原始轨迹一律不进仓库（同一条规矩管着 API key），私人轨迹要签授权才能收。真实轨迹那一侧的实测另有一条线（内网跑过 660 条公开轨迹，结论在 `docs/detectors.md`） |
-| 指标看板：展示通过率、成本、延迟等核心指标 | P2 | 已交付 | `tests/test_metrics.py::test_runs_without_a_verdict_are_not_in_the_denominator` | 那格头条数字叫**预期达成率**不叫"通过率"：未达成有两种方向相反的成因（出现了没被预期覆盖的 fail 结论 / 我们预料它做的那个错没出现），后者多半说明用例要改。**没有结论的运行不进分母**——把没结论读成"不通过"是替一条没有结论的运行编一个结论 |
-| LLM-as-Judge：用另一个 LLM 评估 Agent 输出质量 | P2 | 未做 | README 的「明确不做」 | 要另一个模型来判，且它的偏见得靠人工校准压住（下一条）。两条都要花钱和人力，而用户没批准这笔开销 |
-| 人工校准工作流：每两周抽检 100 条，人工重新打分，偏差 > 15% 重新对齐 | P2 | 未做 | README 的「明确不做」 | 需要**人**持续投入（抽检、打分、算 Cohen's Kappa），不是代码问题。它是 LLM-as-Judge 的前置条件：没有人工基线，"Judge 判得准不准"本身无法回答 |
+| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 | 卡在哪 |
+|---|---|---|---|---|---|
+| 评测用例集管理：管理评测用例（基于开源数据集和用户自定义） | P2 | 部分交付 | `tests/test_control_pairs.py::test_every_scenario_is_in_the_ledger_or_has_a_reason` | 用户自定义那半边是齐的：场景 YAML（29 个）+ 工具库 + 受控对照账本 + 界面里的编辑器与一键回归。**"基于开源数据集"那半边没有**：语料是 55 条**手写**轨迹（`tests/corpus/`），公开来源的几条是**复现或重写的形状**——原始轨迹一律不进仓库（同一条规矩管着 API key），私人轨迹要签授权才能收。真实轨迹那一侧的实测另有一条线（内网跑过 660 条公开轨迹，结论在 `docs/detectors.md`） | 卡在人或者钱 |
+| 指标看板：展示通过率、成本、延迟等核心指标 | P2 | 已交付 | `tests/test_metrics.py::test_runs_without_a_verdict_are_not_in_the_denominator` | 那格头条数字叫**预期达成率**不叫"通过率"：未达成有两种方向相反的成因（出现了没被预期覆盖的 fail 结论 / 我们预料它做的那个错没出现），后者多半说明用例要改。**没有结论的运行不进分母**——把没结论读成"不通过"是替一条没有结论的运行编一个结论 | 没欠着 |
+| LLM-as-Judge：用另一个 LLM 评估 Agent 输出质量 | P2 | 未做 | README 的「明确不做」 | 要另一个模型来判，且它的偏见得靠人工校准压住（下一条）。两条都要花钱和人力，而用户没批准这笔开销 | 卡在人或者钱 |
+| 人工校准工作流：每两周抽检 100 条，人工重新打分，偏差 > 15% 重新对齐 | P2 | 未做 | README 的「明确不做」 | 需要**人**持续投入（抽检、打分、算 Cohen's Kappa），不是代码问题。它是 LLM-as-Judge 的前置条件：没有人工基线，"Judge 判得准不准"本身无法回答 | 卡在人或者钱 |
 
 ## 四、非功能需求
 
-| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 |
-|---|---|---|---|---|
-| 性能：单次场景执行延迟 < 30 秒（不含 Agent 本身执行时间）；支持并发执行 ≥ 10 个场景 | — | 部分交付 | `tests/test_watchdog_accounting.py::test_a_slow_target_lands_in_latency_not_in_watchdog` | 延迟口径是**分开量的**：出口往返、看门狗、运行墙钟各一列，指标看板能看。**并发 ≥ 10 明确不支持**：执行器一次只跑一个——它运行期间改进程级全局（上游地址、策略），并发会让两个运行互相改掉对方的上游。界面上的"并发"是**拒绝**，不是排队（`docs/ui.md`）。本机 7.9GB 内存也决定了只能跑 lite profile |
-| 可扩展性：支持 Docker 和 K8s 两种沙盒运行时；支持水平扩展 | — | 不适用 | `docs/decisions/002-system-of-record.md` | 本机是 Windows + 7.9GB，跑不了 K8s（ADR 002 的驱动因素里写着）。沙箱本身是**一个进程 + 一个 SQLite 库**，水平扩展要先把状态挪出去（生产期换 PostgreSQL 是那一步的前置）。这是部署形态的选择，不是功能缺口 |
-| 安全性：沙盒隔离；凭据不暴露给 Agent 进程（Credential Vault 模式） | — | 已交付 | `tests/test_e2e_walking_skeleton.py::test_agent_never_receives_the_real_upstream_key` | 这条是**实测过的**，不是设计声明：被测 Agent 只拿到沙箱的假 key，真实上游 key 只在网关进程里。出口默认拒绝、严格主机允许列表（精确匹配，无通配符）、不跟随重定向、不做 MITM（ADR 003） |
-| 长时运行：支持模拟数天至数周的 Agent 运行，具备时间加速和状态快照能力 | — | 已交付 | `tests/test_long_run.py::test_the_declared_offset_accumulates_over_sessions` | 见 3.6 前两条。能模拟的是**世界的时间**与**会话之间的间隔**，不是 Agent 进程内的时间 |
-| 跨会话：支持跨会话 Trace 关联和记忆版本追踪 | — | 已交付 | `tests/test_cross_session.py::test_horizon_is_taken_from_the_restored_snapshot_not_the_ordinal` | Trace 关联靠 `SessionSequence` + `session_ordinal`（不是墙钟，见 `docs/longrun.md`）；记忆版本追踪见 3.4 那条。**与 Langfuse 的 `trace_ref` 关联不存在**——适配层没写，全仓零处（README 缺口表与 ADR 002 的现状那节） |
-| 兼容性：支持 LangChain、LangGraph、CrewAI、AutoGen 四大框架；适配云端常驻 Agent | — | 部分交付 | `tests/test_e2e_walking_skeleton.py::test_agent_is_fully_observed_without_touching_its_code` | **黑盒边界与框架无关**：只要那个框架的工具调用走 HTTP，它在边界上长得都一样，所以不需要为四个框架各写一份适配。**但没有一例实测**——今天的被测对象是我们自己写的演示 Agent（`agents/react_demo`）。"与框架无关"是设计推论，不是量过的结论 |
-| 部署：支持 SaaS 和自托管两种模式 | — | 不适用 | README 的「环境约束」 | 现在是**本机开发形态**：lite profile、SQLite、单进程。生产期的 PostgreSQL 与多实例在这套形态下没有对象可测。ADR 002 记了那一步的前置条件 |
+| 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 | 卡在哪 |
+|---|---|---|---|---|---|
+| 性能：单次场景执行延迟 < 30 秒（不含 Agent 本身执行时间）；支持并发执行 ≥ 10 个场景 | — | 部分交付 | `tests/test_watchdog_accounting.py::test_a_slow_target_lands_in_latency_not_in_watchdog` | 延迟口径是**分开量的**：出口往返、看门狗、运行墙钟各一列，指标看板能看。**并发 ≥ 10 明确不支持**：执行器一次只跑一个——它运行期间改进程级全局（上游地址、策略），并发会让两个运行互相改掉对方的上游。界面上的"并发"是**拒绝**，不是排队（`docs/ui.md`）。本机 7.9GB 内存也决定了只能跑 lite profile | 卡在部署形态 |
+| 可扩展性：支持 Docker 和 K8s 两种沙盒运行时；支持水平扩展 | — | 不适用 | `docs/decisions/002-system-of-record.md` | 本机是 Windows + 7.9GB，跑不了 K8s（ADR 002 的驱动因素里写着）。沙箱本身是**一个进程 + 一个 SQLite 库**，水平扩展要先把状态挪出去（生产期换 PostgreSQL 是那一步的前置）。这是部署形态的选择，不是功能缺口 | 卡在部署形态 |
+| 安全性：沙盒隔离；凭据不暴露给 Agent 进程（Credential Vault 模式） | — | 已交付 | `tests/test_e2e_walking_skeleton.py::test_agent_never_receives_the_real_upstream_key` | 这条是**实测过的**，不是设计声明：被测 Agent 只拿到沙箱的假 key，真实上游 key 只在网关进程里。出口默认拒绝、严格主机允许列表（精确匹配，无通配符）、不跟随重定向、不做 MITM（ADR 003） | 没欠着 |
+| 长时运行：支持模拟数天至数周的 Agent 运行，具备时间加速和状态快照能力 | — | 已交付 | `tests/test_long_run.py::test_the_declared_offset_accumulates_over_sessions` | 见 3.6 前两条。能模拟的是**世界的时间**与**会话之间的间隔**，不是 Agent 进程内的时间 | 没欠着 |
+| 跨会话：支持跨会话 Trace 关联和记忆版本追踪 | — | 已交付 | `tests/test_cross_session.py::test_horizon_is_taken_from_the_restored_snapshot_not_the_ordinal` | Trace 关联靠 `SessionSequence` + `session_ordinal`（不是墙钟，见 `docs/longrun.md`）；记忆版本追踪见 3.4 那条。**与 Langfuse 的 `trace_ref` 关联不存在**——适配层没写，全仓零处（README 缺口表与 ADR 002 的现状那节） | 没欠着 |
+| 兼容性：支持 LangChain、LangGraph、CrewAI、AutoGen 四大框架；适配云端常驻 Agent | — | 部分交付 | `tests/test_e2e_walking_skeleton.py::test_agent_is_fully_observed_without_touching_its_code` | **黑盒边界与框架无关**：只要那个框架的工具调用走 HTTP，它在边界上长得都一样，所以不需要为四个框架各写一份适配。**但没有一例实测**——今天的被测对象是我们自己写的演示 Agent（`agents/react_demo`）。"与框架无关"是设计推论，不是量过的结论 | 卡在没真实用例 |
+| 部署：支持 SaaS 和自托管两种模式 | — | 不适用 | README 的「环境约束」 | 现在是**本机开发形态**：lite profile、SQLite、单进程。生产期的 PostgreSQL 与多实例在这套形态下没有对象可测。ADR 002 记了那一步的前置条件 | 卡在部署形态 |
 
 ---
 
 ## 现在还剩什么
 
 下面的数字是**数出来的**，不是估的：它们由 `tests/test_requirement_coverage.py` 按上面
-那些行现算一遍再和这张表核对，手写的数对不上就红（同一条规矩见 README 的测试计数）。
+那些行现算一遍再和这里对——汇总表那六个格子，以及三堆各自的条数与成员。手写的对不上
+就红（同一条规矩见 README 的测试计数）。
 
 | 级别 | 条数 | 已交付 | 部分交付 | 未做 | 不适用 |
 |---|---|---|---|---|---|
@@ -139,16 +157,31 @@
 它原先在 README 的叙述里读起来像做完了，因为它挨着"一键回归"和"跨会话差异报告"两条
 真做完的——**这也是这张表存在的理由**：叙述按时间排，需求按需求排。
 
-剩下没做的，按**为什么还没做**分成三堆——这个分法比按优先级分更有用：
+剩下还欠着的，按**卡在哪**分成三堆——这个分法比按优先级分更有用：它直接说出了"要解开
+这一条，得先有什么"。分堆的依据是每张表最右边那一栏（`卡在哪`），下面每一堆的**成员和
+条数都是按那一栏现算的**，手写的对不上就红。
 
-1. **要人或者要钱**（3 条）：LLM-as-Judge、人工校准工作流、主动行为合理性评估。
-   前两条互为前提（没有人工基线，"Judge 判得准不准"本身无法回答）；第三条要先把
-   **意图**写进场景，那是需求侧的事，不是实现侧。
-2. **先要真实用例才能定形状**（4 条）：按场景/Agent/异常类型组织回归用例、数据库与
-   消息队列的 mock、参数 schema 的其余关键字、按工具拆的"真实花费"。**猜一个维度加
-   进去就是猜**，而猜错的方向会让报告说出比观测更多的话——这是这个项目最贵的那种错。
-3. **要部署形态变过来才有对象测**（3 条）：并发 ≥ 10、SaaS 与自托管、Docker/K8s。
-   前两条受限于执行器与进程级全局，第三条受限于本机（Windows、7.9GB、exFAT 的 E 盘）。
+1. **卡在人或者钱**（4 条）：LLM-as-Judge、人工校准工作流、主动行为合理性评估、评测用例集管理。
+   前两条互为前提——没有人工基线，"Judge 判得准不准"本身无法回答；第三条要先把**意图**
+   写进场景，而不只是写"这个工具许不许碰"，那是需求侧的事，不是实现侧；第四条缺的是
+   **真实轨迹**（"基于开源数据集"那半边），而原始轨迹一律不进仓库，私人轨迹要用户签字。
+   这一堆里没有一条是写代码能推得动的。
+2. **卡在没真实用例**（6 条）：回归集管理、工具 Mock、幂等检测、参数 Schema 校验、委托乒乓检测、兼容性。
+   这六条的**形状**取决于真实用例长什么样：按哪个维度组织回归用例（结论码、检测器名、
+   还是扣款数）、数据库与消息队列要不要跟 HTTP 同形、哪些 schema 关键字真的有人写、
+   真的多 Agent 委托长什么样。**猜一个维度加进去就是猜**，而猜错的方向会让报告说出比
+   观测更多的话——这是这个项目最贵的那种错。**这一堆里有几行的「现状」栏写的是「已交付」**
+   ——需求做完了，边界栏里却还点名着没做完的事：幂等检测（那条漏报没修）、参数 Schema 校验
+   （几个关键字写不出来）、委托乒乓检测（真的多 Agent 委托测不了）。哪几行如此，看每张表
+   最右边那两格并排的「现状」与「卡在哪」。
+3. **卡在部署形态**（5 条）：记忆同步验证、状态快照 / 恢复、性能、可扩展性、部署。
+   这五条要的那个"对象"在这套形态下不存在：多节点、Agent 进程内部、并发 ≥ 10 的执行器、
+   跑得起 K8s 的机器。前两条受限于 ADR 001 的黑盒边界与执行器的进程级全局，后三条受限
+   于本机（Windows、7.9GB、exFAT 的 E 盘）。
+
+**「没欠着」不等于「没有边界」**：剩下那 23 行的「边界」栏里写的是**这套形态下能做到
+哪一步**（返回体正文不落库、调用链只写顺序不写因果、声明不拦截），是定了的取舍；上面
+三堆是**能做而还没做**的。两者的区别是"要不要再动手"。
 
 另有一条不在需求里、但卡在同一条规矩上的：**真实的私有轨迹**要用户签字才能收
 （原始数据不进仓库，与 API key 同一条规矩）。

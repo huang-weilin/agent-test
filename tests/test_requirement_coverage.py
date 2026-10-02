@@ -24,6 +24,12 @@
    也是 P1（需求原文第 120 行）、且没做——那句话是照 3.2 那张表数出来的，漏掉了 3.1
    那一栏。**手写的话配算出来的表，错的永远是话**；现在这句话有东西在核，判据就是
    汇总表本身（那个级别只要还有一行不在 `已交付`，说它做完了就是假的）。
+6. **末尾那三堆"还欠着什么"，必须和第六栏对得上**。第六栏（`卡在哪`）是逐行表态
+   "这条还欠不欠活"，三堆是按它分的组，堆名与那一栏**字面一致**：闸门拿那一栏现算
+   出每一堆的成员和条数，再去核散文里手写的那两份。这一条是补的——三堆原先是一段
+   一段手写的散文，写下来就没人核过，而**它对不上**：全表 38 行里有 12 行不是
+   `已交付`，三堆只提到了 10 行（漏了 4 行），另外还点名了 2 行**已经交付**的当欠账。
+   两个方向都错，而两种错法读起来都像一份认真的总结。
 
 ## 这道闸门**不**核什么
 
@@ -40,10 +46,11 @@
 理由清空、汇总表错一格、新加一个测试文件而不进表、清单里留一条不存在的文件——
 每一条都红在预期的位置，一个绿灯对照一条都不红。
 
-**其中最该看的是相机那一条**：把列数判据改坏之后，上面两条逐行检查**一个用例都
-收不到**，pytest 把它们记成 `skipped` 而不是红的——三红两跳，而"跳"在这个仓库里
-和"过"一样不拦人（全套本来就常年带着 1 skipped）。换句话：这张表格式一烂，
-逐行那两条覆盖表的闸门就和没写一样，剩下的全靠 `test_the_table_has_rows_at_all`。
+**其中最该看的是相机那一条**：把行判据改坏之后，上面两条逐行检查**一个用例都
+收不到**，pytest 把它们记成 `skipped` 而不是红的——量到的是 `4 failed, 4 passed,
+2 skipped`，那 2 skipped 正是它们，而"跳"在这个仓库里和"过"一样不拦人（全套本来
+就常年带着 1 skipped）。换句话：这张表格式一烂，逐行那两条覆盖表的闸门就和没写
+一样，剩下的全靠 `test_the_table_has_rows_at_all` 那几条不逐行的。
 """
 
 from __future__ import annotations
@@ -69,8 +76,18 @@ _NEEDS_EVIDENCE = frozenset({"已交付", "部分交付"})
 #: 这三种状态必须写理由。
 _NEEDS_REASON = frozenset({"部分交付", "未做", "不适用"})
 
-#: 覆盖表的表头。五列；「怎么读这张表」那张三列的图例不在此列。
-_HEADER = ("需求（原文）", "级别", "现状", "证据", "边界 / 缺口")
+#: 覆盖表的表头。六列；「怎么读这张表」那几张图例不在此列。
+_HEADER = ("需求（原文）", "级别", "现状", "证据", "边界 / 缺口", "卡在哪")
+
+#: 覆盖表的「级别」栏。「—」是需求原文没标级别的非功能需求（见 `_NO_LEVEL`）。
+_ROW_LEVELS = ("P0", "P1", "P2", "—")
+
+#: 第六栏「卡在哪」的值。**堆名就是这里的三个值，字面一致**：末尾那段散文按堆名分组
+#: 列成员，闸门拿这一栏现算一遍去对（`test_the_piles_account_for_every_row_that_owes_something`）。
+#: 改一个词就会让那一堆静默地少掉一个成员，所以改动要两边一起改。
+NOTHING_OWED = "没欠着"
+PILE_KEYS = ("卡在人或者钱", "卡在没真实用例", "卡在部署形态")
+KEYS = (NOTHING_OWED, *PILE_KEYS)
 
 #: `tests/xxx.py` 或 `tests/xxx.py::test_yyy`。
 #:
@@ -210,10 +227,16 @@ def _ids(value: object) -> str:
 
 
 def _rows() -> list[tuple[int, list[str]]]:
-    """覆盖表的每一行：`(行号, 五个格子)`。
+    """覆盖表的每一行：`(行号, 六个格子)`。
 
-    只认五列的表格行。图例那张表是三列，表头与分隔行在这里被剔掉——**用列数分辨而不是
-    用行号**，因为以后往文档里插一段就会让行号全错，而列数是这份表格的格式本身。
+    **用列数加内容分辨，不用行号**：以后往文档里插一段就会让行号全错，而列数是这份
+    表格的格式本身。列数现在不够了——末尾那张汇总表也是六列——所以再加一条：这一行的
+    「级别」格子得是 `P0` / `P1` / `P2` / `—`。汇总表的第二格是个数字，图例表是别的列数，
+    两张表因此分得开。
+
+    代价是**「级别」栏写坏（写成 `p0`、或者多一个空格之外的字）会让那一行整行消失**，
+    而不是报错。这一条由汇总表兜着：那一行没了，手写的汇总数就和现算的对不上，
+    `test_the_tally_matches_the_rows` 会红。
     """
     out: list[tuple[int, list[str]]] = []
     for lineno, line in enumerate(DOC.read_text(encoding="utf-8").splitlines(), 1):
@@ -221,7 +244,7 @@ def _rows() -> list[tuple[int, list[str]]]:
         if not stripped.startswith("|"):
             continue
         cells = [c.strip() for c in stripped.strip("|").split("|")]
-        if len(cells) != 5 or tuple(cells) == _HEADER:
+        if len(cells) != 6 or tuple(cells) == _HEADER or cells[1] not in _ROW_LEVELS:
             continue
         if all(set(c) <= set("-: ") for c in cells):
             continue
@@ -236,12 +259,23 @@ def test_the_table_has_rows_at_all() -> None:
 
 @pytest.mark.parametrize("lineno,cells", _rows(), ids=_ids)
 def test_every_row_takes_a_position(lineno: int, cells: list[str]) -> None:
-    requirement, _level, status, evidence, reason = cells
+    requirement, _level, status, evidence, reason, waiting = cells
     assert status in STATUSES, (
         f"docs/requirements.md:{lineno}（{requirement[:30]}）的「现状」是「{status}」，"
         f"不在 {sorted(STATUSES)} 里。**写别的东西等于没表态**——读者没法判断这条是"
         f"做了、没做、还是根本没法测"
     )
+    assert waiting in KEYS, (
+        f"docs/requirements.md:{lineno}（{requirement[:30]}）的「卡在哪」是「{waiting}」，"
+        f"不在 {list(KEYS)} 里。**这一栏是末尾那三堆的分组依据**，写别的东西等于不表态"
+    )
+    if status != "已交付":
+        assert waiting != NOTHING_OWED, (
+            f"docs/requirements.md:{lineno}（{requirement[:30]}）的「现状」是「{status}」，"
+            f"而「卡在哪」写着「{NOTHING_OWED}」——**这两个说法互相矛盾**："
+            f"现状不是「已交付」，就是这条需求还欠着。要么把它归进某一堆并写清卡在哪，"
+            f"要么把它做完"
+        )
     if status in _NEEDS_EVIDENCE:
         assert evidence, f"docs/requirements.md:{lineno} 标着「{status}」，但证据栏是空的"
     if status in _NEEDS_REASON:
@@ -258,7 +292,7 @@ def test_claimed_evidence_really_exists(lineno: int, cells: list[str]) -> None:
     这是这道闸门的主判据：**表里的每一个"已交付"后面都站着一个能跑的东西**。
     名字对不上时印出最接近的几个，因为实际发生的情况多半是手抄时抄错了一个词。
     """
-    requirement, _level, status, evidence, _reason = cells
+    requirement, _level, status, evidence, _reason, _waiting = cells
     if status not in _NEEDS_EVIDENCE:
         return
     citations = [m for span in re.findall(r"`[^`]+`", evidence) if (m := _CITE.match(span))]
@@ -335,7 +369,8 @@ _TALLY_HEADER = ("级别", "条数", "已交付", "部分交付", "未做", "不
 def _tally_rows() -> dict[str, list[int]]:
     """汇总表：`级别 -> [条数, 已交付, 部分交付, 未做, 不适用]`。
 
-    六列的表格行才收（覆盖表是五列，图例是三列），所以这三张表靠**列数**分辨。
+    分辨办法与 `_rows()` 对称：也是六列，但**第一格是级别名**，而覆盖表的第一格是需求
+    原文、第二格才是级别。两张表因此分得开（见 `_rows()` 的说明）。
     """
     out: dict[str, list[int]] = {}
     for line in DOC.read_text(encoding="utf-8").splitlines():
@@ -344,6 +379,8 @@ def _tally_rows() -> dict[str, list[int]]:
             continue
         cells = [c.strip() for c in stripped.strip("|").split("|")]
         if len(cells) != 6 or tuple(cells) == _TALLY_HEADER:
+            continue
+        if cells[0] not in (*_ROW_LEVELS, _NO_LEVEL):
             continue
         if all(set(c) <= set("-: ") for c in cells):
             continue
@@ -460,3 +497,85 @@ def test_the_completion_scanner_finds_a_claim_when_there_is_one() -> None:
     assert _completion_claims("它原先写着“P1 已经全部做完”") == set()
     # 引号**没配对**时按没引号算：宁可咬，不可漏。
     assert _completion_claims("它原先写着“P1 已经全部做完") == {"P1"}
+
+
+#: 末尾那三堆的写法。**格式是死的**：`N. **堆名**（条数 条）：成员、成员。`
+#:
+#: 成员那一串写在**同一行**并且以句号收尾，是为了让闸门能一句话切出来——散成两行、
+#: 或者把句号写成逗号，都会让它悄悄少收一个成员。堆名必须与 `PILE_KEYS` 字面一致。
+_PILE_BULLET = re.compile(
+    r"^\d+\.\s+\*\*(?P<key>[^*]+)\*\*（(?P<count>\d+) 条）：(?P<members>[^。\n]+)。$",
+    re.MULTILINE,
+)
+
+
+def _name(requirement: str) -> str:
+    """一行需求的短名：「：」之前那段。三堆里就是这么指名的。
+
+    需求原文那一栏一律是「短名：展开」的形状（38 行都是），所以这个切法是稳定的——
+    它不是"从自由文本里猜名字"，是这份表格的一条格式。
+    """
+    return requirement.split("：")[0].strip()
+
+
+def _piles(text: str | None = None) -> dict[str, tuple[int, list[str]]]:
+    """末尾那三堆：`堆名 -> (写着的条数, 写着的成员)`。
+
+    **把写着的两样都取出来，一个都不信**：它们要跟第六栏现算的结果对（见下一条）。
+    """
+    source = DOC.read_text(encoding="utf-8") if text is None else text
+    return {
+        m.group("key"): (int(m.group("count")), m.group("members").split("、"))
+        for m in _PILE_BULLET.finditer(source)
+    }
+
+
+def test_the_piles_account_for_every_row_that_owes_something() -> None:
+    """那三堆的条数与成员，都是按第六栏现算出来的。
+
+    这一条补上之前，三堆是一段手写的散文，没有任何东西核过它，而**它当时是错的**：
+    全表 38 行里有 12 行不是 `已交付`，三堆只提到 10 行——`记忆同步验证`、
+    `状态快照 / 恢复`、`评测用例集管理`、`兼容性` 四条谁都没提；同时又把 `幂等检测`
+    与 `参数 Schema 校验` 当成欠账列了进去（那两条是 `已交付`）。少了 4 条、多了 2 条，
+    **而两种错法读起来都像一份认真的总结**——这正是"手写的话配算出来的表"那个毛病的
+    又一笔，也是这个项目最贵的那种错：报告说了比观测更多的话。
+
+    「已交付」的行**可以**进堆（幂等检测那条的漏报就是这么进去的：需求做完了，同行
+    的边界栏里点名了一件还没做的事），所以这里不按「现状」栏分，只按第六栏。
+    """
+    by_key: dict[str, list[str]] = {}
+    for _lineno, cells in _rows():
+        if cells[5] != NOTHING_OWED:
+            by_key.setdefault(cells[5], []).append(_name(cells[0]))
+
+    piles = _piles()
+    assert set(piles) == set(by_key), (
+        f"散文里的堆是 {sorted(piles)}，覆盖表第六栏里数出来的是 {sorted(by_key)}。"
+        f"堆名要与那一栏**字面一致**（见 `PILE_KEYS`），少一堆或者多一堆都会让某几条"
+        f"需求无声地掉出这份「还剩什么」"
+    )
+    for key, (count, members) in sorted(piles.items()):
+        expected = sorted(by_key[key])
+        assert count == len(members), (
+            f"「{key}」那一堆写着（{count} 条），可后面列了 {len(members)} 个：{members}"
+        )
+        assert sorted(members) == expected, (
+            f"「{key}」那一堆的成员和覆盖表第六栏对不上。\n"
+            f"  散文里写的：{'、'.join(members)}\n"
+            f"  现算出来的：{'、'.join(expected)}\n"
+            f"要改的是 docs/requirements.md 的那一段（成员用「、」分开、同一行、以句号收尾）"
+        )
+
+
+def test_the_pile_scanner_finds_a_pile_when_there_is_one() -> None:
+    """自证：这套切法真的切得出东西。**没有这一条，"格式写歪了"和"确实没这一堆"
+    长得一模一样**——`_piles()` 会安安静静地返回一个空字典。
+
+    （同一条教训见 `_rows()` 那个相机：正则会退化、格式会漂，而退化之后**一条都不会红**。
+    这里靠上面那条 `set(piles) == set(by_key)` 兜底：真切不出东西，两边就对不上。）
+    """
+    sample = "1. **卡在人或者钱**（2 条）：甲、乙。\n2. **卡在没真实用例**（1 条）：丙。"
+    assert _piles(sample) == {"卡在人或者钱": (2, ["甲", "乙"]), "卡在没真实用例": (1, ["丙"])}
+    # 成员串跨了行、或者没用句号收尾，就**什么都切不出来**——宁可缺，不可错收。
+    assert _piles("1. **卡在人或者钱**（2 条）：甲、\n   乙。") == {}
+    assert _piles("1. **卡在人或者钱**（2 条）：甲、乙") == {}
