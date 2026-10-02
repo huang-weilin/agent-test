@@ -190,6 +190,11 @@ items:
       分不清是 Agent 自己重复还是恢复机制导致的。这条语料抓的是一个"写了注释
       就当实现了"的 bug：代码里说这种情况"应当能被看见"，而它其实只出现在一个
       永远不会被返回的 detail 里（2026-09-30 修的）。
+      写这条的时候循环检测器那一栏是 pass：它把这 2 次调用当成 Agent 自己发起的
+      （汇总句写的是"已在 2 次工具调用中比对"），只是两次还没到严格层"连着三次"的
+      上界，所以看起来没问题。同一个缺陷三次才露出来，见 loop.yaml 里的
+      `loop-all-calls-are-unknown-replays`（同一条轨迹、只多一次调用）。
+      2026-10-03 改成两边一致：认不出是谁干的调用，两个检测器都不算到 Agent 头上。
     tools:
       create_payment: {is_write: true}
     sessions:
@@ -200,7 +205,8 @@ items:
     expect:
       memory: none
       idempotency: inconclusive
-      loop: pass
+      loop.unknown_replay: inconclusive
+      loop: inconclusive
       autonomy: inconclusive
 
   - id: idem-snapshot-replay-attribution

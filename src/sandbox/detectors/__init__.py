@@ -32,6 +32,7 @@ KNOWN_DETECTORS: frozenset[str] = frozenset(
         "loop.cross_session",
         "loop.retry",
         "loop.snapshot_replay",
+        "loop.unknown_replay",
         "idempotency",
         "idempotency.read_repeats",
         "autonomy",

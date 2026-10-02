@@ -107,6 +107,39 @@ def split_by_occasion(calls: list[CallView]) -> list[list[CallView]]:
     return [groups[key] for key in sorted(groups)]
 
 
+def _no_agent_calls(
+    total: int,
+    replay_calls: list[CallView],
+    unknown_replay: list[CallView],
+) -> str:
+    """`live` 里没有一次能确认是 Agent 发起的，这句话要说清是哪一种。
+
+    两种来路的意思完全不同，混成一句就有一半是假的：
+
+      * 全是 `snapshot_restore` → **不是它干的**（认得出是谁）；
+      * 全是不认识的标记 → **不知道是不是它干的**（认不出是谁）。
+
+    写成同一句"都来自快照恢复重放"的话，第二种被说成了第一种——那是对 Agent
+    有利的谎，正是这条改动要拆掉的东西。
+    """
+    marks = sorted({str(c.replay_reason) for c in unknown_replay})
+    if not unknown_replay:
+        return (
+            f"全部 {total} 次工具调用都来自快照恢复重放，没有 Agent 自己发起的调用，"
+            f"无法判定是否循环。"
+        )
+    if not replay_calls:
+        return (
+            f"全部 {total} 次工具调用都带着检测器不认识的重放标记（{marks}），"
+            f"分不清是不是 Agent 自己发起的，无法判定是否循环。"
+        )
+    return (
+        f"全部 {total} 次工具调用都带着重放标记（快照恢复重放 {len(replay_calls)} 次，"
+        f"不认识的标记 {marks} 共 {len(unknown_replay)} 次），没有一次能确认是 "
+        f"Agent 自己发起的，无法判定是否循环。"
+    )
+
+
 @dataclass
 class LoopDetector:
     """窗口 + 阈值都可配，因为不同场景的"正常"标准不同。"""
@@ -159,8 +192,19 @@ class LoopDetector:
                 )
             ]
 
-        agent_calls = [c for c in live if c.replay_reason != SNAPSHOT_REPLAY]
+        # **"这是不是它干的"只有一个判据：这次调用带没带重放标记。**
+        #
+        # 原先这里只排除 `snapshot_restore` 那一个字符串，别的标记照单全收——
+        # 而"分不清是谁干的"这件事，幂等检测器早就不折进"Agent 自发重复"了
+        # （它给未知标记报 inconclusive）。同一份轨迹、同一个问题，两个检测器
+        # 答得不一样，而循环这一侧的答案是**危险的那一边**：三次一模一样的写
+        # 操作带着一个不认识的标记，落进严格层就是"Agent 在原地打转"，报告
+        # 指名道姓算到它头上。收下的每一分证据都要能追溯来源，追不到就别要。
+        agent_calls = [c for c in live if c.replay_reason is None]
         replay_calls = [c for c in live if c.replay_reason == SNAPSHOT_REPLAY]
+        unknown_replay = [
+            c for c in live if c.replay_reason not in (None, SNAPSHOT_REPLAY)
+        ]
 
         strict: list[Finding] = []
         approximate: list[Finding] = []
@@ -177,6 +221,8 @@ class LoopDetector:
         findings.extend(self._detect_cross_session(live))
         if replay_calls:
             findings.extend(self._note_snapshot_replays(replay_calls))
+        if unknown_replay:
+            findings.extend(self._note_unknown_replays(unknown_replay))
 
         # 三个实质检查一个结论都没产出 —— 那就是"检查过、是干净的"，必须说出来。
         # 沉默会让报告显示"未覆盖"，把查过没毛病说成没查。
@@ -186,14 +232,18 @@ class LoopDetector:
             if not agent_calls:
                 # 一次 Agent 自己发起的调用都没有，比对样本是 0。
                 # 这时候报 PASS 就是在说"查过了、干净"——而实际一句都没查。
-                # 唯一的来路是全部调用都带 snapshot_restore（没有别的分支能让
-                # live 非空而 agent_calls 为空），所以文案直接点明这件事。
+                # 两条来路能让 live 非空而 agent_calls 为空：全部带
+                # snapshot_restore，或者全部带不认识的标记。**两句话不能混**：
+                # 前者是"不是它干的"，后者是"不知道是不是它干的"，所以文案
+                # 分成三支，detail 里的两个计数也分开列。
                 findings.append(
                     inconclusive(
                         self.name,
-                        f"全部 {len(replay_calls)} 次工具调用都来自快照恢复重放，"
-                        f"没有 Agent 自己发起的调用，无法判定是否循环。",
-                        detail={"snapshot_replays": len(replay_calls)},
+                        _no_agent_calls(len(live), replay_calls, unknown_replay),
+                        detail={
+                            "snapshot_replays": len(replay_calls),
+                            "unknown_replays": len(unknown_replay),
+                        },
                     )
                 )
             else:
@@ -800,6 +850,33 @@ class LoopDetector:
                 ),
                 confidence=Confidence.HIGH,
                 detail={
+                    "replayed_tools": dict(counts),
+                    "call_ids": [c.id for c in calls],
+                },
+            )
+        ]
+
+    def _note_unknown_replays(self, calls: list[CallView]) -> list[Finding]:
+        """不认识的标记：不归因，也不许当没看见。
+
+        和上一条只差一个词：那条说"这不是 Agent 的行为"（认得出是谁干的），
+        这条**说不出**是谁干的。判不了的东西报成 pass，就是把"判不了"折进了
+        一个具体判定——所以这里和幂等检测器对同一批调用的处理一样，报
+        `inconclusive`。按工具计数，与上一条同格式，报告里并排看得清。
+        """
+        counts: dict[str, int] = defaultdict(int)
+        for call in calls:
+            counts[call.tool_name] += 1
+        marks = sorted({str(c.replay_reason) for c in calls})
+        return [
+            inconclusive(
+                f"{self.name}.unknown_replay",
+                f"有 {len(calls)} 次调用带着检测器不认识的重放标记（{marks}）："
+                f"{dict(counts)}。它们没有算进「Agent 自己发起的调用」里——"
+                f"分不清是它干的还是恢复机制干的。这一段里若有重复，先查清是谁"
+                f"写下这个标记，再谈改谁。",
+                detail={
+                    "unknown_replay_reasons": marks,
                     "replayed_tools": dict(counts),
                     "call_ids": [c.id for c in calls],
                 },

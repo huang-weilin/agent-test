@@ -83,15 +83,15 @@ exemptions:
     allow_write: true
 ```
 
-`detector` 只认 `sandbox.detectors.KNOWN_DETECTORS` 里的 14 个名字（`loop`、`loop.strict`、
+`detector` 只认 `sandbox.detectors.KNOWN_DETECTORS` 里的 15 个名字（`loop`、`loop.strict`、
 `loop.approximate`、`loop.ping_pong`、`loop.cross_session`、`loop.retry`、
-`loop.snapshot_replay`、`idempotency`、`idempotency.read_repeats`、`autonomy`、
-`autonomy.unauthorized`、`memory`、`memory.drift`、`memory.poisoning`）。`match` 只认两个键：
+`loop.snapshot_replay`、`loop.unknown_replay`、`idempotency`、`idempotency.read_repeats`、
+`autonomy`、`autonomy.unauthorized`、`memory`、`memory.drift`、`memory.poisoning`）。`match` 只认两个键：
 `arg_differs_on: [字段名]`（仅当两次调用的
 差异**只**出现在这些字段上时命中）和 `tool_has_idempotency: true/false`。
 
 **名字认得，还得那条路上真的有人去看。** 名字列表是所有检测器的全集，不是"能写豁免"
-的集合——14 个名字里，会去找豁免的只有 6 个。写在不查豁免的名字上，规则永远不会命中；
+的集合——15 个名字里，会去找豁免的只有 6 个。写在不查豁免的名字上，规则永远不会命中；
 写在记忆那三族上，引擎直接拒收（它们的例外机制是逐条声明的判据，不叠第二层）。
 
 **键认得，还得这个检测器答得了。** `match` 里的每个键都是一句"这个检测器当场知道的事"；
@@ -125,7 +125,7 @@ exemptions:
   `exempted_by` 也一并落库。报告里看得见理由，不用回去翻场景文件。
 - **"装上了但没接线"的规则在加载时就报错**：未知检测器、未声明的工具、`match` 里写错的键、
   **这个检测器答不了的键**（上面那张表）、**写得出来却永远不成立的条件**（`arg_differs_on: []`），
-  以及**压根不查豁免的那个检测器**（`detector` 只认 14 个名字，其中会去找豁免的只有 6 个，
+  以及**压根不查豁免的那个检测器**（`detector` 只认 15 个名字，其中会去找豁免的只有 6 个，
   见下表）。六种都让规则变成一条死规则（永远不命中），而检测器不会因此报错——报告里
   "没有这条结论"和"这条结论被豁免了"是同一个样子，用户于是以为自己处理过了。这类错误
   宁可让场景加载失败。
@@ -135,11 +135,11 @@ exemptions:
   | `loop.strict` / `loop.approximate` | 查 | `arg_differs_on` |
   | `idempotency`（含跨会话那一路） | 查 | `tool_has_idempotency` |
   | `loop.ping_pong` / `autonomy` / `autonomy.unauthorized` | 查 | 一个都答不了——只能写不带条件的规则 |
-  | `loop` / `loop.retry` / `loop.cross_session` / `loop.snapshot_replay` / `idempotency.read_repeats` | **不查** | 写了也不生效，加载就拒 |
+  | `loop` / `loop.retry` / `loop.cross_session` / `loop.snapshot_replay` / `loop.unknown_replay` / `idempotency.read_repeats` | **不查** | 写了也不生效，加载就拒 |
   | `memory` / `memory.drift` / `memory.poisoning` | 不吃豁免 | 判据就是逐条声明的 `must_hold` / `forbidden`，不叠第二层 |
 
   这张表由 `tests/test_scenario_exemptions.py::test_every_known_detector_is_classified`
-  盯着：14 个名字每一个都得落在上面三档里的一档。**按名字写、不按类写**——`loop` 和
+  盯着：15 个名字每一个都得落在上面三档里的一档。**按名字写、不按类写**——`loop` 和
   `loop.strict` 看着像父子，一个不查、一个查，凭名字猜是不行的。
 - 豁免落在配置指纹的**判卷标准**一节（`identity.sections` 的 `expect`）。于是"加了一条豁免"
   的那次运行会被判成"测试本身变了、两次运行不可比"，而不是"失败少了几个"——后者是把
@@ -235,6 +235,8 @@ run_id、检测器、豁免规则），因为这个运行确实在打转、而�
 1. **正常分页**：页码递增 → 豁免（按 `arg_differs_on: [page]`）。
 2. **正常重试**：错误后带退避的重试，有限次 → 不算循环，但要单独统计重试次数。**"它在重试"这句话不在边界上**：报告写得出的只有"紧接着又是一次同样的调用"（调用链那一节，见 `docs/call-chain.md`）。`scenarios/target_error.yaml` 钉住的是下界——目标系统回错加原样重试一次，不许被报成循环。
 3. **快照恢复导致的重放**：重复扣款确实发生了，但制造它的是恢复机制、不是 Agent——必须区分，否则报告会指挥用户去改一个没问题的 Prompt。区分依据：事件带 `replay_reason: snapshot_restore` 标记。
+
+   **不是这个标记的时候，什么都不能假定。** `resume`、`retry` 之类我们认不出的重放理由，既不能算 Agent 自发，也不能当没看见——判据是"这几次调用是谁发起的"，而那个标记恰恰在说"不一定是我"。所以那些调用**整组退出循环判定**，另报一条 `loop.unknown_replay / inconclusive`（"分不清是不是 Agent 自己发起的"）。**不折进任何具体判定**：折进严格层就是"Agent 在原地打转"，而那是报告说了比观测更多的话。同一份轨迹上幂等检测器给的是同一个 inconclusive——两个检测器对"这是它干的吗"从此答得一样（原先循环只排除 `snapshot_restore` 那一个字符串，剩下的照单全收）。
 
    **但今天没有任何东西会写下这个标记。** 检测器认它（单测和语料直接构造带标记的调用）、报告和调用链都留了它的位置，而**生产路径上一条都到不了**：边界上出现的每一次调用，按定义都是被测 Agent 的进程发出来的，能自称"这不是它主动重发"的只有它自己——而在这个工具里，被测对象的自报不算证据（同 `docs/cost.md` 里"不用 usage_metadata 算成本"那条）。
 
@@ -775,7 +777,7 @@ run_id、检测器、豁免规则），因为这个运行确实在打转、而�
 而应接近 1。它们在真实场景里误报只可能是一个原因：**声明写错了**——不是判定
 判错了，处置方式完全不同（去改场景，不是去调检测器）。
 
-### 实测（2026-10-02，55 条语料）
+### 实测（2026-10-03，56 条语料）
 
 ```
 .venv/Scripts/python.exe scripts/calibrate.py
@@ -783,14 +785,14 @@ run_id、检测器、豁免规则），因为这个运行确实在打转、而�
 
 | 族 | TP | FP | FN | TN | 精确率 | 召回率 |
 |---|---|---|---|---|---|---|
-| loop | 9 | 0 | 0 | 46 | 100.0% | 100.0% |
-| idempotency | 13 | 0 | 0 | 42 | 100.0% | 100.0% |
-| autonomy | 4 | 0 | 0 | 51 | 100.0% | 100.0% |
-| memory | 7 | 0 | 0 | 48 | 100.0% | 100.0% |
+| loop | 9 | 0 | 0 | 47 | 100.0% | 100.0% |
+| idempotency | 13 | 0 | 0 | 43 | 100.0% | 100.0% |
+| autonomy | 4 | 0 | 0 | 52 | 100.0% | 100.0% |
+| memory | 7 | 0 | 0 | 49 | 100.0% | 100.0% |
 
 **这四行不是"检测器没有缺陷"**，是"这批样本上没找到分歧"。统计按**族**做
 （`loop` 一族含严格/近似/乒乓/跨会话/重试各层），因为语料规模还撑不起按层分。
-样本是人手挑的，挑的时候已经知道检测器怎么工作；55 条里一条误报就能让精确率掉
+样本是人手挑的，挑的时候已经知道检测器怎么工作；56 条里一条误报就能让精确率掉
 几个百分点。真实**私人**脱敏轨迹尚未收进语料（需签授权）；公开数据集 τ-bench 的
 形状收了 4 条（参数重写过），另有一轮 660 条真实公开轨迹的批量实测，结论见第四节
 末尾那条「指纹是逐字比参数」。
@@ -809,15 +811,15 @@ run_id、检测器、豁免规则），因为这个运行确实在打转、而�
 循环层报 `pass` 说"已在 0 次调用中比对"；幂等层遇到未知重放标记时把"应当能被
 看见"写进了一条永不返回的 detail；换名的记忆条目走了"键没了"报 fail（误报）；
 改写的预览取的是基准值而不是变化后的值；记忆族的豁免在加载时不报错、跑到检测器
-那里才炸。都已修。剩下八条已知问题（文案、豁免可达性、两个检测器对重放标记的
-待遇不一致、近似层聚类依赖参数形状、语料表达不了条数、中毒只覆盖声明的标记、
-中途漂移看不见、真实轨迹未收）记在 `tests/corpus/README.md` 的"待决清单"里，
+那里才炸。都已修。另有八条已知问题记在 `tests/corpus/README.md` 的"待决清单"里，
 **故意不变成红的测试**：它们要么需要改检测器行为（要单独做、单独测），要么需要
-用户签授权。
+用户签授权。八条里已修掉四条（文案、豁免可达性、两个检测器对重放标记的待遇不一致、
+近似层聚类依赖参数形状——各自的账都留在那一条下面），还开着的是：语料表达不了报几条、
+中毒只覆盖声明的标记、中途漂移看不见、真实脱敏轨迹未收。
 
 ## 八、语料要求（Phase 0 交付物）
 
-`tests/corpus/` 已交付 55 条手写并逐条标注的轨迹，写法、规矩与待决清单见
+`tests/corpus/` 已交付 56 条手写并逐条标注的轨迹，写法、规矩与待决清单见
 `tests/corpus/README.md`。来源：
 
 - **公开**：PERSIST 论文的受控原型场景（记忆中毒/失窃/检索注入等六类威胁）。

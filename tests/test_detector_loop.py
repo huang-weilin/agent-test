@@ -634,6 +634,63 @@ def test_snapshot_replays_are_reported_separately(make_call) -> None:
     assert overall[0].detail["snapshot_replays"] == 3
 
 
+def test_unknown_replay_markers_are_not_charged_to_the_agent(make_call) -> None:
+    """认不出的重放标记既不能算 Agent 自发，也不能当没看见。
+
+    与 `test_snapshot_replays_are_reported_separately` 是**逐字同一条轨迹**，
+    只把标记从 `snapshot_restore`（检测器认识）换成一个不认识的。原先循环这边只
+    排除那一个字符串，剩下的照单全收——同一份轨迹、同一个问题（"这是它干的吗"），
+    幂等检测器答 inconclusive 而循环检测器答"Agent 在原地打转"，还是一条 fail。
+    """
+    calls = [
+        make_call(1, "create_payment", {"order_id": "A1"}, replay_reason="resume"),
+        make_call(2, "create_payment", {"order_id": "A1"}, replay_reason="resume"),
+        make_call(3, "create_payment", {"order_id": "A1"}, replay_reason="resume"),
+    ]
+    findings = _detector().run(calls, ExemptionSet())
+
+    assert not _of(findings, ".strict"), "未知重放标记被当成了 Agent 自己发起的循环"
+    unknown = _of(findings, ".unknown_replay")
+    assert len(unknown) == 1
+    assert unknown[0].verdict == DetectorVerdict.INCONCLUSIVE, (
+        "判不了的事要报 inconclusive——折进任何一个具体判定都是报告说了比观测多的话"
+    )
+    assert "分不清" in unknown[0].summary
+    assert unknown[0].detail["unknown_replay_reasons"] == ["resume"]
+
+    overall = [f for f in findings if f.detector == "loop"]
+    assert len(overall) == 1
+    assert overall[0].verdict == DetectorVerdict.INCONCLUSIVE
+    assert overall[0].detail["unknown_replays"] == 3
+    assert "分不清是不是 Agent 自己发起" in overall[0].summary
+
+
+def test_an_agent_loop_beside_unknown_replays_is_still_reported(make_call) -> None:
+    """未知标记不能把 Agent 的循环搅浑：该报的照报，比对样本也不许被它撑大。"""
+    calls = [
+        make_call(1, "create_payment", {"order_id": "A1"}),
+        make_call(2, "create_payment", {"order_id": "A1"}),
+        make_call(3, "create_payment", {"order_id": "A1"}),
+        make_call(4, "refund", {"order_id": "A1"}, replay_reason="resume"),
+        make_call(5, "refund", {"order_id": "A1"}, replay_reason="resume"),
+    ]
+    findings = _detector().run(calls, ExemptionSet())
+
+    strict = _of(findings, ".strict")
+    assert len(strict) == 1, "Agent 自己那三下该照报"
+    assert strict[0].detail["count"] == 3
+    assert "create_payment" in strict[0].summary, "报的是 Agent 那三下"
+
+    unknown = _of(findings, ".unknown_replay")
+    assert len(unknown) == 1
+    assert unknown[0].detail["replayed_tools"] == {"refund": 2}
+    assert unknown[0].detail["call_ids"] == ["call-0-004", "call-0-005"]
+    assert all("refund" not in f.summary for f in strict), (
+        "未知重放的那两次被算进了 Agent 的循环："
+        "该报的（Agent 自己那三下）和不知道该不该报的（refund）混成了一条"
+    )
+
+
 def test_blocked_calls_retry_does_not_become_an_agent_loop(make_call) -> None:
     """沙箱拦了它、再报它循环，等于自己制造误报（ADR 003 场景）。"""
     calls = [

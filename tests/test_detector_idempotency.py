@@ -310,6 +310,74 @@ def test_snapshot_replay_is_attributed_to_recovery_not_the_agent(make_call) -> N
     assert "不要改 Agent" in findings[0].summary
 
 
+def _replay_pair(make_call):
+    """一对调用：一次 Agent 自己发起、一次快照重放——归因给恢复机制的那一支。"""
+    return [
+        make_call(1, "create_payment", PAY, is_write=True),
+        make_call(2, "create_payment", PAY, is_write=True, replay_reason="snapshot_restore"),
+    ]
+
+
+def test_a_rule_silences_all_three_idempotency_branches(make_call) -> None:
+    """同一条豁免规则，三条归因分支上都要管用。
+
+    原先这条分支**提前 return**，"查豁免、降级、留痕"那一小段只在另外两条分支上
+    各抄了一份——于是同一条规则管不管用，取决于检测器内部走了哪个 `if`。规则写的
+    是检测器名，写规则的人看不见分支，只会看到"我写了规则，那条 fail 还在"。
+    """
+    exemptions = ExemptionSet(
+        [
+            Exemption(
+                detector="idempotency",
+                tool="create_payment",
+                reason="本场景的重复由恢复机制制造，已在别处修",
+                allow_write=True,
+            )
+        ]
+    )
+    findings = IdempotencyDetector(UNPROTECTED).run(_replay_pair(make_call), exemptions)
+
+    assert "快照恢复重放导致" in findings[0].summary, "走的不是重放那条分支"
+    assert findings[0].verdict == DetectorVerdict.PASS
+    assert findings[0].exempted_by == "exemption:idempotency/create_payment"
+    assert findings[0].detail["would_have_been"] == "fail", "豁免必须留痕"
+
+
+def test_the_replay_branch_opens_no_default_hole_for_writes(make_call) -> None:
+    """接上豁免不等于给写操作开默认口子：没有 `allow_write` 的规则照样不生效。"""
+    exemptions = ExemptionSet(
+        [Exemption(detector="idempotency", tool="create_payment", reason="老板说没事")]
+    )
+    findings = IdempotencyDetector(UNPROTECTED).run(_replay_pair(make_call), exemptions)
+
+    assert findings[0].verdict == DetectorVerdict.FAIL
+    assert findings[0].exempted_by is None
+
+
+def test_the_replay_branch_answers_the_answered_facts(make_call) -> None:
+    """新接的这个调用点必须把事实传下去：规则拿 `tool_has_idempotency` 当条件时，
+    传没传决定它是命中还是死规则（`None` 跟 true、false 都不相等）。
+
+    这一处要是漏传，`find` 会抛 `UnanswerableMatch`——那也得到有人试过才知道。
+    """
+    exemptions = ExemptionSet(
+        [
+            Exemption(
+                detector="idempotency",
+                tool="create_payment",
+                reason="这个工具本来就没有幂等保护，重复由上游去重",
+                allow_write=True,
+                match={"tool_has_idempotency": False},
+            )
+        ]
+    )
+    findings = IdempotencyDetector(UNPROTECTED).run(_replay_pair(make_call), exemptions)
+
+    assert findings[0].exempted_by is not None, (
+        "规则按 tool_has_idempotency 挑工具，这个调用点没把事实传下去"
+    )
+
+
 def test_different_orders_are_not_duplicates(make_call) -> None:
     """两次不同订单的支付是正常业务，不能报重复扣款。"""
     calls = [

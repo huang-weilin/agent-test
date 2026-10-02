@@ -370,6 +370,33 @@ items:
       idempotency: fail
       autonomy: inconclusive
 
+  - id: loop-all-calls-are-unknown-replays
+    source: 自造
+    why: >
+      与 loop-all-calls-are-snapshot-replays 逐字同一条轨迹，只把标记从
+      snapshot_restore（检测器认识）换成 resume（不认识）。三次调用一次都不是
+      Agent 自己发的，而"不是它发的"这件事在两个检测器里原本有两种待遇：
+      幂等检测器早就不把它们算进"Agent 自发重复"（报 inconclusive：分不清），
+      循环检测器却只排除 snapshot_restore 那一个字符串，剩下的照单全收——
+      同一份轨迹，同一个问题（"这是它干的吗"），两个检测器答得不一样。
+      收下它的代价很具体：三次一模一样的写操作落进严格层就是"Agent 在原地打转"，
+      于是一段可能根本不是 Agent 制造的重复，被报告指名道姓地算到它头上。
+    tools:
+      create_payment: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: resume}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: resume}
+      - {tool: create_payment, args: {order_id: A1, amount: 99}, replay_reason: resume}
+    expect:
+      memory: none
+      loop.unknown_replay: inconclusive
+      loop: inconclusive
+      loop.cross_session: inconclusive
+      idempotency: inconclusive
+      autonomy: inconclusive
+
   # --- 豁免：一对对照样本 ---------------------------------------------------
 
   - id: loop-approximate-paging-exempted

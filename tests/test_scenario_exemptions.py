@@ -502,6 +502,7 @@ NO_EXEMPTION_STEP: list[str] = [
     "loop.retry",
     "loop.cross_session",
     "loop.snapshot_replay",
+    "loop.unknown_replay",
     "idempotency.read_repeats",
 ]
 
@@ -525,7 +526,7 @@ def test_a_detector_that_never_asks_is_refused_at_load(
 
 
 def test_every_known_detector_is_classified() -> None:
-    """14 个检测器名，每一个都得说清楚它属于哪一类。
+    """15 个检测器名，每一个都得说清楚它属于哪一类。
 
     这条是防漂的：以后有人加一个检测器、或者把某条路接上豁免，这张分类就必须
     跟着动。少了它，新名字会静静地落进"没被任何一张表提到"的缝里——那时它是

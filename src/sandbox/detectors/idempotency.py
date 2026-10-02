@@ -557,16 +557,25 @@ class IdempotencyDetector:
         # 顺序很重要：先判 Agent 自发重复，再判恢复重放。反过来的话，
         # 一次"Agent 重复 + 恢复重放"混合的组会被归因成纯恢复问题。
         if len(agent) < 2 and replay:
-            return Finding(
-                detector=self.name,
-                verdict=DetectorVerdict.FAIL,
-                summary=(
-                    f"{tool_name} 被重复执行 {len(group)} 次{criterion.clause()}，"
-                    f"其中 {len(replay)} 次由快照恢复重放导致（非 Agent 行为）。"
-                    f"重复扣款是真实的，但要去修恢复机制，不要改 Agent。"
+            # 这一支也要查豁免。原先它直接 return，而另外两条分支各自抄了一份
+            # 查豁免的代码——于是**同一条规则管不管用，取决于检测器内部走了哪个
+            # if**。分支是实现细节，规则指的是检测器名，读规则的人看不出这个区别，
+            # 只会看到"我写了规则，那条 fail 还在"。
+            return self._silence_if_exempted(
+                Finding(
+                    detector=self.name,
+                    verdict=DetectorVerdict.FAIL,
+                    summary=(
+                        f"{tool_name} 被重复执行 {len(group)} 次{criterion.clause()}，"
+                        f"其中 {len(replay)} 次由快照恢复重放导致（非 Agent 行为）。"
+                        f"重复扣款是真实的，但要去修恢复机制，不要改 Agent。"
+                    ),
+                    confidence=Confidence.HIGH,
+                    detail=detail,
                 ),
-                confidence=Confidence.HIGH,
-                detail=detail,
+                calls=group,
+                facts=facts,
+                exemptions=exemptions,
             )
 
         if len(agent) < 2:
@@ -701,25 +710,8 @@ class IdempotencyDetector:
                     detail={**detail, "reason_code": "protected"},
                 )
 
-        exemption = exemptions.find(
-            self.name,
-            tool_name,
-            # 两个来源任一说是写操作就按写处理。两处声明本应一致，不一致时
-            # 往保守的方向取——否则一个不一致的声明就能把写操作静音掉。
-            is_write=facts.is_write or group[0].is_write,
-            tool_has_idempotency=facts.enforces_idempotency,
-        )
-        if exemption is None:
-            return finding
-
-        # 豁免不是静默的：结论降级但**必须留痕**，报告里要能看到"因豁免未告警"。
-        return Finding(
-            detector=finding.detector,
-            verdict=DetectorVerdict.PASS,
-            summary=f"{finding.summary}{exemption.note()}",
-            confidence=Confidence.MEDIUM,
-            detail={**finding.detail, "would_have_been": finding.verdict.value},
-            exempted_by=exemption.label,
+        return self._silence_if_exempted(
+            finding, calls=group, facts=facts, exemptions=exemptions
         )
 
     def _judge_cross_session(
@@ -820,14 +812,41 @@ class IdempotencyDetector:
                 detail={**session_detail, "reason_code": "cross_session_memory_loss"},
             )
 
+        return self._silence_if_exempted(
+            finding, calls=first_calls, facts=facts, exemptions=exemptions
+        )
+
+    def _silence_if_exempted(
+        self,
+        finding: Finding,
+        *,
+        calls: list[CallView],
+        facts: ToolFacts,
+        exemptions: ExemptionSet,
+    ) -> Finding:
+        """这条结论若有豁免规则命中，就降级成 pass 并留痕。
+
+        **三个返回点都从这儿走**（快照重放、Agent 自发重复、跨会话重复）。这段
+        逻辑原先在两处各抄了一份，而快照重放那一条分支压根没抄——于是同一条规则
+        在两条分支上管用、在第三条上不管用。规则指的是**检测器名**，不是某个
+        内部 if；查一次豁免的成本远小于"用户以为自己处理过了"。
+
+        `calls` 只用来读第一条调用的 `is_write` 声明，传组里哪一段都一样：
+        同组同工具，声明只有一份。
+        """
+        tool_name = calls[0].tool_name
         exemption = exemptions.find(
             self.name,
             tool_name,
-            is_write=facts.is_write or first_calls[0].is_write,
+            # 两个来源任一说是写操作就按写处理。两处声明本应一致，不一致时
+            # 往保守的方向取——否则一个不一致的声明就能把写操作静音掉。
+            is_write=facts.is_write or calls[0].is_write,
             tool_has_idempotency=facts.enforces_idempotency,
         )
         if exemption is None:
             return finding
+
+        # 豁免不是静默的：结论降级但**必须留痕**，报告里要能看到"因豁免未告警"。
         return Finding(
             detector=finding.detector,
             verdict=DetectorVerdict.PASS,
