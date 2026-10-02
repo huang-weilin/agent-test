@@ -112,6 +112,12 @@ _ABSENT = {
         "同上，住在仓库外面。改一处源码锚点看谁红（拆快路 / 不看阈值 / 放宽非降 / "
         "豁免 / would_have_been / 绿灯对照），`docs/detectors.md` 第三节末段引它。"
     ),
+    "_probes/probe_requirement_coverage.py": (
+        "同上，住在仓库外面。量的是「把需求覆盖表改坏一次，它红在哪一行」："
+        "抄错测试名、状态的第五个值、理由清空、汇总表错一格、新加文件不进表、"
+        "清单留陈旧条目，外加一个绿灯对照——`tests/test_requirement_coverage.py` "
+        "的文件头引它。"
+    ),
     "notes/a.md": (
         "`docs/detectors.md` 举的例子：讲「目录判据的粒度是整块」时，举的是**记忆"
         "目录里**的布局（`notes/` 下逐条声明各写一行），不是仓库里的文件。"
