@@ -9,7 +9,12 @@
 所以 `RunRegistry.kill()` 会同时做两件事：置位熔断标记（带内表现）+
 通知带外处理器（真正杀进程）。
 
-**代价要讲清楚，而且要**量**出来讲。** 每次工具调用后重扫一遍该运行的整条轨迹，
+**它什么时候跑。** 一次调用**真的出到目标系统**之后（`proxy/app.py` 的
+`_settle`，两条出口路由都经过它）。被边界拦下的那几支不扫——它们在目标系统上
+什么都没留下，而这条通路要防的是"循环把目标系统打爆"；那种路径上的 token 失控
+由网关的预算熔断独立负责。
+
+**代价要讲清楚，而且要**量**出来讲。** 每扫一次是重扫一遍该运行的整条轨迹，
 所以代价随调用次数超线性地涨。这句话原先写的是"几十次调用完全没问题"——那是
 **没量过就写下的**。2026-10-01 量到的（`../_probes/measure_watchdog_scan.py`、
 `../_probes/measure_watchdog_breakdown.py`，本机 SQLite）：
@@ -26,11 +31,13 @@
 于是它在小运行里就是全部开销。
 
 **这笔时间记在被测会话的墙钟上。** 看门狗是在出口代理的请求处理里 `await` 的
-（`proxy/app.py`），而 Agent 正阻塞在这个请求上；单会话超时（`runner`）量的是
-Agent 进程活了多久，两者之间没有任何东西把我们的开销摘出来。更糟的是它在轨迹里
-**看不见**：`tool_call.latency_ms` 在 `enforce` 之前就量完了，所以一次因为看门狗
-太慢而超时的运行，报告里长得和"Agent 自己慢"一模一样。这一片把两处**精确**的
+（`proxy/app.py` 的 `_settle`），而 Agent 正阻塞在这个请求上；单会话超时（`runner`）
+量的是 Agent 进程活了多久，两者之间没有任何东西把我们的开销摘出来。更糟的是它在
+轨迹里**看不见**：`tool_call.latency_ms` 在 `enforce` 之前就量完了，所以一次因为
+看门狗太慢而超时的运行，报告里长得和"Agent 自己慢"一模一样。这一片把两处**精确**的
 浪费去掉了（见下），但"谁的错分开写"这条还没接上——**它是记在案的债**。
+（2026-10-02 补：通用出口原先**根本不扫**，所以那些运行没有这笔开销、也就少了一层
+止损。接上之后它们和小节开头那张表一个量级——见 `tests/test_open_route_parity.py`。）
 
 这一片改掉的两处，都不改变任何判定：
 
@@ -117,9 +124,10 @@ async def inspect_run(
     ctx = active.ctx
 
     for finding in findings:
-        # **同一个结论只落一行。** 这个函数每次工具调用都要跑一遍，而它在
-        # n−1 次扫描里给出的是同一个结论——照单全收的话，一次 320 次调用的运行
-        # 会往库里写 640 行副本。见 `ActiveRun.recorded_conclusions`。
+        # **同一个结论只落一行。** 这个函数一次运行里要被跑很多遍（每次有调用
+        # 真的出到目标系统就跑一遍），而它在 n−1 次扫描里给出的是同一个结论——
+        # 照单全收的话，一次 320 次调用的运行会往库里写 640 行副本。
+        # 见 `ActiveRun.recorded_conclusions`。
         key = (finding.detector, finding.verdict.value)
         if key in active.recorded_conclusions:
             continue
@@ -152,7 +160,7 @@ async def enforce(run_id: str, detector: LoopDetector | None = None) -> str | No
                 # `exempted_by`，报告会照原样印出理由。但日志里要留一笔：
                 # 一个确实在打转、而我们放它继续跑的运行，事后该能查得到。
                 #
-                # 每次工具调用都会重扫，所以同一条只报一次：反复刷同一行会把
+                # 一次运行里会重扫很多遍，所以同一条只报一次：反复刷同一行会把
                 # "查得到"变成"翻不到"。
                 key = f"{finding.detector}/{finding.exempted_by}"
                 if active is not None and key not in active.warned_exemptions:

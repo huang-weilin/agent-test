@@ -149,8 +149,8 @@ async def test_a_repeated_scan_does_not_record_the_same_conclusion_again(
 ) -> None:
     """扫三遍，库里那两条结论各只有一行。
 
-    看门狗每次工具调用后重扫一遍（`proxy/app.py`），而轨迹在两次调用之间不会
-    平白多出一个结论。照单全收的话，一次 n 次调用的运行会往 `detector_finding`
+    看门狗一次运行里要重扫很多遍（`proxy/app.py` 的 `_settle`），而轨迹在两次
+    调用之间不会平白多出一个结论。照单全收的话，一次 n 次调用的运行会往 `detector_finding`
     里写 O(n) 行——量于 2026-10-01，那是 **2 行/次调用**（开发库里当时 4,320 行，
     全部是副本）。那张表的名字是"检测器结论"，一行就该是一个结论。
 

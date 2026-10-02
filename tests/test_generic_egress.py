@@ -621,7 +621,14 @@ async def test_a_bare_body_declaration_does_not_blame_the_agent_for_our_own_sche
     call = (await db.execute(select(ToolCall))).scalar_one()
     assert call.status == "ok"
     findings = (await db.execute(select(DetectorFinding))).scalars().all()
-    assert findings == [], "一份没表态的声明不该产出任何结论"
+    # **判据不是"一条结论都没有"。** 这一次调用真的出到了目标系统，看门狗因此
+    # 扫了一遍（`tests/test_open_route_parity.py`），落下循环检测那两行
+    # （`loop/pass` 与 `loop.cross_session/inconclusive`）——定目标那条路上一直
+    # 是这样，通用出口接上看门狗之前，这里才显得"干净"。
+    # 这一条真正要说的是：**没有任何一条结论把账记在被测对象头上**。
+    assert [f.detector for f in findings if f.verdict == DetectorVerdict.FAIL] == [], (
+        "一份没表态的声明不该产出任何指向 Agent 的失败结论"
+    )
 
 
 async def test_an_empty_body_table_blames_the_agent_for_our_own_schema(

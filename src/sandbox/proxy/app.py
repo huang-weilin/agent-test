@@ -104,6 +104,25 @@ async def _forward(
     return resp.status_code, body
 
 
+async def _settle(ctx: Any) -> None:
+    """一次调用**真的出到目标系统之后**，让看门狗扫一遍。
+
+    **两条路由都要经过这里**：定目标的 `/tools/{name}`，和目标由调用方指定的
+    `/fetch` 与 `/fetch/{name}`。原先只有前者接了，后者一次都不扫——而事后那轮
+    检测照样会在整条会话序列上算出循环、把结论落进报告，所以**报告看起来是对的**，
+    没发生的只是止损：一个用通用出口打转的 Agent 不会被杀，它会一直烧到 token
+    上限或单会话超时（那两条都是兜底，不是"检测到循环就地终止"）。
+    量它的那次对照在 `tests/test_open_route_parity.py`。
+
+    **被拦下的那几支不扫**（未声明的工具、走错入口、出口被拒、参数不合 schema）：
+    它们在目标系统上什么都没留下，而这条通路要防的正是"循环把目标系统打爆"；
+    那些路径上的 token 失控由网关的预算熔断独立负责。这是写下来的边界，不是
+    遗漏——`watchdog.py` 与 `docs/detectors.md` 里原先那句"每次工具调用后重扫"
+    按这条改掉了。
+    """
+    await watchdog.enforce(ctx.run_id)
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     policy = get_policy()
@@ -297,7 +316,7 @@ async def call_tool(
     # 它能阻止的是下一次，不是这一次。要"连这一次都不发生"，判定必须前移到放行
     # 之前（即根据已有轨迹预测本次是否属于循环）。这是 walking skeleton 已知的
     # 局限，不是疏忽：先证明熔断通路能真的终止进程，再决定预测逻辑值不值得做。
-    await watchdog.enforce(ctx.run_id)
+    await _settle(ctx)
 
     # 响应对象在上面就建好了（为了量体量），这里只往上加两个头：
     # `call_id` 要等落库之后才知道，所以头只能后加。
@@ -375,6 +394,16 @@ async def _generic_egress(
     active = runs.resolve(authorization, x_sandbox_run_id)
     if active is None:
         return _error(401, "无法把出口请求关联到任何运行。", "unroutable_request")
+    if active.killed:
+        # 与 `/tools/{name}` 那条路同一条判据、同一个理由：**熔断之后不许再有
+        # 副作用**。这条原先只在前一条路上判，于是被熔断的运行仍然能从通用出口
+        # 继续往目标系统上打——而这时报告上什么都不会显示：结论早就落了库，
+        # 运行状态也写着"已熔断"，只有那边的副作用还在继续。
+        return _error(
+            410,
+            f"该运行已被沙箱带外熔断：{active.kill_reason}。",
+            err_type="run_killed",
+        )
     ctx = active.ctx
 
     host = host_of(url)
@@ -556,6 +585,11 @@ async def _generic_egress(
         # 加载期校验（`ToolDecl`）保证它声明的就是写。
         is_write=True,
     )
+
+    # 通用出口这条路上**同样**要跑看门狗。它原先漏了，而漏掉的表现是报告照常
+    # 出结论、只是没人动手止损——见 `_settle`。
+    await _settle(ctx)
+
     response.headers["X-Sandbox-Run-Id"] = ctx.run_id
     response.headers["X-Sandbox-Tool-Call-Id"] = call_id
     return response
