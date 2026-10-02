@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from sandbox.db.models import DetectorVerdict
 from sandbox.detectors.base import Exemption, ExemptionSet
+from sandbox.detectors.idempotency import checked_identity_fields
 from sandbox.detectors.loop import checked_field_weights
 from sandbox.detectors.memory import ForbiddenText, MemoryRules, MustHold
 from sandbox.proxy.policy import (
@@ -65,6 +66,29 @@ class ToolDecl(BaseModel):
     # 工具**在目标系统侧**是否真的实现了幂等。与上一项分开：
     # 声明了参数却忘了实现，正是要测出来的缺陷。
     enforces_idempotency: bool = False
+
+    #: **这个工具的"主键"是哪几个字段。** 声明了它，参数逐字不同但主键相同的
+    #: 几次写操作就会被当成"同一个操作"报出来（`IdempotencyDetector`）。
+    #:
+    #: 为什么需要它：指纹是按**整个参数表**逐字算的，于是"同一件事、换个付款方式
+    #: 再订一次"永远配不上对。量过（642 条真实轨迹、916 次写操作，
+    #: `../_traces/measure_same_op.py`）：按"同工具"放宽会多报 145 组、按"只差
+    #: 一个字段"多报 90 组，逐条看大多是误报；按主键字段放宽只剩 56 组，而
+    #: **那张主键表只有懂业务的人给得出来**——`payment_methods` 变了不算另一件事、
+    #: `order_id` 变了就算，这条区别产品推不出来。
+    #:
+    #: **不声明就一个字都不变**：那些量出来的误报形状照样不会被报出来。
+    #: 声明了主键、调用却没带那几个字段的，会单独报一条 `inconclusive`——
+    #: 不折进"判过了、没问题"里，见 `detectors/idempotency.py` 的 `Ungroupable`。
+    #:
+    #: 与 `field_weights` 不是同一个旋钮：那个是**相似度**里的相对权重（模糊，
+    #: 给循环检测用），这个是**硬分组**的键（全等，给幂等检测用）。同一件事在
+    #: 两处的判法不同，所以不是一个字段。
+    #:
+    #: **它不过线**（不进运行注册载荷）：运行当中没有消费者——看门狗只跑循环
+    #: 检测那一族。过线的话就成了一条"装上了但没接线"的声明，而那种声明比
+    #: 没有更坏（它会让人以为运行当中也按它判了）。
+    identity_fields: list[str] = Field(default_factory=list)
 
     #: **无人值守时，允许它自己动手吗。有一个自主会话时必填。**
     #:
@@ -298,6 +322,24 @@ class ToolDecl(BaseModel):
         没什么可对照的。这不是漏检，是如实的：没有声明就没有标准。
         """
         check_schema(self.parameters, tool=self.name)
+        return self
+
+    @model_validator(mode="after")
+    def _identity_fields_are_usable(self) -> ToolDecl:
+        """主键声明必须是能用的字段名，而且只许写在写工具上。
+
+        规则本身在 `checked_identity_fields` 里——**和语料那边共用一份**：这份
+        声明有两个前门（这里的场景 YAML，和 `corpus._parse_tools`），两处各写一份
+        校验的话，总有一天一个前门收下了一个不存在的字段名，而收下它的那条会让
+        这一档判据**一次都不生效**，报告上看起来和"判过了、没问题"一样。
+
+        "字段名在参数里真的存在"是**另一条**，在 `scenario/loader.py`——那需要
+        参数 schema，而且只有场景有 schema（语料只写读写属性），所以它放在
+        有 schema 可对的地方，不在这儿假装两处都管。
+        """
+        checked_identity_fields(
+            self.identity_fields, tool=self.name, is_write=self.is_write
+        )
         return self
 
     @model_validator(mode="after")

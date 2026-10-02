@@ -1,8 +1,10 @@
 """场景文件的加载与校验。
 
 校验里有几条是**跨字段**的，单看任何一个字段都发现不了，但它们出错的方式都很安静
-（完整清单是七条，见 `docs/scenarios.md`；第五条——无人值守会话里的写操作必须交代
-`may_run_unattended`——在 `spec.py` 的模型校验里，不在这里）：
+（完整清单见 `docs/scenarios.md` 的「跨字段校验」一节，**那里的条数和编号与这里不同**
+——那边的清单更全，这里只列在这个函数里做的；无人值守会话里的写操作必须交代
+`may_run_unattended`、只读工具不许声明主键这两条分别在 `spec.py` 的模型校验和
+`idempotency.py` 的声明校验里，不在这里）：
 
 1. `restore_from` 引用了一张**后面**才拍的快照。这意味着"回到未来"，
    记忆视野会算出一个没意义的数，而归因完全建立在视野上。必须报错，
@@ -31,6 +33,11 @@
    **引用**的校验，和上面第 2、3 条同一类：名字对不上要在这里说清楚，否则报出来
    的是「这个工具缺 is_write」——那句话指着别处。库是什么、为什么要有它、覆盖
    的规矩是什么，见 `library.py` 的模块文档。
+
+8. `identity_fields` 挂在参数里没有的字段名上（或者这个工具压根没声明
+   `parameters`，没有可以对照的字段表）。同样是"看着在、其实没生效"：分组时取不到
+   那个字段的值，每一组都退回逐字那一档，而报告上看起来和"按主键比过了、没问题"
+   一样。代价和上一条的 `field_weights` 相同——想按主键判，就得先把参数声明出来。
 """
 from __future__ import annotations
 
@@ -197,6 +204,35 @@ def _check_references(scenario: Scenario, source: str) -> None:
                     f"合不出来——哪一份赢取决于工具在场景里的书写顺序。"
                 )
             seen_weights[field] = (tool.name, weight)
+
+    # --- 主键字段必须真的在参数里 ---
+    #
+    # 和上面同一类：字段名写错了不会报错，只会让**这一档判据一次都不生效**——
+    # 分组的键里永远缺那一个字段，于是每一组都退回逐字那一档，而报告上看起来
+    # 和"按主键比过了、没问题"一样。这是本项目最怕的那种句子（说了比观测多的话），
+    # 所以宁可让场景加载失败。
+    #
+    # 与 `field_weights` 那条共用同一条判据（参数里得有这个字段），代价也一样：
+    # 想按主键判，就得先把这个工具的参数声明出来。**没有 schema 就没得对**，
+    # 那时候拒绝比默认放行好——放行等于承认一个永远不生效的声明。
+    for tool in scenario.tools:
+        if not tool.identity_fields:
+            continue
+        properties = (tool.parameters or {}).get("properties") or {}
+        missing_fields = [f for f in tool.identity_fields if f not in properties]
+        if missing_fields:
+            raise ScenarioError(
+                f"{source}: 工具 {tool.name!r} 的 identity_fields 里有 {missing_fields}，"
+                f"而它的参数里没有这些字段。\n"
+                f"这个工具声明的字段：{sorted(properties) or '（无）'}"
+                + (
+                    "（这个工具没有声明 parameters，所以没有可以对照的字段表）"
+                    if not properties
+                    else ""
+                )
+                + "\n写错的字段名不会报错，它只会让这一档判据一次都不生效——"
+                "每一组都退回逐字那一档，而报告上看起来和「按主键比过了、没问题」一样。"
+            )
 
     # --- 记忆判据必须真的在判东西 ---
     #

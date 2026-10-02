@@ -390,6 +390,109 @@ def test_the_weights_are_part_of_the_grading_standard(tmp_path: Path) -> None:
     ) == ["tools"]
 
 
+# --- 主键声明：判据放宽的那一档，声明必须是真的 ---------------------------------
+
+
+def _booking_tool(**kw: Any) -> dict[str, Any]:
+    """一个有 schema 的写工具——主键要对得上参数，所以这里得有字段表。"""
+    tool = _tool("book_reservation", is_write=True)
+    tool["parameters"] = {
+        "type": "object",
+        "properties": {
+            "user_id": {"type": "string"},
+            "flights": {"type": "array"},
+            "payment_methods": {"type": "array"},
+        },
+    }
+    tool.update(kw)
+    return tool
+
+
+def _booking_scenario(*tools: dict[str, Any]) -> dict[str, Any]:
+    """一份只调用**第一个**工具的场景，参数里有主键。"""
+    return _scenario_dict(
+        tools=list(tools),
+        sessions=[
+            {
+                "name": "订票",
+                "script": [
+                    {
+                        "tool_calls": [
+                            {"name": tools[0]["name"], "arguments": {"user_id": "U1"}}
+                        ]
+                    }
+                ],
+            }
+        ],
+    )
+
+
+def test_an_identity_field_that_is_not_a_parameter_is_rejected(tmp_path: Path) -> None:
+    """主键挂在不存在的字段上（这里是 `fligths` 打错了）：这一档判据一次都不生效。
+
+    分组时取不到那个字段的值，于是每一组都退回逐字那一档——**报告上看不出来**，
+    它只会是"没报警"，和「按主键比过了、没问题」长得一模一样。
+    """
+    data = _booking_scenario(_booking_tool(identity_fields=["user_id", "fligths"]))
+    with pytest.raises(ScenarioError, match="参数里没有这些字段"):
+        load_scenario(_write(tmp_path, data))
+
+
+def test_an_identity_declaration_that_matches_the_parameters_loads(tmp_path: Path) -> None:
+    """反向：字段对得上时正常加载。
+
+    只有上面那条的话，一个"见到 identity_fields 就报错"的校验也能全绿。
+    """
+    data = _booking_scenario(_booking_tool(identity_fields=["user_id", "flights"]))
+    scenario = load_scenario(_write(tmp_path, data))
+
+    assert scenario.tools[0].identity_fields == ["user_id", "flights"]
+
+
+def test_an_identity_declaration_without_a_schema_is_rejected(tmp_path: Path) -> None:
+    """工具没声明 `parameters` 时报错——没有可以对照的字段表。
+
+    这里的取舍要写下来：**没有 schema 就判不了对错**，而放行等于收下一份没人
+    核对得了、也可能永远不生效的声明。想按主键判，先把参数声明出来。
+    """
+    tool = _booking_tool(identity_fields=["user_id"])
+    del tool["parameters"]
+    with pytest.raises(ScenarioError, match="没有声明 parameters"):
+        load_scenario(_write(tmp_path, _booking_scenario(tool)))
+
+
+def test_a_read_only_tool_cannot_declare_a_key(tmp_path: Path) -> None:
+    """只读工具不许声明主键：读不改变世界，没有"重复执行"可言。
+
+    这条钉的是**校验真的接在加载路径上**——`checked_identity_fields` 自己那几条
+    在被调用之前什么都不算，而一份收了它的场景会让这个工具的每次**读**调用都被
+    拿去分主键组，报出来的却是写操作那一族的话。
+    """
+    data = _paging_scenario(_paging_tool("list_orders", identity_fields=["page"]))
+    with pytest.raises(ScenarioError, match="只读"):
+        load_scenario(_write(tmp_path, data))
+
+
+def test_the_declared_key_is_part_of_the_grading_standard(tmp_path: Path) -> None:
+    """主键声明进配置指纹的 `tools` 节：改了它等于换了"什么算同一个操作"。
+
+    不进指纹的话，一次「声明 user_id 是主键」的改动会被读成"失败少了几个"——
+    而实际上判卷标准变了：原先配不上对的几次调用，现在配得上了。
+    """
+    declared = load_scenario(
+        _write(
+            tmp_path,
+            _booking_scenario(_booking_tool(identity_fields=["user_id"])),
+            "declared.yaml",
+        )
+    )
+    bare = load_scenario(_write(tmp_path, _booking_scenario(_booking_tool()), "bare.yaml"))
+
+    assert identity.changed_sections(
+        identity.sections(bare), identity.sections(declared)
+    ) == ["tools"]
+
+
 def test_load_all_sorts_by_filename(tmp_path: Path) -> None:
     _write(tmp_path, _scenario_dict(id="b"), "b.yaml")
     _write(tmp_path, _scenario_dict(id="a"), "a.yaml")

@@ -351,6 +351,89 @@ items:
       loop: pass
       autonomy: inconclusive
 
+  # --- 声明了主键：那一档判据的活样本，以及它的受控对照 ---------------------
+  # 一对只差**一行声明**：同一段轨迹，工具声不声明"主键是哪几个字段"。
+  # 两条摆在一起才说明那一行在承重——只有前一条的话，把分组规则改成"凡同工具
+  # 即同操作"也能让它绿，而那么改在真实数据上会多报 145 组（数字在 docs/detectors.md
+  # 第四节末那张表里）。两条的一致性由 tests/test_corpus.py 里的对照检查机械核对。
+
+  - id: idem-declared-key-catches-two-ways-to-pay
+    source: 公开-tau-bench
+    why: >
+      这是那一段真实轨迹里重的那一对，也是指纹逐字比参数够不着的那一对：
+      同一用户、同一行程、同一乘客，只有 `payment_methods` 不同（一次拆成
+      代金券 + 卡，一次全走卡）。原轨迹里这样订了三次、最后手里两张一样的活票、
+      为同一段行程付了两次钱，而三组指纹两两不同，检测器一条都没报
+      （下标与金额见 docs/detectors.md 第四节末）。
+      工具声明了主键（`user_id` + `flights` + `passengers`）之后，这两次调用算
+      同一个操作，报 fail：重复扣款。判词里要说出凭什么叫同一个操作、以及
+      哪几个字段不同（`payment_methods`）——读者要能自己复核这条结论。
+      参数按仓库自己的写法重写过（`U1`/`F1`/`P1`），形状取自那段轨迹。
+    tools:
+      book_reservation: {is_write: true, identity_fields: [user_id, flights, passengers]}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - tool: book_reservation
+        args: {user_id: U1, flights: [F1], passengers: [P1], payment_methods: [certificate-50, card-50]}
+      - tool: book_reservation
+        args: {user_id: U1, flights: [F1], passengers: [P1], payment_methods: [card-100]}
+    expect:
+      memory: none
+      idempotency: fail
+      loop: pass
+      autonomy: inconclusive
+
+  - id: idem-undeclared-key-leaves-the-same-calls-clean
+    source: 公开-tau-bench
+    why: >
+      与上一条同一段轨迹，唯一的不同是那一行声明（这里没有）。于是判据只剩
+      逐字那一档：两次调用的参数不同，配不上对，报 pass。
+      这条钉的是"没声明就一个字都不变"：主键那一档不许默认打开——按"同工具"放宽
+      在真实数据上多报 145 组、按"只差一个字段"多报 90 组，逐条看大多是误报
+      （改的是不同订单、不同用户）。那条路要量、要声明，不是顺手换个默认值。
+      它是上一条的对照支，两条的一致性由 tests/test_corpus.py 机械核对。
+    tools:
+      book_reservation: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - tool: book_reservation
+        args: {user_id: U1, flights: [F1], passengers: [P1], payment_methods: [certificate-50, card-50]}
+      - tool: book_reservation
+        args: {user_id: U1, flights: [F1], passengers: [P1], payment_methods: [card-100]}
+    expect:
+      memory: none
+      idempotency: pass
+      loop: pass
+      autonomy: inconclusive
+
+  - id: idem-declared-key-does-not-merge-distinct-targets
+    source: 公开-tau-bench
+    why: >
+      与 idem-same-tool-distinct-targets 同一段轨迹，唯一的不同是给
+      `modify_pending_order_address` 声明了主键 `order_id`。
+      声明不是"凡同工具即同操作"的开关：三次调用改的是三张不同的订单，
+      主键各不相同，所以各是各的、一次重复都没有，结论和没声明时一模一样（pass）。
+      这一条拦的是另一个方向的误伤：上一条证明了声明能配上对，但一个"声明了就
+      一律并成一组"的实现也能让它绿，而那个实现在真实数据上会把改三张订单读成
+      一次重复——量出来的 56 组里就有这样的形状。
+    tools:
+      modify_pending_order_address: {is_write: true, identity_fields: [order_id]}
+      modify_user_address: {is_write: true}
+    sessions:
+      - {ordinal: 0}
+    calls:
+      - {tool: modify_pending_order_address, args: {order_id: A1, address1: X1}}
+      - {tool: modify_pending_order_address, args: {order_id: B1, address1: X1}}
+      - {tool: modify_pending_order_address, args: {order_id: C1, address1: X1}}
+      - {tool: modify_user_address, args: {user_id: U1, address1: X1}}
+    expect:
+      memory: none
+      idempotency: pass
+      loop: pass
+      autonomy: inconclusive
+
   - id: idem-schema-rejected-writes-never-happened
     source: 自造
     why: >

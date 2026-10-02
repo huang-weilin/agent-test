@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,57 @@ def test_grouping_reports_one_finding_for_one_repeated_behavior(corpus) -> None:
     unauthorized = [f for f in findings if f.detector == "autonomy.unauthorized"]
     assert len(unauthorized) == 1
     assert unauthorized[0].detail["count"] == 5
+
+
+#: 语料里的受控对照：两组 id，按说法唯一的不同是**那一行主键声明**。
+#:
+#: 场景那边的账本在 `tests/control_pairs.py`（它比的是 `scenarios/*.yaml`）。
+#: 语料这一层今天只有这一族对照，所以账直接写在这里——但规矩是同一条：
+#: 一句「唯一的不同是 X」必须有东西在核，因为这句话**错了没有任何症状**。
+IDENTITY_PAIRS: tuple[tuple[str, str], ...] = (
+    (
+        "idem-declared-key-catches-two-ways-to-pay",
+        "idem-undeclared-key-leaves-the-same-calls-clean",
+    ),
+    (
+        "idem-declared-key-does-not-merge-distinct-targets",
+        "idem-same-tool-distinct-targets",
+    ),
+)
+
+
+@pytest.mark.parametrize(("declared_id", "bare_id"), IDENTITY_PAIRS)
+def test_the_identity_pairs_differ_only_in_the_declaration(
+    corpus, declared_id: str, bare_id: str
+) -> None:
+    """这两对的说法是「同一段轨迹，唯一的不同是那一行主键声明」——**要有东西核**。
+
+    那句话承重得很具体：第一对的结论从 pass 变成 fail，全靠那一行。
+    核法与场景账本同一条——把声明那一格抹掉之后，两条必须逐字相等；而且两边
+    真的一边有一边没有（否则那句声明是空的：写在说法里，两支之间根本没这个差别）。
+    """
+    declared = next(i for i in corpus if i.id == declared_id)
+    bare = next(i for i in corpus if i.id == bare_id)
+
+    def trace(item):
+        # 调用的 id 里带语料 id，那是"这两行分别是谁"的标签，不是轨迹的一部分。
+        return [
+            replace(c, id="", session_id="", session_sequence_id="") for c in item.calls
+        ]
+
+    assert trace(declared) == trace(bare), "两条的轨迹不一样，那这一对不比声明"
+    assert declared.tool_facts.keys() == bare.tool_facts.keys()
+    wiped = {
+        name: replace(facts, identity_fields=())
+        for name, facts in declared.tool_facts.items()
+    }
+    assert wiped == dict(bare.tool_facts), "两条的工具声明除了主键那一行之外还有别的差别"
+
+    fields = {n: f.identity_fields for n, f in declared.tool_facts.items() if f.identity_fields}
+    assert fields, "声明那一侧一个字段都没声明——这一对什么都没在演"
+    assert not any(f.identity_fields for f in bare.tool_facts.values()), (
+        f"对照那一侧也声明了主键（{fields}）——那两边差的不止一个变量"
+    )
 
 
 # --- 二、加载校验 -----------------------------------------------------------

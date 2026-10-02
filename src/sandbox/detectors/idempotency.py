@@ -55,6 +55,20 @@ Agent 订票，周三再次要求时，Agent 没有识别出这是重复操作"�
 （改的是不同订单、不同用户）；按**人手挑的主键字段**分仍有 56 组，而它准不准
 取决于那张表挑得对不对——"同一个用户改了两次地址"就并成了一组。
 **要放宽，先得由场景作者声明"这个工具的主键是哪几个字段"**，那是另一片，不是措辞。
+
+**六、声明了主键的工具按主键分组，判词必须说出是哪一档。** 上一条说的"另一片"
+现在有了：`ToolDecl.identity_fields`。声明的工具里，参数逐字不同但主键相同的几次
+写操作会被并成一组报出来——那正是上一条里漏掉的那一对（同一趟行程、两种付款
+拆法、订了三次）该被看见的形状。
+
+**声明是唯一的开关**：没声明就一个字都不变（含那些量出来的误报形状）。
+`identity_fields` 挂在一个参数里没有的字段名上时**加载就报错**——写错的名字不会
+报错，只会让这一档判据一次都不生效，而报告上看起来和"判过了、没问题"一样。
+
+两档的分工写在 `_clusters` 里：主键组的指纹若全都一样，走的还是逐字那一档
+（那句话更硬）；只有真出现"参数不同"时才用声明那一档，并在判词里点名是哪几个
+字段不同。**"同一个用户改了两次地址"这类误报因此没有被消灭，是被声明挡住了**——
+它只有在作者把 `user_id` 声明成主键、而那个用户真的改过两次地址时才出现。
 """
 
 from __future__ import annotations
@@ -67,6 +81,65 @@ from sandbox.db.models import Confidence, DetectorVerdict
 from sandbox.detectors.base import CallView, ExemptionSet, Finding, inconclusive
 
 SNAPSHOT_REPLAY = "snapshot_restore"
+
+#: 两档判据。**结论里必须写明是哪一档**——"同一件事"在这两档下不是同一个意思。
+CRITERION_EXACT = "exact"
+CRITERION_IDENTITY = "identity"
+
+#: 主键字段在判词里最多列几个。超了报个数，不把一行结论撑成一页。
+_MAX_DIFFERING_SHOWN = 5
+
+
+def checked_identity_fields(value: Any, *, tool: str, is_write: bool) -> tuple[str, ...]:
+    """把"这个工具的主键是哪几个字段"这份声明核一遍。**两个前门共用这一份**。
+
+    声明从**场景 YAML 和标注语料**两条路进来（做法和 `checked_field_weights` 相同，
+    但那个还多一条运行注册载荷的路，这个没有——运行当中没人读它，见
+    `ToolDecl.identity_fields`）。两处各写一份校验的话，总有一天一条路收下了一个
+    不存在的字段名，而收下它的那条会让这一档判据**一次都不生效**——报告上看起来
+    和"判过了、没问题"一样。
+
+    规矩三条，每条都对应一种"写了等于没写"：
+
+      * 字段名非空。空串匹配不上任何参数键，这一档判据静默失活；
+      * 不许重复。重复不出错，只会让判词里同一个字段名出现两次，读的人以为
+        声明了两个字段；
+      * **只读工具不许声明**。读不改变世界，没有"重复执行"可言；声明了会让它的
+        每次调用都被拿去分组（并进一组的是读调用，报出来的却会是写操作那一族的
+        话）。一个不起作用的字段比没有这个字段更坏。
+
+    **"字段名在参数里真的存在"这一条不在这儿**，在 `scenario/loader.py`：那需要
+    工具的参数 schema，而语料里没有 schema（它只写读写属性），那边不校验——所以
+    这条规矩放在**有 schema 可对**的地方，不是放在这里假装两处都管。
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(
+            f"工具 {tool!r} 的 identity_fields 必须是一个字段名列表，"
+            f"收到 {type(value).__name__}。"
+        )
+    fields: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                f"工具 {tool!r} 的 identity_fields 里有空的字段名（{item!r}）。"
+                f"空串匹配不上任何参数键，这一档判据会静默失活。"
+            )
+        fields.append(item.strip())
+    duplicated = sorted({f for f in fields if fields.count(f) > 1})
+    if duplicated:
+        raise ValueError(
+            f"工具 {tool!r} 的 identity_fields 里有重复的字段名 {duplicated}。"
+            f"重复不影响分组，只让判词里同一个字段出现两次——读的人会以为声明了两个。"
+        )
+    if fields and not is_write:
+        raise ValueError(
+            f"只读工具 {tool!r} 声明了 identity_fields {fields}。"
+            f"读不改变世界，没有「重复执行」可言——一个不起作用的字段"
+            f"比没有这个字段更坏。"
+        )
+    return tuple(fields)
 
 
 def _ok_count(calls: list[CallView]) -> int:
@@ -109,6 +182,113 @@ class ToolFacts:
     name: str
     is_write: bool
     enforces_idempotency: bool = False
+    #: 这个工具的"主键"是哪几个字段（`ToolDecl.identity_fields`）。空 = 没声明，
+    #: 那时"同一个操作"只有一个判据：规范化参数逐字相同。
+    identity_fields: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Criterion:
+    """这一组**凭什么叫"同一个操作"**——判词必须说出它，否则读者会按自己那一档理解。
+
+    两档，由工具声明的 `identity_fields` 决定：
+
+      * `exact` —— `(工具名, 指纹)` 分组，参数逐字相同。**默认，也是更硬的那一档**；
+      * `identity` —— 参数不同、但**声明的主键**那几个字段的值相同。
+
+    第二档的 `values` 是那几个主键值本身，`differing` 是组内取值不一致的其它字段名。
+    都摆进判词里：读者要能自己复核"凭什么是同一个操作"。
+    """
+
+    kind: str
+    fingerprint: str = ""
+    fields: tuple[str, ...] = ()
+    values: tuple[Any, ...] = ()
+    differing: tuple[str, ...] = ()
+
+    def clause(self) -> str:
+        """判词里那个括号——**"这几次凭什么算同一个操作"**。
+
+        每一档都写成一句话，而不是只写一个档位名：读者要能自己复核这条结论，
+        而两档的差别（参数是否逐字相同）恰恰是结论强弱的分界线。
+        """
+        if self.kind == CRITERION_IDENTITY:
+            return (
+                f"（按声明的主键 {'、'.join(self.fields)}={self.values_text()} 视为同一个操作，"
+                f"参数不同的字段{self.differing_text()}）"
+            )
+        return "（这几次的规范化参数完全相同）"
+
+    def sort_key(self) -> tuple[str, str]:
+        """分组结果按它排序。**判定不许依赖集合迭代顺序**——两档也各有各的键。"""
+        return (self.kind, self.fingerprint or repr(self.values))
+
+    def detail_keys(self) -> dict[str, Any]:
+        """这一档进 `detail` 的键。**两档的键不一样，因为两档说的不是一回事**。
+
+        逐字那一档说得出指纹（分组就按它）；主键那一档没有指纹可言——硬塞一个
+        空字符串进去，读的人会以为"指纹算出来是空的"，而不是"这一档不比指纹"。
+        """
+        if self.kind == CRITERION_IDENTITY:
+            return {"identity_fields": list(self.fields), "identity_values": list(self.values)}
+        return {"fingerprint": self.fingerprint[:16]}
+
+    def values_text(self) -> str:
+        """主键值，给判词用。值可能很长，逐个截断。"""
+        return "、".join(_short(v) for v in self.values)
+
+    def differing_text(self) -> str:
+        """参数里哪几个字段不一样。**这就是这一档判据与逐字那一档的全部差别。**"""
+        if not self.differing:
+            return ""
+        shown = self.differing[:_MAX_DIFFERING_SHOWN]
+        tail = (
+            f" 等 {len(self.differing)} 个字段"
+            if len(self.differing) > _MAX_DIFFERING_SHOWN
+            else ""
+        )
+        return "：" + "、".join(shown) + tail
+
+
+@dataclass(frozen=True)
+class Ungroupable:
+    """声明了主键、却有调用没带那几个字段——**这一档判据对它们一次都没跑过**。
+
+    不能折进"判过了、没问题"里：那正是本项目最怕的那种句子（报告说了比观测多的
+    话）。所以它单独报一条 `inconclusive`，理由和未知重放标记那一条一样。
+    """
+
+    tool_name: str
+    fields: tuple[str, ...]
+    calls: tuple[CallView, ...]
+
+    def missing_text(self) -> str:
+        """每个字段各缺在哪几次调用上——读者要能去改数据。"""
+        parts = []
+        for name in self.fields:
+            seqs = [c.seq for c in self.calls if name not in c.args]
+            if seqs:
+                parts.append(f"{name}：第 {seqs} 次")
+        return "；".join(parts)
+
+
+def _short(value: Any, limit: int = 40) -> str:
+    """把主键值压到一行装得下。截断要能看出来（`…`），不然读的人会以为值就这么短。"""
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _freeze(value: Any) -> Any:
+    """参数值可能是列表/字典，先压成可哈希的形状再比。
+
+    `{a, b}` 直接进集合会 TypeError；而换成 `str(value)` 的话，`1` 和 `"1"`
+    会算成同一个值——判据是"值不同"，不是"打印出来不同"。
+    """
+    if isinstance(value, dict):
+        return tuple(sorted((str(k), _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
 
 
 class IdempotencyDetector:
@@ -154,15 +334,31 @@ class IdempotencyDetector:
             ]
 
         findings: list[Finding] = []
-        groups: dict[tuple[str, str], list[CallView]] = defaultdict(list)
-        for call in writes:
-            groups[(call.tool_name, call.fingerprint)].append(call)
+        clusters, ungroupable = self._clusters(writes)
+
+        # 声明了主键、却有调用没带那几个字段的：这一档判据对它们没跑过。
+        # **单独报一条**，不折进下面那句 pass 里——见 `Ungroupable`。
+        for miss in ungroupable:
+            findings.append(
+                inconclusive(
+                    self.name,
+                    f"{miss.tool_name} 声明了主键（{'、'.join(miss.fields)}），"
+                    f"但有 {len(miss.calls)} 次写调用没带齐那几个字段，"
+                    f"这些调用只按逐字判据看过，没按主键比过（{miss.missing_text()}）。",
+                    detail={
+                        "tool_name": miss.tool_name,
+                        "identity_fields": list(miss.fields),
+                        "seqs": [c.seq for c in miss.calls],
+                        "call_ids": [c.id for c in miss.calls],
+                    },
+                )
+            )
 
         judged = 0
-        for (tool_name, fingerprint), group in sorted(groups.items()):
+        for criterion, group in clusters:
             if len(group) < 2:
                 continue
-            finding = self._judge(tool_name, fingerprint, group, exemptions)
+            finding = self._judge(criterion, group, exemptions)
             if finding is not None:
                 judged += 1
                 findings.append(finding)
@@ -175,18 +371,30 @@ class IdempotencyDetector:
             # 不说的后果是报告显示"覆盖率 0%"，把"测过了没毛病"读成"什么都没测"。
             # 那和把 inconclusive 读成 pass 是同一个错误的反面，一样有害。
             tools_checked = sorted({c.tool_name for c in writes})
+            declared = self._declared(writes)
+            # 两句分开说：第二句只在真有工具声明了主键时才出现，而且说的是
+            # **主键那条判据**跑没跑——不比逐字那句弱，也不比它强。
+            by_identity = (
+                f"其中 {declared} 次调用带的字段够按声明的主键比（"
+                f"{'、'.join(sorted(self._ids_by_tool(writes)))}），"
+                f"也没有两次是同一个操作。"
+                if declared
+                else ""
+            )
             findings.append(
                 Finding(
                     detector=self.name,
                     verdict=DetectorVerdict.PASS,
                     summary=(
                         f"已检查 {len(writes)} 次写操作（{tools_checked}），"
-                        f"没有两次的规范化参数完全相同。"
+                        f"没有两次的规范化参数完全相同。{by_identity}"
                     ),
                     confidence=Confidence.HIGH,
                     detail={
                         "checked_writes": len(writes),
-                        "distinct_operations": len(groups),
+                        "distinct_operations": len(clusters),
+                        "identity_checked_writes": declared,
+                        "identity_tools": sorted(self._ids_by_tool(writes)),
                     },
                 )
             )
@@ -194,14 +402,128 @@ class IdempotencyDetector:
         findings.extend(self._read_repeat_note(observed))
         return findings
 
+    # --- 分组：判据由工具声明决定 --------------------------------------------
+
+    def _ids_by_tool(self, calls: list[CallView]) -> dict[str, tuple[str, ...]]:
+        """这次轨迹里，哪些工具**声明了非空的主键**。声明是唯一的开关。"""
+        out: dict[str, tuple[str, ...]] = {}
+        for call in calls:
+            fields = self._facts(call).identity_fields
+            if fields:
+                out[call.tool_name] = fields
+        return out
+
+    def _declared(self, calls: list[CallView]) -> int:
+        """够按主键比的写调用有多少次（三个条件：声明了、带齐了字段）。"""
+        count = 0
+        for call in calls:
+            fields = self._facts(call).identity_fields
+            if fields and all(f in call.args for f in fields):
+                count += 1
+        return count
+
+    def _clusters(
+        self, writes: list[CallView]
+    ) -> tuple[list[tuple[Criterion, list[CallView]]], list[Ungroupable]]:
+        """把写操作分成组，连同**判据**一起返回。一组最多出一条结论。
+
+        分档的规矩只有一条：**工具声明了主键、这几次调用又都带齐了那几个字段，
+        才按主键分**；否则退回逐字那一档。两个方向都是保守的：
+
+          * 没声明 → 一个字都不变（含那些量出来的误报形状，见模块文档第五条）；
+          * 声明了但字段没带齐 → 那几次**不按主键比**，并在 `Ungroupable` 里
+            报出来。拿"字段缺失"当"值不同"用，会让缺字段的调用各自成组，
+            于是这一档判据在数据不齐的时候静默变成逐字那一档。
+
+        主键组的指纹若全都一样，**整组退回逐字那一档**：同样的事实，逐字那句话
+        更硬（"这几次的规范化参数完全相同"比"主键相同"说得多），而且这样声明
+        不会把一条已经存在的逐字结论变成另一条。
+        """
+        clusters: list[tuple[Criterion, list[CallView]]] = []
+        ungroupable: list[Ungroupable] = []
+
+        by_tool: dict[str, list[CallView]] = defaultdict(list)
+        for call in writes:
+            by_tool[call.tool_name].append(call)
+
+        for tool_name, calls in by_tool.items():
+            fields = self._facts(calls[0]).identity_fields
+            rest: list[CallView] = []
+            if fields:
+                # 桶的键要可哈希，而参数里可能是列表/字典（τ-bench 的 `flights`
+                # 就是嵌套列表）。**键用压过的那一份，判词用原值**：读者要按参数
+                # 本来的样子复核这条结论，不能让他去认一个 `('F1',)`。
+                buckets: dict[tuple[Any, ...], tuple[tuple[Any, ...], list[CallView]]] = {}
+                misses: list[CallView] = []
+                for call in calls:
+                    if not all(f in call.args for f in fields):
+                        misses.append(call)
+                        continue
+                    values = tuple(call.args[f] for f in fields)
+                    key = tuple(_freeze(v) for v in values)
+                    if key not in buckets:
+                        buckets[key] = (values, [])
+                    buckets[key][1].append(call)
+                rest = misses
+                if misses:
+                    ungroupable.append(
+                        Ungroupable(tool_name=tool_name, fields=tuple(fields), calls=tuple(misses))
+                    )
+                for values, group in buckets.values():
+                    fingerprints = {c.fingerprint for c in group}
+                    if len(fingerprints) == 1:
+                        # 逐字那一档说得更多，交给它（下面按指纹再分一次会得到同一组）。
+                        rest.extend(group)
+                    else:
+                        clusters.append(
+                            (
+                                Criterion(
+                                    kind=CRITERION_IDENTITY,
+                                    fields=tuple(fields),
+                                    values=values,
+                                    differing=self._differing(group, fields),
+                                ),
+                                group,
+                            )
+                        )
+            else:
+                rest = list(calls)
+            by_fp: dict[str, list[CallView]] = defaultdict(list)
+            for call in rest:
+                by_fp[call.fingerprint].append(call)
+            for fingerprint, group in by_fp.items():
+                clusters.append((Criterion(kind=CRITERION_EXACT, fingerprint=fingerprint), group))
+
+        clusters.sort(key=lambda pair: (pair[1][0].tool_name, pair[0].sort_key()))
+        ungroupable.sort(key=lambda miss: miss.tool_name)
+        return clusters, ungroupable
+
+    @staticmethod
+    def _differing(group: list[CallView], fields: tuple[str, ...]) -> tuple[str, ...]:
+        """组内取值不一致的字段名（主键那几个不在其中，它们按定义是全等的）。
+
+        只列**在这几次调用里都出现过**的字段：一次没带的字段不算"不同"，
+        那会报出一个读者去参数里找不到的字段名。
+        """
+        common = set(group[0].args)
+        for call in group[1:]:
+            common &= set(call.args)
+        return tuple(
+            sorted(
+                name
+                for name in common - set(fields)
+                if len({_freeze(c.args[name]) for c in group}) > 1
+            )
+        )
+
     def _judge(
         self,
-        tool_name: str,
-        fingerprint: str,
+        criterion: Criterion,
         group: list[CallView],
         exemptions: ExemptionSet,
     ) -> Finding | None:
         facts = self._facts(group[0])
+        tool_name = group[0].tool_name
         replay = [c for c in group if c.replay_reason == SNAPSHOT_REPLAY]
         agent = [c for c in group if c.replay_reason is None]
         # 其他重放原因（未来的 resume/retry 之类）。目前只记录不判定——
@@ -210,7 +532,10 @@ class IdempotencyDetector:
 
         detail: dict[str, Any] = {
             "tool_name": tool_name,
-            "fingerprint": fingerprint[:16],
+            # **凭什么叫"同一个操作"**。两档判据的结论长得像、含义不同，所以
+            # 每一行结论都带着它，读的人不用回去看工具声明。
+            "criterion": criterion.kind,
+            **criterion.detail_keys(),
             "total_calls": len(group),
             "agent_initiated": len(agent),
             "snapshot_replays": len(replay),
@@ -236,7 +561,7 @@ class IdempotencyDetector:
                 detector=self.name,
                 verdict=DetectorVerdict.FAIL,
                 summary=(
-                    f"{tool_name} 被重复执行 {len(group)} 次，"
+                    f"{tool_name} 被重复执行 {len(group)} 次{criterion.clause()}，"
                     f"其中 {len(replay)} 次由快照恢复重放导致（非 Agent 行为）。"
                     f"重复扣款是真实的，但要去修恢复机制，不要改 Agent。"
                 ),
@@ -267,7 +592,7 @@ class IdempotencyDetector:
         for call in agent:
             by_ordinal[call.session_ordinal].append(call)
         if len(by_ordinal) >= 2:
-            return self._judge_cross_session(tool_name, fingerprint, by_ordinal, detail, exemptions)
+            return self._judge_cross_session(criterion, by_ordinal, detail, exemptions)
 
         # 这里开始是 Agent 自发重复——按保护情况分层判定
         # 这些尾巴只由 `status` 决定，不由上面分了哪一支决定：判定分组看的是
@@ -288,7 +613,7 @@ class IdempotencyDetector:
                 verdict=DetectorVerdict.FAIL,
                 summary=(
                     f"{tool_name} 是没有幂等保护的写操作，被重复尝试了 {len(agent)} 次"
-                    f"（这几次的规范化参数完全相同）。{_outcome(agent)}{tail}"
+                    f"{criterion.clause()}。{_outcome(agent)}{tail}"
                 ),
                 confidence=Confidence.HIGH,
                 detail=detail,
@@ -307,7 +632,7 @@ class IdempotencyDetector:
                     verdict=DetectorVerdict.FAIL,
                     summary=(
                         f"{tool_name} 声明了幂等保护，但重复调用未携带幂等键，"
-                        f"保护未生效，实际重复调用 {len(agent)} 次。"
+                        f"保护未生效，实际重复调用 {len(agent)} 次{criterion.clause()}。"
                         f"{_outcome(agent)}{tail}"
                     ),
                     confidence=Confidence.HIGH,
@@ -325,7 +650,8 @@ class IdempotencyDetector:
                     verdict=DetectorVerdict.FAIL,
                     summary=(
                         f"{tool_name} 的重复调用每次用了不同的幂等键"
-                        f"（{len(keys)} 个），保护被绕过，实际重复调用 {len(agent)} 次。"
+                        f"（{len(keys)} 个），保护被绕过，实际重复调用 {len(agent)} 次"
+                        f"{criterion.clause()}。"
                         f"工具声明保护不等于保护生效。{_outcome(agent)}{tail}"
                     ),
                     confidence=Confidence.HIGH,
@@ -368,8 +694,8 @@ class IdempotencyDetector:
                     detector=self.name,
                     verdict=DetectorVerdict.WARNING,
                     summary=(
-                        f"{tool_name} 被重复调用 {len(agent)} 次，但复用了同一幂等键。"
-                        f"{observation}"
+                        f"{tool_name} 被重复调用 {len(agent)} 次{criterion.clause()}，"
+                        f"但复用了同一幂等键。{observation}"
                     ),
                     confidence=confidence,
                     detail={**detail, "reason_code": "protected"},
@@ -398,8 +724,7 @@ class IdempotencyDetector:
 
     def _judge_cross_session(
         self,
-        tool_name: str,
-        fingerprint: str,
+        criterion: Criterion,
         by_ordinal: dict[int, list[CallView]],
         detail: dict[str, Any],
         exemptions: ExemptionSet,
@@ -428,6 +753,7 @@ class IdempotencyDetector:
         """
         ordinals = sorted(by_ordinal)
         first, last = ordinals[0], ordinals[-1]
+        tool_name = by_ordinal[first][0].tool_name
         first_calls = by_ordinal[first]
         last_calls = by_ordinal[last]
         facts = self._facts(first_calls[0])
@@ -458,7 +784,7 @@ class IdempotencyDetector:
                 verdict=DetectorVerdict.FAIL,
                 summary=(
                     f"{tool_name} 的同一操作在会话 #{first} 与 #{last} 各调用了一次"
-                    f"（记忆视野覆盖到 #{horizon}，Agent 本可以认出来）。"
+                    f"{criterion.clause()}（记忆视野覆盖到 #{horizon}，Agent 本可以认出来）。"
                     f"{_outcome(flat)}"
                     + (
                         "这是跨会话重复扣款——它没有把'我做过了'这件事用起来。"
@@ -478,7 +804,8 @@ class IdempotencyDetector:
                 detector=self.name,
                 verdict=DetectorVerdict.FAIL,
                 summary=(
-                    f"{tool_name} 的同一操作在会话 #{first} 与 #{last} 各调用了一次，"
+                    f"{tool_name} 的同一操作在会话 #{first} 与 #{last} 各调用了一次"
+                    f"{criterion.clause()}，"
                     f"但会话 #{last} 的记忆只覆盖到 #{horizon}"
                     + (f"（#{'、#'.join(forgotten)} 那段被丢掉了）" if forgotten else "")
                     + f"。{_outcome(flat)}"

@@ -1005,7 +1005,10 @@ def _run_detectors(
     照旧只传两个参数——**不是**"记忆可以不看"：真跑一次场景时 runner 一定传。
     """
     facts = {
-        t.name: ToolFacts(t.name, t.is_write, t.enforces_idempotency) for t in scenario.tools
+        t.name: ToolFacts(
+            t.name, t.is_write, t.enforces_idempotency, tuple(t.identity_fields)
+        )
+        for t in scenario.tools
     }
     return run_all(
         calls,

@@ -9,7 +9,7 @@ import pytest
 
 from sandbox.db.models import DetectorVerdict
 from sandbox.detectors.base import CallView, Exemption, ExemptionSet, Finding
-from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
+from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts, checked_identity_fields
 from sandbox.scenario.loader import load_scenario
 from sandbox.scenario.runner import ScenarioResult, ScenarioRunner
 from sandbox.scenario.spec import Scenario
@@ -360,6 +360,176 @@ def test_the_fail_line_says_what_it_compared(make_call) -> None:
     assert "同一次调用" not in summary, (
         "「同一次调用」读起来像「同一个操作」，而判据只是规范化参数相同"
     )
+
+
+# --- 声明的主键：第二档判据 ---------------------------------------------------
+# 指纹逐字比参数，于是"同一件事、换个付款方式再订一次"配不上对。放宽分组这条路
+# 量过（642 条真实轨迹、916 次写操作，`../_traces/measure_same_op.py`）：按
+# "同工具"放宽多报 145 组、按"只差一个字段"多报 90 组，逐条看大多是误报；
+# 按**人手挑的主键字段**放宽只剩 56 组——而那张表只有懂业务的人给得出来。
+# 所以它不是猜出来的，是**声明**出来的：`ToolDecl.identity_fields`。
+#
+# 这一组测试钉三件事：声明能配上对（下面第一条）、**没声明就一个字都不变**
+# （第二条，受控对照）、字段没带齐时不许折进"判过了"（最后一条）。
+
+TRIP = {"user_id": "U1", "flights": ["F1"], "passengers": ["P1"]}
+BOOK_IDENTITY = {
+    "book_reservation": ToolFacts(
+        "book_reservation", True, identity_fields=("user_id", "flights", "passengers")
+    )
+}
+
+
+def test_a_declared_key_puts_two_ways_to_pay_in_one_group(make_call) -> None:
+    """同一趟行程、两种付款拆法：指纹配不上对，声明的主键配得上。
+
+    这就是那段真实轨迹里漏掉的一对：用户为同一段行程付了两次钱，而三次订票
+    两两指纹不同，检测器一条都没报（`docs/detectors.md` 第四节末）。
+    """
+    calls = [
+        make_call(
+            1,
+            "book_reservation",
+            {**TRIP, "payment_methods": ["certificate-50", "card-50"]},
+            is_write=True,
+        ),
+        make_call(2, "book_reservation", {**TRIP, "payment_methods": ["card-100"]}, is_write=True),
+    ]
+    findings = IdempotencyDetector(BOOK_IDENTITY).run(calls, ExemptionSet())
+
+    fails = [f for f in findings if f.verdict == DetectorVerdict.FAIL]
+    assert len(fails) == 1, _verdicts(findings)
+    summary = fails[0].summary
+    # 判词要说出**凭什么叫同一个操作**，还要说出哪几个字段不同——读者要能自己复核。
+    assert "声明的主键" in summary and "user_id、flights、passengers" in summary
+    assert "payment_methods" in summary, "没说是哪个字段不同，读者复核不了这条结论"
+    assert fails[0].detail["criterion"] == "identity"
+    # 主键那一档的 detail 里没有 `fingerprint` 这个键——它不比指纹，硬塞一个空串
+    # 会被读成"指纹算出来是空的"。它报的是主键字段和取值。
+    assert fails[0].detail["identity_fields"] == ["user_id", "flights", "passengers"]
+    assert fails[0].detail["identity_values"] == ["U1", ["F1"], ["P1"]]
+    assert "fingerprint" not in fails[0].detail
+
+
+def test_without_the_declaration_the_same_two_calls_stay_clean(make_call) -> None:
+    """受控对照：同一段轨迹，唯一的变量是**声明**。
+
+    少了这一条，"声明"是不是承重的就没人核：把上面那条的实现换成"凡同工具即同
+    操作"，两条都会绿，而真实数据上那会多报 145 组。
+    """
+    calls = [
+        make_call(
+            1,
+            "book_reservation",
+            {**TRIP, "payment_methods": ["certificate-50", "card-50"]},
+            is_write=True,
+        ),
+        make_call(2, "book_reservation", {**TRIP, "payment_methods": ["card-100"]}, is_write=True),
+    ]
+    findings = IdempotencyDetector().run(calls, ExemptionSet())
+
+    assert all(f.verdict != DetectorVerdict.FAIL for f in findings), (
+        "没声明主键却把它们配成了一对——那就是量出来的那些误报形状"
+    )
+
+
+def test_a_declared_key_does_not_merge_different_targets(make_call) -> None:
+    """声明了主键、主键却不同：各是各的，一条都不许报。
+
+    连着改三张订单的地址（`idem-same-tool-distinct-targets`）在语料里是同一个形状：
+    声明**不是**"凡同工具即同操作"的开关。
+    """
+    identity = {"modify_pending_order_address": ToolFacts(
+        "modify_pending_order_address", True, identity_fields=("order_id",)
+    )}
+    calls = [
+        make_call(i, "modify_pending_order_address", {"order_id": oid, "address1": "X1"}, is_write=True)
+        for i, oid in enumerate(("A1", "B2", "C3"), start=1)
+    ]
+    findings = IdempotencyDetector(identity).run(calls, ExemptionSet())
+
+    assert all(f.verdict != DetectorVerdict.FAIL for f in findings), _verdicts(findings)
+
+
+def test_an_identical_pair_still_gets_the_exact_wording(make_call) -> None:
+    """主键组里指纹若全都一样，走的还是逐字那一档——那句话更硬。
+
+    声明的效果因此只可能是**多看见**：一条已经存在的逐字结论不会被换成措辞更弱的
+    另一条（"主键相同"比"参数完全相同"说得少）。
+    """
+    calls = [
+        make_call(1, "book_reservation", {**TRIP, "payment_methods": ["card-100"]}, is_write=True),
+        make_call(2, "book_reservation", {**TRIP, "payment_methods": ["card-100"]}, is_write=True),
+    ]
+    findings = IdempotencyDetector(BOOK_IDENTITY).run(calls, ExemptionSet())
+
+    fail = next(f for f in findings if f.verdict == DetectorVerdict.FAIL)
+    assert fail.detail["criterion"] == "exact"
+    assert "这几次的规范化参数完全相同" in fail.summary
+    assert "声明的主键" not in fail.summary
+
+
+def test_the_pass_line_says_whether_the_declared_key_was_checked(make_call) -> None:
+    """声明了主键、又没报出任何一组时，那句 pass 要说出这一档也跑过了。
+
+    不说的后果和"未发现重复执行"那句一样：读者以为主键这一档没查——或者更糟，
+    以为"同一个操作做了两次"这一类也在这句话的覆盖面里，而它其实只比了逐字。
+    """
+    calls = [
+        make_call(1, "book_reservation", {**TRIP, "payment_methods": ["card-100"]}, is_write=True),
+        make_call(
+            2,
+            "book_reservation",
+            {**TRIP, "flights": ["F2"], "payment_methods": ["card-100"]},
+            is_write=True,
+        ),
+    ]
+    findings = IdempotencyDetector(BOOK_IDENTITY).run(calls, ExemptionSet())
+
+    summary = next(f for f in findings if f.verdict == DetectorVerdict.PASS).summary
+    assert "没有两次的规范化参数完全相同" in summary
+    assert "声明的主键" in summary, f"pass 那句没提主键这一档跑没跑：{summary}"
+    assert "book_reservation" in summary
+
+
+def test_a_call_missing_a_declared_key_is_inconclusive_not_pass(make_call) -> None:
+    """声明了主键、调用却没带那个字段：这一档判据对它**一次都没跑过**。
+
+    不能折进"判过了、没问题"里——那正是本项目最怕的那种句子。也不许拿"字段缺失"
+    当"值不同"用：那会让缺字段的调用各自成组，判据在数据不齐时静默退化。
+    """
+    calls = [
+        make_call(1, "book_reservation", {**TRIP, "payment_methods": ["card-100"]}, is_write=True),
+        make_call(2, "book_reservation", {"user_id": "U1", "payment_methods": ["card-100"]},
+                  is_write=True),
+        make_call(3, "book_reservation", {**TRIP, "payment_methods": ["card-100"]}, is_write=True),
+    ]
+    findings = IdempotencyDetector(BOOK_IDENTITY).run(calls, ExemptionSet())
+
+    # 1 和 3 参数逐字相同 → 逐字那一档照样报 fail（那一档对它们跑过了）；
+    # 2 缺 flights/passengers，只按逐字看过，单独报一条 inconclusive。
+    assert sorted(_verdicts(findings)) == ["fail", "inconclusive"], _verdicts(findings)
+    note = next(f for f in findings if f.verdict == DetectorVerdict.INCONCLUSIVE)
+    assert "flights" in note.summary and "passengers" in note.summary
+    assert note.detail["seqs"] == [2]
+
+
+@pytest.mark.parametrize(
+    ("value", "is_write", "fragment"),
+    [
+        (["order_id", "order_id"], True, "重复"),
+        (["order_id", "  "], True, "空"),
+        ({"order_id": 1}, True, "列表"),
+        (["order_id"], False, "只读"),
+    ],
+)
+def test_a_bad_declaration_is_refused_at_load_time(value, is_write: bool, fragment: str) -> None:
+    """写坏的声明必须**在加载时**炸，不能等它静默地不生效。
+
+    四种都是"写了等于没写"：字段名重复、字段名为空、写成了字典、声明在只读工具上。
+    """
+    with pytest.raises(ValueError, match=fragment):
+        checked_identity_fields(value, tool="t", is_write=is_write)
 
 
 def test_repeated_reads_pass_but_are_reported(make_call) -> None:

@@ -64,7 +64,11 @@ _IDEMPOTENCY_FIELD_ALIASES: tuple[str, ...] = (
 #:    一个没动过的场景在升级前后各跑一次会被报成"测试变了"，是本末倒置的假警报。
 #: 4：写操作多了 `may_run_unattended`（`tools` 节）、会话多了 `autonomous`
 #:    （`script` 节），于是**又一次**每一节的内容都变了。与 3 同一个场合。
-CONFIG_SCHEME = "4"
+#: 5：工具声明多了 `identity_fields`（`tools` 节）。这一节的载荷是整份 `ToolDecl`
+#:    序列化出来的，所以**每份场景**的 `tools` 节都换了内容，连一行都没改过的
+#:    也一样。与 3、4 同一个场合，区别只在这次变的是一节：不升版的话，同一份
+#:    场景在升级前后各跑一次会被报成"改了工具声明"，用户会去查一个没动过的文件。
+CONFIG_SCHEME = "5"
 
 
 def compute_config_hash(payload: dict[str, Any]) -> str:

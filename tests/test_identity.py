@@ -354,5 +354,7 @@ def test_the_scheme_version_is_recorded() -> None:
     签字同意的动作，而不是一次顺手的重构。3 → 4 的场合是 `ToolDecl` 多了
     `may_run_unattended`、`SessionSpec` 多了 `autonomous`——两节的内容都变了，
     于是没动过的场景也会换哈希。不升版的话，那种不相等会被读成"测试改了"。
+    4 → 5 是同一件事的小一号：`ToolDecl` 多了 `identity_fields`，`tools` 这一节
+    的载荷（整份 `ToolDecl`）于是换了内容，一份没改过的场景也会换哈希。
     """
-    assert CONFIG_SCHEME == "4"
+    assert CONFIG_SCHEME == "5"

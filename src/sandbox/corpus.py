@@ -50,7 +50,7 @@ from sandbox.detectors.base import (
     ExemptionSet,
     Finding,
 )
-from sandbox.detectors.idempotency import ToolFacts
+from sandbox.detectors.idempotency import ToolFacts, checked_identity_fields
 from sandbox.detectors.memory import ForbiddenText, MemoryRules, MustHold
 from sandbox.memory.observe import PHASE_END, PHASE_START, MemoryEntry, MemoryObservation
 from sandbox.scenario.expect import match_expectations
@@ -92,7 +92,7 @@ _CALL_KEYS = {
     "idempotency_key",
 }
 _SESSION_KEYS = {"ordinal", "name", "autonomous", "memory_horizon"}
-_TOOL_KEYS = {"is_write", "enforces_idempotency", "may_run_unattended"}
+_TOOL_KEYS = {"is_write", "enforces_idempotency", "may_run_unattended", "identity_fields"}
 
 #: 语料里记忆判据能写的键。前两组和场景 YAML 那边是**同一组**（`MustHoldDecl` /
 #: `ForbiddenTextDecl` 的字段），有测试钉着两边不许漂移。
@@ -420,6 +420,12 @@ def _parse_tools(raw: Any, path: str) -> dict[str, ToolFacts]:
             name=name,
             is_write=bool(decl["is_write"]),
             enforces_idempotency=bool(decl.get("enforces_idempotency", False)),
+            # 规则与场景 YAML 是同一份（`checked_identity_fields`）：语料要能
+            # 复现"声明了主键"的场景形状，两处收的东西不一样的话，语料上量出来的
+            # 精度就是关于另一套声明说的。
+            identity_fields=checked_identity_fields(
+                decl.get("identity_fields"), tool=name, is_write=bool(decl["is_write"])
+            ),
         )
     return tools
 
