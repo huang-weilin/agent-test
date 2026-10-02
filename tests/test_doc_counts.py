@@ -55,10 +55,33 @@ README 里那两处测试计数原先**没有东西在核**（同一种毛病：
 数出来的"原先写死在函数里，对另外两条路（`--collect-only`、这张 JSON）都是假话。
 现在出处由调用方传进来——**报错正是在人最需要指路的时候出现的东西**，指错路比不指路贵。
 
+## 检测器名字的个数也接上了（第四个真值来源，2026-10-03）
+
+"一共有几个检测器名、其中几个会去查豁免"，原先**四个文件里写了十二处**，一个都没在核。
+往 `KNOWN_DETECTORS` 里加一个名字，分类那条测试会拦住（新名字必须落进三档之一），
+但那十二句话不会——它们和真话长得一模一样，直到有人照着一句旧话去写规则。
+
+真值是**现算的**：`KNOWN_DETECTORS` 减去 `EXEMPTION_AWARE`、`NOT_EXEMPTIBLE`，
+差就是"不查豁免的"。所以只有两边真的对不上时它才会红。
+
+**名单和个数是两件事，两条都核。** 只核个数的话，把某份逐字名单里删掉一个名字
+（或者改个拼写），数字照样对得上；而"这份名单少了谁"正是写规则的人判断"我这条
+会不会命中"的依据。名单比的是**集合**，见 `_names_in`：它连族名都是现算的。
+
+不在闸门里的：`六种"装上了但没接线"的写法` 那句数的是**错误种类**，不是检测器名，
+而它没有能现算的真值（那六条散在六处 `raise` 里）。与其凑一个数出来装样子，
+不如写清楚它没被核。
+
+顺带量到一个坑：`.py` 里的注释每行开头都有 `#: `，一句跨行的注释压完空白之后
+中间夹着标记，模板**永远配不上**——而报错会把人支去"文档里找不到这句"。所以读
+`.py` 时先摘标记，见 `_read`。
+
 ## 量它会咬的是哪只探针
 
-`../_probes/probe_doc_counts.py`：九条方向（正文条数、标定表格子、那张表的数字 /
-`how` / `why`，外加一条**绿灯对照**——改一句不带数字的话必须还是绿的）。
+`../_probes/probe_doc_counts.py`：十四条方向（正文条数、标定表格子、那张表的数字 /
+`how` / `why`、检测器名字的个数与名单，外加一条**绿灯对照**——改一句不带数字的
+话必须还是绿的）。其中只在检测器名字那一组里有一条**反方向**的：往代码里加一个
+名字、文档不动，也必须红——因为那一组的真值在代码这边。
 
 2026-10-03 补上这条指针的时候，那只探针已经**烂了两轮**：它住在仓库外，仓库里
 没有任何一处引它，而它的锚点是**文档里的原句**——语料从 49 条长到 55 条之后，
@@ -78,6 +101,8 @@ from pathlib import Path
 import yaml
 
 from sandbox.corpus import FAMILIES, evaluate_all, load_corpus, score
+from sandbox.detectors import KNOWN_DETECTORS
+from sandbox.detectors.base import EXEMPTION_AWARE, NOT_EXEMPTIBLE
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "tests" / "corpus"
@@ -118,6 +143,24 @@ def _source_distribution() -> dict[str, int]:
     return {name: sum(1 for item in items if item.source == name) for name in SOURCES}
 
 
+#: `.py` 里行首的注释标记（`#: ` 或 `# `）。
+_COMMENT = re.compile(r"(?m)^[ \t]*#:?[ \t]?")
+
+
+def _read(where: str) -> str:
+    """读一份文档或源码，压掉空白。`.py` 的行首注释标记也摘掉。
+
+    注释是给人读的散文，和文档里那句话是同一件事。但 `#: ` 会插在每一行行首，
+    一句跨行的注释压完空白之后中间还夹着 `#:`，模板就永远配不上——而配不上时
+    `_check` 报的是"文档里找不到这句"，**把人支到文档那边去，实际问题在这儿**。
+    所以读 `.py` 的时候先把注释标记摘掉；`.py` 之外的文件，一个字节都不动。
+    """
+    text = (ROOT / where).read_text(encoding="utf-8")
+    if where.endswith(".py"):
+        text = _COMMENT.sub("", text)
+    return _flat(text)
+
+
 def _check(where: str, template: str, values: dict[str, int], truth: str) -> str:
     """模板必须在那个文件里（压掉空白后）出现，且把数字代进去之后恰好命中一次。
 
@@ -131,7 +174,7 @@ def _check(where: str, template: str, values: dict[str, int], truth: str) -> str
         filled = template.format(**values)
     except KeyError as exc:
         return f"{where}：模板用了一个没数出来的占位符 {exc}（模板写错了，不是文档写错了）"
-    text = _flat((ROOT / where).read_text(encoding="utf-8"))
+    text = _read(where)
     hits = text.count(_flat(filled))
     if hits == 1:
         return ""
@@ -424,17 +467,165 @@ def _pct(value: float | None) -> str:
     return "—" if value is None else f"{value * 100:.1f}%"
 
 
-def test_the_guard_is_not_vacuous() -> None:
-    """闸门自己也要有相机：句子数和族数都不能塌。
+# --- 检测器名字的个数：真值从三张表现算（第四个真值来源） ---------------------
 
-    上面两条的判据都是"没找到不一致"，而**一个什么都没扫到的检查**同样没找到
-    不一致——两句报错都是空的，看起来一模一样。所以把规模钉住。
+
+def _detector_counts() -> dict[str, int]:
+    """从代码数出来：名字总数、查豁免的、不吃豁免的、不查豁免的。**不读文档**。
+
+    「不查」是**减出来的**：全集减去另外两张表。不该另抄一份——抄的那份和减出来的
+    那份长得一模一样，直到有人往 `KNOWN_DETECTORS` 里加了个名字而忘了分类。
+    那种情况下 `tests/test_scenario_exemptions.py` 会红（三档没盖住全集），这里
+    也跟着红：多出来的名字会让「不查」变成 7，而文档里写着 6。
+    """
+    names = len(KNOWN_DETECTORS)
+    aware = len(EXEMPTION_AWARE)
+    memory = len(NOT_EXEMPTIBLE)
+    return {
+        "名字": names,
+        "查豁免": aware,
+        "不吃豁免": memory,
+        "不查": names - aware - memory,
+    }
+
+
+def _unaware_names() -> set[str]:
+    """不查豁免的那些名字——同一个减法，只是留下名字本身。"""
+    return set(KNOWN_DETECTORS) - set(EXEMPTION_AWARE) - set(NOT_EXEMPTIBLE)
+
+
+def build_detector_places(values: dict[str, int]) -> list[tuple[str, str]]:
+    """讲"一共有几个名字、其中几个会去查豁免"的那些原话。**四个文件里一共十二处。**
+
+    `src/sandbox/detectors/base.py` 那两处是注释和 docstring，不是给人读的闲话：
+    写规则的人正是照它判断"我这条会不会命中"。
+    """
+    return [
+        (
+            "README.md",
+            "{名字} 个检测器名里只有 {查豁免} 个会去查豁免，另外 {不查} 条路上没有那一步，"
+            "记忆那 {不吃豁免} 族是另一种情况",
+        ),
+        ("docs/detectors.md", "{名字} 个名字里，会去找豁免的只有 {查豁免} 个。"),
+        (
+            "docs/detectors.md",
+            "`detector` 只认 {名字} 个名字，其中会去找豁免的只有 {查豁免} 个，见下表",
+        ),
+        ("docs/detectors.md", "{名字} 个名字每一个都得落在上面三档里的一档"),
+        ("docs/detectors.md", "写在记忆那 {不吃豁免} 族上"),
+        ("docs/scenarios.md", "{名字} 个名字里只有 {查豁免} 个会去找豁免）**让加载失败**"),
+        (
+            "docs/scenarios.md",
+            "（{名字} 个名字里只有 {查豁免} 个会去找豁免）。六种都让规则变成一条",
+        ),
+        (
+            "src/sandbox/detectors/base.py",
+            "`KNOWN_DETECTORS` 里有 {名字} 个名字，**查豁免的就是下面这 {查豁免} 个**"
+            "（这张表的键）。另外 {不查} 个——",
+        ),
+        ("src/sandbox/detectors/base.py", "另有 {不查} 条路（"),
+        ("src/sandbox/detectors/base.py", "剩下的记忆 {不吃豁免} 族是"),
+        ("src/sandbox/detectors/base.py", "记忆那 {不吃豁免} 族写在 `NOT_EXEMPTIBLE` 里"),
+        ("src/sandbox/detectors/base.py", '那 {不查} 条是"收了也不会有人看"。但给写规则的人的后果'),
+    ]
+
+
+def test_the_detector_name_counts_in_docs_are_computed() -> None:
+    """四个文件里写下的"几个名字、几个查豁免"，等于从那三张表数出来的。"""
+    values = _detector_counts()
+    truth = "是从 KNOWN_DETECTORS / EXEMPTION_AWARE / NOT_EXEMPTIBLE 数出来的"
+    problems = [
+        msg
+        for where, tpl in build_detector_places(values)
+        if (msg := _check(where, tpl, values, truth))
+    ]
+    assert not problems, "文档里的检测器名字个数和代码对不上：\n  " + "\n  ".join(problems)
+
+
+#: 从一段话里抠出反引号包着的名字。
+_BACKTICKED = re.compile(r"`([a-z_]+(?:\.[a-z_]+)*)`")
+
+
+def _names_in(where: str, anchor: str, families: set[str]) -> set[str]:
+    """按 `anchor` 在文件里找到那段话，抠出其中的检测器名。
+
+    认族的方式是看第一个点前面那截（`loop.strict` 属于 `loop` 族），**族名从
+    `KNOWN_DETECTORS` 现算**——手写一份族名就是又开了一张会和真值漂移的表。
+    锚点找不到就报错：**一段没量到的名单和一段核对过的名单长得一模一样**。
+    """
+    text = _read(where)
+    match = re.search(_flat(anchor), text)
+    assert match, (
+        f"{where} 里找不到这句（名单的锚点过期了）：{anchor}\n"
+        f"    改了文案就把本文件里的锚点一起改掉——别去查闸门，它没坏。"
+    )
+    return {
+        name for name in _BACKTICKED.findall(match.group(1)) if name.split(".")[0] in families
+    }
+
+
+def test_the_name_lists_in_docs_match_the_code() -> None:
+    """逐字点名的那三份名单，和代码里的集合**一个不多、一个不少**。
+
+    个数和名单是两件事：把名单里删掉一个名字，个数那句照样绿。而"这份名单少了谁"
+    正是写规则的人判断"我这条会不会命中"的依据——名单里短一个，他多半就以为那个
+    检测器不查豁免。往 `KNOWN_DETECTORS` 里加名字的人会被分类那条测试拦住，但
+    文档里还躺着一份逐字名单这件事，没有人会提醒他。
+    """
+    families = {name.split(".")[0] for name in KNOWN_DETECTORS}
+    unaware = _unaware_names()
+    checks = [
+        (
+            "docs/detectors.md",
+            r"只认 `sandbox\.detectors\.KNOWN_DETECTORS` 里的 \d+ 个名字（(.*?)）。"
+            r"`match` 只认两个键",
+            set(KNOWN_DETECTORS),
+            "全集",
+        ),
+        ("src/sandbox/detectors/base.py", r"另外 \d+ 个——(.*?)——那几条路上", unaware, "不查豁免的"),
+        (
+            "src/sandbox/detectors/base.py",
+            r"另有 \d+ 条路（(.*?)）压根没有查豁免那一步",
+            unaware,
+            "不查豁免的",
+        ),
+    ]
+    problems = []
+    for where, anchor, want, label in checks:
+        got = _names_in(where, anchor, families)
+        if got != want:
+            problems.append(
+                f"  {where}（{label}）：名单里少了 {sorted(want - got)}、"
+                f"多了 {sorted(got - want)}"
+            )
+    assert not problems, "文档里点名的检测器名单和代码里的集合对不上：\n" + "\n".join(problems)
+
+
+def test_the_guard_is_not_vacuous() -> None:
+    """闸门自己也要有相机：句子数、文件数、族数、检测器三档的规模都不能塌。
+
+    上面几条的判据都是"没找到不一致"，而**一个什么都没扫到的检查**同样没找到
+    不一致——两边的报错都是空的，看起来一模一样。所以把规模钉住。
     """
     values = {**_counts(), **_source_distribution()}
-    places = build_places(values) + build_is_write_places(_is_write_tally())
-    assert len(places) >= 10, f"只盯了 {len(places)} 处，闸门八成被改窄了"
-    files = {where for where, _ in places}
-    assert files == {"README.md", "docs/detectors.md", "tests/corpus/README.md"}, (
-        f"盯的文件变成了 {sorted(files)}"
+    places = (
+        build_places(values)
+        + build_is_write_places(_is_write_tally())
+        + build_detector_places(_detector_counts())
     )
+    assert len(places) >= 20, f"只盯了 {len(places)} 处，闸门八成被改窄了"
+    files = {where for where, _ in places}
+    assert files == {
+        "README.md",
+        "docs/detectors.md",
+        "docs/scenarios.md",
+        "src/sandbox/detectors/base.py",
+        "tests/corpus/README.md",
+    }, f"盯的文件变成了 {sorted(files)}"
     assert values["总"] >= 40, f"数出来的语料只有 {values['总']} 条，八成没读到文件"
+
+    counts = _detector_counts()
+    # 三档里任何一档塌成 0，"个数"那条就有一半变成了空比对——空比对是绿的。
+    assert min(counts.values()) >= 1, f"检测器三档里有一档是空的：{counts}"
+    assert counts["名字"] >= 10, f"只数到 {counts['名字']} 个检测器名，八成没读到表"
+    assert counts["名字"] == counts["查豁免"] + counts["不吃豁免"] + counts["不查"], counts

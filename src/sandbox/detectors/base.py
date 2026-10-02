@@ -123,7 +123,7 @@ KNOWN_MATCH_KEYS: frozenset[str] = frozenset({"arg_differs_on", "tool_has_idempo
 #: **不在表里的检测器，规则写上去永远不会命中。** `KNOWN_DETECTORS` 里有 15 个
 #: 名字，**查豁免的就是下面这 6 个**（这张表的键）。另外 6 个——`loop`、`loop.retry`、
 #: `loop.cross_session`、`loop.snapshot_replay`、`loop.unknown_replay`、
-#: `idempotency.read_repeats`——那几条路上压根没有查豁免那一步；剩下的记忆三族是
+#: `idempotency.read_repeats`——那几条路上压根没有查豁免那一步；剩下的记忆 3 族是
 #: 另一回事，见 `NOT_EXEMPTIBLE`。不查就不收——收下一条永远不会命中的规则，等于让
 #: 写的人以为自己处理过了。
 #:
@@ -252,10 +252,10 @@ class Exemption:
     **两个键都不是哪儿都能用的**：只有当场知道那件事的检测器才答得了它，见
     `EXEMPTION_AWARE`。写到答不了的检测器上是加载期错误。
 
-    而且，**不是每个检测器都会去查豁免**。记忆那三族写在 `NOT_EXEMPTIBLE` 里，
-    另有六条路（`loop`、`loop.retry`、`loop.cross_session`、`loop.snapshot_replay`、
+    而且，**不是每个检测器都会去查豁免**。记忆那 3 族写在 `NOT_EXEMPTIBLE` 里，
+    另有 6 条路（`loop`、`loop.retry`、`loop.cross_session`、`loop.snapshot_replay`、
     `loop.unknown_replay`、`idempotency.read_repeats`）压根没有查豁免那一步。
-    两边都拒，理由不同：记忆族是"本就有另一套例外机制，别叠两个开关"，那六条是
+    两边都拒，理由不同：记忆族是"本就有另一套例外机制，别叠两个开关"，那 6 条是
     "收了也不会有人看"。但给写规则的人的后果是同一种——规则看起来在，实际不按
     他以为的走。
     """
