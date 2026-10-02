@@ -320,6 +320,48 @@ def test_different_orders_are_not_duplicates(make_call) -> None:
     assert all(f.verdict != DetectorVerdict.FAIL for f in findings)
 
 
+def test_the_pass_line_says_what_it_compared(make_call) -> None:
+    """汇总那句 pass 必须说出判据，不许说成「未发现重复执行」。
+
+    判据是**规范化后参数完全相同**——需求文档实现篇指定的就是这一条
+    （`工具调用指纹（工具名 + 参数哈希）去重`），不是"同一件事做了两次"。
+
+    这一对调用正是那个缝：**两个不同订单**，检测器无从知道它们是不是同一件事，
+    它只比得了参数。原先的措辞让读者以为后者也查过了。实测那段真实轨迹里
+    同一趟行程被订了三次、两张活票、付了两次钱，报告一个字都没提
+    （`docs/detectors.md` 第四节末）。
+    """
+    calls = [
+        make_call(1, "create_payment", {"order_id": "A1", "amount": 599}, is_write=True),
+        make_call(2, "create_payment", {"order_id": "B2", "amount": 599}, is_write=True),
+    ]
+    findings = IdempotencyDetector(UNPROTECTED).run(calls, ExemptionSet())
+    summary = next(
+        f for f in findings if f.verdict == DetectorVerdict.PASS and f.detector == "idempotency"
+    ).summary
+
+    assert "没有两次的规范化参数完全相同" in summary
+    assert "未发现重复执行" not in summary, (
+        "这句话比观测多：它比的是规范化参数，"
+        "「同一件事、另一种拆法」它看不见——而读者会以为那一类也查过了"
+    )
+
+
+def test_the_fail_line_says_what_it_compared(make_call) -> None:
+    """报 fail 的那句同样要说清是哪几次——「同一次调用」是个含糊的说法。"""
+    calls = [
+        make_call(1, "create_payment", PAY, is_write=True),
+        make_call(2, "create_payment", PAY, is_write=True),
+    ]
+    findings = IdempotencyDetector(UNPROTECTED).run(calls, ExemptionSet())
+    summary = next(f for f in findings if f.verdict == DetectorVerdict.FAIL).summary
+
+    assert "这几次的规范化参数完全相同" in summary
+    assert "同一次调用" not in summary, (
+        "「同一次调用」读起来像「同一个操作」，而判据只是规范化参数相同"
+    )
+
+
 def test_repeated_reads_pass_but_are_reported(make_call) -> None:
     """读操作重复不告警，但要出现在报告里——它计入成本。"""
     calls = [make_call(i, "get_order", {"order_id": "A1"}) for i in range(1, 5)]

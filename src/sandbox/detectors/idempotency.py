@@ -39,6 +39,22 @@ Agent 订票，周三再次要求时，Agent 没有识别出这是重复操作"�
 本应认出来。所以判据是"重复发生时那件事在不在它的记忆里"，而记忆视野是我们
 拍快照时定位的，不是推测的。在记忆里 → Agent 的锅；不在 → 恢复/记忆传递的锅。
 两种情况都报 fail，因为钱确实扣了两次；区别在 summary 里说该去修哪儿。
+
+**五、判据是"规范化后参数完全相同"，话就得这么说。** 分组键是 `(工具名, 指纹)`，
+而指纹逐字比参数——于是"同一件事、换个付款方式再订一次"永远配不上对，一条都不报。
+这**不是实现疏漏，是需求文档指定的判据**（实现篇那张表：
+`幂等检测 | 工具调用指纹（工具名 + 参数哈希）去重`）。但报告原先写"未发现重复执行"，
+**那句话在读者的意思里盖住了它没看的东西**——量到的实例：一段真实轨迹里同一趟行程
+被订了三次、两张活票、付了两次钱，报告一个字都没提（`docs/detectors.md` 第四节末）。
+
+现在两句都带上判据本身（"没有两次的规范化参数完全相同"）。适用范围写在那篇文档里，
+**不往每一行结论里塞**——报告的一行装不下边界讨论，这是第九节定下的规矩。
+
+放宽分组这条路量过了（`../_traces/measure_same_op.py`，642 条真实轨迹、916 次写操作）：
+按"同工具"分多出 145 组、按"只差一个字段"多出 90 组，逐条看**大多是误报**
+（改的是不同订单、不同用户）；按**人手挑的主键字段**分仍有 56 组，而它准不准
+取决于那张表挑得对不对——"同一个用户改了两次地址"就并成了一组。
+**要放宽，先得由场景作者声明"这个工具的主键是哪几个字段"**，那是另一片，不是措辞。
 """
 
 from __future__ import annotations
@@ -164,7 +180,8 @@ class IdempotencyDetector:
                     detector=self.name,
                     verdict=DetectorVerdict.PASS,
                     summary=(
-                        f"已检查 {len(writes)} 次写操作（{tools_checked}），未发现重复执行。"
+                        f"已检查 {len(writes)} 次写操作（{tools_checked}），"
+                        f"没有两次的规范化参数完全相同。"
                     ),
                     confidence=Confidence.HIGH,
                     detail={
@@ -233,7 +250,8 @@ class IdempotencyDetector:
                 # 上面那段说明写的是"应当能被看见"——而在此之前它只出现在一个
                 # 永远不会被返回的 detail 里，等于写了个注释就当实现了。
                 # 报 inconclusive 而不是 None：None 会让这一组落进"已检查 N 次写操作、
-                # 未发现重复执行"那句汇总 PASS 里，把一个判不了的重复说成查过没毛病。
+                # 没有两次的规范化参数完全相同"那句汇总 PASS 里，
+                # 把一个判不了的重复说成查过没毛病。
                 return inconclusive(
                     self.name,
                     f"{tool_name} 有 {len(other_replay)} 次重复调用带着未知的重放标记"
@@ -270,7 +288,7 @@ class IdempotencyDetector:
                 verdict=DetectorVerdict.FAIL,
                 summary=(
                     f"{tool_name} 是没有幂等保护的写操作，被重复尝试了 {len(agent)} 次"
-                    f"（同一次调用）。{_outcome(agent)}{tail}"
+                    f"（这几次的规范化参数完全相同）。{_outcome(agent)}{tail}"
                 ),
                 confidence=Confidence.HIGH,
                 detail=detail,
