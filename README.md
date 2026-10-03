@@ -603,6 +603,7 @@ git show <那次提交>^:scripts/run_walking_skeleton.py > /tmp/walking_skeleton
 
 | 文件 | 为什么重要 |
 |---|---|
+| `docs/manual.md` | **给用的人看的那一份**（上面那份 `docs/ui.md` 是给改代码的人看的，讲的是"每个决定为什么这么定"）。逐页逐栏说清界面上每一格是什么、能点的按钮点下去会怎样、怎么把自己的 Agent 放进来、以及「算不算通过」到底由哪三条判定决定；末尾是六个最容易读错的地方（「判不了」不是「没问题」、「通过」是预期达成不是 Agent 没问题、执行状态与结论是两件事……） |
 | `docs/decisions/001-integration-surface.md` | **最重要的架构决策**。集成面走网络层黑盒拦截。原文档的"进程内注入 TimeProvider"对目标用户（Muse/LightVela 型云端 Agent）根本不可执行 |
 | `docs/decisions/002-system-of-record.md` | 自研库是唯一真相源；Langfuse 只做可视化；ClickHouse 从 MVP 移除 |
 | `docs/decisions/003-credential-default.md` | 出口默认拒绝、默认不注入真实凭据。默认值反转，别改回去 |
