@@ -48,6 +48,20 @@ class ExpectResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            # `ok` 必须自己也落在快照里，**不能只留一个 property 让读的人自己算**。
+            #
+            # 这一段原先只吐四个清单，没吐 `ok`；而报告页第一张卡片读的是
+            # `report.expectation.ok`。（`report` 是**冻结下来的 JSON 快照**，
+            # 一个普通 dict，不是这个对象——取不到就是取不到。）结果是那张卡片
+            # 在**每一份**报告上恒红：库里 396 份 `verdict_ok=通过` 的运行，
+            # 没有一份的快照带 `ok` 键，于是它们全都写着「不符合预期」。
+            #
+            # 这正是本仓库的头号毛病：**报告说了比观测更多的话**——它断言了一件
+            # 它当时并不知道的事，还坐在每一页最上面。
+            #
+            # 判定逻辑仍然只有 `ok` 那一个 property，这里只是把它序列化出去。
+            # 再算一遍（在模板里比对四个清单的长度）就是第二份会漂的说法。
+            "ok": self.ok,
             "matched": [
                 {"expect": e.model_dump(mode="json"), "got": f.summary} for e, f in self.matched
             ],

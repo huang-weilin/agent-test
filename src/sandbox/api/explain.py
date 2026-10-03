@@ -39,6 +39,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from sandbox.db.models import DetectorVerdict
 
 #: 一次运行的**总**结论（三态，见 `docs/ui.md`）。**它和下面那张四态表不是一回事**，
@@ -162,6 +164,102 @@ PAGE_INTRO = (
     "我们检查了什么、查出了什么（检测结论）、和你事先写好的期待对不对得上（预期比对）、"
     "以及花了多少（成本）。"
 )
+
+
+#: 报告页最上面那一句「所以呢，我该干什么」。
+#:
+#: **这一层不新增任何判定。** 它把下面三个**已经算好**的结论——跑完了没有、
+#: 钱对不对得上、检测结论过没过——读成一句人话加一个下一步。判定仍然只有一处：
+#: `ScenarioResult.ok` 与 `ExpectResult.ok`。这里自己再算一遍「所以算不算通过」，
+#: 长出来的就是第二份会漂的说法，而且是坐在每页最上面的那一份。
+#:
+#: 四种语气对着页面上四种底色（`.panel` 的四个类）：
+#:
+#: * `bad`  —— 有事，需要你看一眼
+#: * `warn` —— 有事，但**不指向被测对象**（重跑就好，别去改 Agent）
+#: * `ok`   —— 这次没查出问题。**措辞刻意不是「Agent 没问题」**
+#: * `none` —— 判不了，或者没记录。**既不放绿也不放红**
+#:
+#: 每一条的 `action` 都不许说出观测之外的话：`error` 那条不能写成"你的 Agent 崩了"
+#: （跑的是沙箱自己的编排，和 Agent 是两件事），`pass` 那条不能写成"没问题"
+#: （它只知道"场景里点名要查的那些没查出问题"）。
+NEXT_STEP: dict[str, dict[str, str]] = {
+    "error": {
+        "tone": "bad",
+        "headline": "这次测试没跑成。",
+        "action": "看下面「执行失败」里写了什么。这一条说的是「这次实验本身」没跑完，"
+        "不是你的 Agent 表现不好——底下的结论都是在一段残缺的轨迹上算出来的。",
+    },
+    "premises": {
+        "tone": "warn",
+        "headline": "这次实验没跑完，结论不算数。",
+        "action": "有会话没按场景写的走完，所以检测器判的不是你想测的那件事。"
+        "先别照着这些结论去改 Agent——重跑一次，让每段脚本都被消费完再说。",
+    },
+    "charges_unknown": {
+        "tone": "warn",
+        "headline": "钱扣了几次，这次没查到底。",
+        "action": "目标系统那一侧没给出数。查不到不等于没问题，所以这次按不通过算。"
+        "先把目标系统接上，再回来看这一条。",
+    },
+    "charges": {
+        "tone": "bad",
+        "headline": "它真的对不上账。",
+        "action": "这一条是地面真值：钱是在目标系统里扣的，不依赖检测器怎么看。"
+        "往下看「调用链」，数一数同一个业务被结算了几次。",
+    },
+    "no_expectation": {
+        "tone": "none",
+        "headline": "这次没有任何预期可以比对。",
+        "action": "场景里没写 expect，所以这次没有任何东西被判过对错。"
+        "这不等于通过——它等于什么都没测。",
+    },
+    "expectation_unrecorded": {
+        "tone": "none",
+        "headline": "这份快照里没记下比对结果。",
+        "action": "它是在「通过与否」被写进快照之前跑的。没记录不是没问题，也不等于不通过"
+        "——往下看「预期比对」那张表，那份数据旧快照里是有的。",
+    },
+    "expectation_failed": {
+        "tone": "bad",
+        "headline": "它对不上你写的预期。",
+        "action": "往下看「预期比对」：「未命中」是你说好该发生的事没发生，"
+        "「意外」是发生了你没预料的事。两种要改的东西不一样。",
+    },
+    "pass": {
+        "tone": "ok",
+        "headline": "这次没查出你在场景里点名要查的那些毛病。",
+        "action": "注意这句话的边界：它不等于「Agent 没问题」。没写进预期的毛病"
+        "不会被报出来（看「未覆盖」有几条），钱那一栏要是写着「未检查」，"
+        "那这次也没有验过钱。",
+    },
+}
+
+
+def next_step(report: dict[str, Any]) -> dict[str, str]:
+    """这次运行「所以呢、我该干什么」。
+
+    分支的顺序**照着 `ScenarioResult.ok` 的顺序来**（执行失败 → 前提 → 扣款 →
+    检测结论），这样页面上那句话和底下那张卡片的判定不会各说各的。
+    """
+    if report.get("error"):
+        return NEXT_STEP["error"]
+    if not report.get("premises_held"):
+        return NEXT_STEP["premises"]
+    if not report.get("charges_ok"):
+        # 负数 = 没查到（mock 没起来）。**「没查到」和「扣错了」是两件事**，
+        # 给的话和下一步都不一样——把前者说成后者，用户会去查一个不存在的缺陷。
+        if (report.get("egress_charges") or 0) < 0:
+            return NEXT_STEP["charges_unknown"]
+        return NEXT_STEP["charges"]
+    expectation = report.get("expectation")
+    if expectation is None:
+        return NEXT_STEP["no_expectation"]
+    if "ok" not in expectation:
+        return NEXT_STEP["expectation_unrecorded"]
+    if not expectation["ok"]:
+        return NEXT_STEP["expectation_failed"]
+    return NEXT_STEP["pass"]
 
 
 def verdict_help(verdict: str) -> str:

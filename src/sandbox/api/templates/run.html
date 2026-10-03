@@ -40,6 +40,16 @@
 </div>
 {% else %}
 
+{# 一句话结论 + 下一步。**放在最上面**：点进来的人第一个问题就是「所以呢」，
+   而原先他要自己读完三张卡片、再读完「预期比对」那张表才拼得出来。
+   话本身在 `explain.NEXT_STEP` 里，这里不重写一遍——判定只有一处，
+   这里是读法不是第二份说法。 #}
+{% set step = explain.next_step(report) %}
+<section class="panel {{ step.tone if step.tone in ('ok', 'bad', 'warn') else '' }}">
+  <strong>{{ step.headline }}</strong>
+  <p>{{ step.action }}</p>
+</section>
+
 {% if report.error %}
 <div class="panel bad">
   <strong>执行失败，这次测试没跑成。</strong>
@@ -54,21 +64,35 @@
 {# 三个**互相独立**的判定。合并成一个"通过/不通过"就再也看不出是哪一条不成立，
    而这三条指向的修复方向完全不同：改 Agent、改场景、查目标系统。 #}
 <section class="cards">
-  <div class="card {{ 'ok' if report.expectation and report.expectation.ok else 'bad' }}">
+  {# 这一格是**三态**，不是两态。`report` 是冻结下来的 JSON 快照，而旧快照里
+     根本没有 `ok` 这个键（那时候 `ExpectResult.to_dict` 还不吐它）。读一个不存在
+     的键，Jinja 给的是 Undefined——恒假，于是卡片在**每一份**报告上都是红的：
+     库里 396 份判为"通过"的运行，全都写着「不符合预期」。
+     现在第三种情形单独列出来，**既不放绿也不放红**，和这一页别处遇到旧快照时
+     （调用链、跨会话差异、记忆）是同一条规矩：没记录不是没问题，也不是失败。 #}
+  {% set exp = report.expectation %}
+  {% set exp_state = 'none' if not exp else ('missing' if exp.ok is undefined else ('ok' if exp.ok else 'bad')) %}
+  <div class="card {{ '' if exp_state in ('none', 'missing') else exp_state }}">
     <div class="k">检测结论</div>
     <div class="v">
-      {% if report.expectation %}
-        {{ '符合预期' if report.expectation.ok else '不符合预期' }}
-      {% else %}
-        没有比对结果
-      {% endif %}
+      {% if exp_state == 'none' %}没有比对结果
+      {% elif exp_state == 'missing' %}这份快照里没有这一项
+      {% elif exp_state == 'ok' %}符合预期
+      {% else %}不符合预期{% endif %}
     </div>
-    {% if report.expectation %}
+    {% if exp %}
     <div class="sub">
-      命中 {{ report.expectation.matched | length }} ·
-      未命中 {{ report.expectation.missing | length }} ·
-      意外 {{ report.expectation.unexpected | length }} ·
-      未覆盖 {{ report.expectation.uncovered | length }}
+      命中 {{ exp.matched | length }} ·
+      未命中 {{ exp.missing | length }} ·
+      意外 {{ exp.unexpected | length }} ·
+      未覆盖 {{ exp.uncovered | length }}
+    </div>
+    {% endif %}
+    {% if exp_state == 'missing' %}
+    <div class="note">
+      这份报告是在"通过与否"被写进快照之前跑的，所以那一格当时没记下来。
+      <strong>没记录不是没问题，也不等于不通过</strong>——它到底怎么样，
+      看下面「预期比对」那张表，那份数据旧快照里是有的。
     </div>
     {% endif %}
   </div>
