@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}确认：机器打算这样判{% endblock %}
+{% block body %}
+
+{% macro hidden_answers() %}
+  {% for name, value in form.scalars.items() %}
+  <input type="hidden" name="{{ name }}" value="{{ value }}">
+  {% endfor %}
+  {% for name in form.tools %}
+  <input type="hidden" name="tools" value="{{ name }}">
+  {% endfor %}
+  {% for key, value in form.choices.items() %}
+  <input type="hidden" name="choice:{{ key }}" value="{{ value }}">
+  {% endfor %}
+{% endmacro %}
+
+<h1>确认：机器打算这样判</h1>
+<p class="plain">
+  下面是这份场景跑完之后，报告上那个「通过」<strong>到底在判什么</strong>。
+  一条一条看：判卷标准是你说了算的，机器只是照着它判。
+</p>
+
+<div class="panel">
+  <h2>一、判卷标准</h2>
+  {% if plan %}
+  <table class="grid tight">
+    <thead>
+      <tr><th>这次要验的</th><th>谁来判</th><th>判成什么才算你对</th></tr>
+    </thead>
+    <tbody>
+      {% for row in plan %}
+      <tr>
+        <td>{{ row.question }}</td>
+        <td><code>{{ row.detector }}</code></td>
+        <td>
+          <span class="badge {{ 'fail' if row.verdict == 'fail' else 'pass' }}">{{ row.verdict }}</span>
+          <div class="note">{{ row.meaning }}</div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="note">
+    上面那三个字（<code>fail</code> / <code>pass</code>）就是真正写进文件、机器真正
+    照做的那个值，不是翻译。左边那句人话只是帮你看懂——两边不一致的话以那三个字为准。
+  </p>
+  {% else %}
+  <p><strong>这一趟不判任何东西。</strong></p>
+  <p class="note">
+    一条毛病都没勾，所以没有判卷标准。跑完报告上那个「通过」只说明它跑完了，
+    <strong>不说明任何事</strong>。这可以是一份用来试管道的场景，但它证明不了
+    被测对象好不好。
+  </p>
+  {% endif %}
+</div>
+
+{% if warnings %}
+<div class="panel warn">
+  <h2>二、这几处对不上，先看一眼</h2>
+  <ul>
+    {% for text in warnings %}<li>{{ text }}</li>{% endfor %}
+  </ul>
+  <p class="note">
+    这些不是拦着你不让存。它们说的是：按你现在勾的，那几条判卷标准
+    <strong>这一趟根本触发不了</strong>——报告上会显示成「判不了」或者干脆不出现，
+    而那和「没查出问题」长得一模一样。
+  </p>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>{{ '三' if warnings else '二' }}、会存成这样一份文件</h2>
+  <p class="note">
+    存成 <code>scenarios/{{ form.scalar('scenario_id') }}.yaml</code>。
+    存完你可以在编辑器里接着改——它和手写的场景没有任何区别。
+  </p>
+  <pre>{{ yaml_text }}</pre>
+
+  <dl>
+    <dt>脚本里的参数是占位值</dt>
+    <dd>
+      下面这几处是向导按工具声明编出来的，<strong>跑之前请按你的业务改</strong>：
+      <ul>
+        {% for item in placeholders %}<li><code>{{ item }}</code></li>{% endfor %}
+      </ul>
+      不改的话场景照样能跑，只是它测的不是你的业务。单号特意用了目标系统里
+      真实存在的那一张，所以它至少跑得通。
+    </dd>
+    <dt>机器不判的东西</dt>
+    <dd>
+      「这个 Agent 是干什么的」「这次要验证什么」那两句话，还有每一段的
+      <code>name</code> 和这里所有注释——它们只写给人看，判定一个字都不看它们。
+    </dd>
+    <dt>没勾的方面不算测过</dt>
+    <dd>
+      报告里会出现在「未覆盖」那一栏。那是句实话，不是缺陷；但也别把它读成
+      「这些方面没问题」。
+    </dd>
+  </dl>
+</div>
+
+<div class="actions">
+  <form class="inline" method="post" action="/scenarios/{{ form.scalar('scenario_id') }}/save">
+    <input type="hidden" name="yaml_text" value="{{ yaml_text }}">
+    <button class="primary" type="submit">存下来</button>
+    <span class="note">存盘前会先把这份文本解析一遍，解析不过不会落盘。</span>
+  </form>
+  <form class="inline" method="post" action="/scenarios/new">
+    {{ hidden_answers() }}
+    <input type="hidden" name="submit" value="back">
+    <button type="submit">返回改一改</button>
+  </form>
+</div>
+
+{% endblock %}

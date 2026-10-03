@@ -27,6 +27,17 @@ _ID_RE = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,63}\Z")
 # 文件名，而"这个场景在哪儿"是编辑器和运行入口共用的一个判断，不该有歧义。
 SUFFIX = ".yaml"
 
+#: 界面上有专门页面、因而不许当作场景标识的名字。
+#:
+#: 保留的是 `new`：`/scenarios/new` 是新建向导那一页。路由是**先注册的先匹配**，
+#: 向导那条必须排在 `/scenarios/{scenario_id}` 前面才生效——于是万一磁盘上真有一份
+#: `new.yaml`，它从此永远打不开（每一次点它都落到向导页），而用户看到的是
+#: "我那个场景不见了"，没有任何线索指向重名。
+#:
+#: 所以宁可让这个名字从一开始就不可用：挡住的是"起个新名字"，代价清楚；
+#: 不挡的话，坏掉的是"一个已经存在的场景"，而且没有任何提示。
+RESERVED_IDS = frozenset({"new"})
+
 
 class ScenarioPathError(ValueError):
     """场景标识或路径不合法。消息要能直接给用户看。"""
@@ -38,7 +49,13 @@ def scenarios_dir() -> Path:
 
 
 def is_valid_id(scenario_id: str) -> bool:
-    return bool(_ID_RE.match(scenario_id))
+    """这个标识能不能当场景文件名用。
+
+    **和 `check_scenario_id` 是同一套判据**，包括保留字那一条：首页拿它决定
+    一个场景"能不能打开"，而那道判断和真正去解析路径时用的是同一个答案——
+    两处不一致的话，首页会给出一个点进去必然报错的链接。
+    """
+    return bool(_ID_RE.match(scenario_id)) and scenario_id not in RESERVED_IDS
 
 
 def check_scenario_id(scenario_id: str) -> str:
@@ -47,6 +64,11 @@ def check_scenario_id(scenario_id: str) -> str:
     拒绝时把规则说出来——用户看到的是"为什么不让我用这个名字"，不是
     "400 Bad Request"。
     """
+    if scenario_id in RESERVED_IDS:
+        raise ScenarioPathError(
+            f"场景标识 {scenario_id!r} 是界面自己留用的名字"
+            f"（{sorted(RESERVED_IDS)} 各有专门的一页），换一个吧。"
+        )
     if not _ID_RE.match(scenario_id):
         raise ScenarioPathError(
             f"场景标识 {scenario_id!r} 不合法。"

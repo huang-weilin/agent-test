@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}新建测试{% endblock %}
+{% block body %}
+
+<h1>新建测试</h1>
+<p class="plain">
+  这一页把你脑子里那件事翻译成一份场景文件。问的只有三件事：
+  <strong>测哪个 Agent</strong>、<strong>这一趟让它做什么</strong>、
+  <strong>怎么算通过</strong>。填完先给你看一遍「机器打算这样判」，
+  你点头才存盘。
+  <br>
+  最后一问是这一页存在的理由：那份场景跑完，报告上那个「通过」到底在判什么，
+  取决于你在这里勾了什么。没勾的方面，那一趟<strong>不算测过</strong>。
+</p>
+
+{% if error %}
+<div class="panel bad">
+  <h2>这一份存不下来</h2>
+  <p>{{ error }}</p>
+  <p class="note">
+    你填的内容原样留着，改完再点一次就行。
+  </p>
+</div>
+{% endif %}
+
+<form method="post" action="/scenarios/new">
+
+<section class="panel">
+  <h2>一、测哪个 Agent</h2>
+
+  <p>
+    <label for="scenario_id">这次测试叫什么名字（小写字母、数字、连字符）</label><br>
+    <input id="scenario_id" name="scenario_id" value="{{ form.scenario_id }}" size="32"
+           pattern="[a-z0-9][a-z0-9_-]*" required>
+    <span class="note">存成 <code>scenarios/</code> 下的一个文件，以后能反复跑。</span>
+  </p>
+
+  <p>
+    <label for="agent_version">Agent 的版本号</label><br>
+    <input id="agent_version" name="agent_version" value="{{ form.agent_version }}" size="32">
+    <span class="note">
+      内置演示 Agent 写 <code>react_demo@0.1</code>。接自己的 Agent 见
+      <code>docs/manual.md</code>。
+    </span>
+  </p>
+
+  <p>
+    <label for="agent_what">这个 Agent 是干什么的（一句话，给人看）</label><br>
+    <input id="agent_what" name="agent_what" value="{{ form.agent_what }}" size="80">
+  </p>
+
+  <p>
+    <label for="agent_goal">这次要验证什么（一句话，给人看）</label><br>
+    <input id="agent_goal" name="agent_goal" value="{{ form.agent_goal }}" size="80">
+  </p>
+
+  <p class="note">
+    这两句话会原样写进场景的 <code>description</code>，报告里也原样打出来。
+    <strong>机器不判这两句话</strong>——它们是写给人看的。
+  </p>
+
+  <p>
+    <label for="agent_task">这一趟你对它说什么（它收到的那句指令）</label><br>
+    <textarea id="agent_task" name="agent_task" rows="3" cols="80">{{ form.agent_task }}</textarea>
+  </p>
+</section>
+
+<section class="panel">
+  <h2>二、这一趟让它做什么</h2>
+
+  <table class="grid tight">
+    <thead>
+      <tr><th>选</th><th>工具</th><th>它做什么</th><th>有没有副作用</th></tr>
+    </thead>
+    <tbody>
+      {% for tool in tools %}
+      <tr>
+        <td>
+          <input type="checkbox" id="tool-{{ tool.name }}" name="tools" value="{{ tool.name }}"
+                 {% if tool.name in form.tools %}checked{% endif %}>
+        </td>
+        <td><label for="tool-{{ tool.name }}"><code>{{ tool.name }}</code></label></td>
+        <td class="note">{{ tool.description }}</td>
+        <td>
+          {% if tool.is_write %}
+          <span class="badge warn">会扣钱</span>
+          {% else %}
+          <span class="note">只读</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="note">
+    这份清单是从工具库 <code>scenarios/_shared/tools.yaml</code> 里读出来的，
+    不是手抄的——库里加了工具，这里就会多一行。
+  </p>
+
+  <p>
+    <label for="shape">这一趟怎么跑</label><br>
+    <select id="shape" name="shape">
+      {% for key, text in shapes.items() %}
+      <option value="{{ key }}" {% if key == form.shape %}selected{% endif %}>{{ text }}</option>
+      {% endfor %}
+    </select>
+  </p>
+
+  <p id="unattended">
+    <label>没人看着的那一段里，它自己调写工具<strong>算不算越权</strong>？</label><br>
+    <label class="check">
+      <input type="radio" name="unattended_allowed" value="0"
+             {% if not form.unattended_allowed %}checked{% endif %}>
+      算越权（我预期会被抓到）
+    </label><br>
+    <label class="check">
+      <input type="radio" name="unattended_allowed" value="1"
+             {% if form.unattended_allowed %}checked{% endif %}>
+      不算，是我授权它这么做的
+    </label>
+    <span class="note">
+      只有「第二段没人看着」那一趟才用得上这一项。它非问不可：不答的话，
+      半夜那次调用算不算越权<strong>没有任何东西能判</strong>，而报告上看不出来。
+    </span>
+  </p>
+
+  <p>
+    <label for="expected_charges">这一趟，钱最多扣几笔（留空 = 这次不验钱）</label><br>
+    <input id="expected_charges" name="expected_charges" value="{{ form.expected_charges }}"
+           size="6" inputmode="numeric">
+    <span class="note">
+      这一条是<strong>地面真值</strong>：数的是目标系统里真实扣了几笔，
+      不由检测器怎么看决定。留空的话这一趟<strong>不验钱</strong>——
+      报告上会写着「未检查」，那不是「对得上」。
+    </span>
+  </p>
+</section>
+
+<section class="panel">
+  <h2>三、怎么算通过</h2>
+
+  <p class="plain">
+    每一条都是「你觉得这一趟会发生什么」。选<strong>该报警</strong>的意思是
+    你<em>故意</em>让它出这个问题，看检测器抓不抓得住；选<strong>不该报警</strong>
+    的意思是这一趟一切正常，看它会不会冤枉人。两个都要有——只测前者的场景，
+    一个凡跑必红的检测器也能全过。
+  </p>
+  <p class="note">
+    没选的那些方面，这一趟<strong>不算测过</strong>。报告里会出现在「未覆盖」
+    那一栏，那是句实话，不是缺陷。
+  </p>
+
+  <table class="grid tight">
+    <thead>
+      <tr>
+        <th>这次想验的毛病</th>
+        <th>这次不用它</th>
+        <th>我预期会被抓到<br><span class="note">该报警</span></th>
+        <th>我预期一切正常<br><span class="note">不该报警</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for symptom in symptoms %}
+      <tr>
+        <td>
+          {{ symptom.question }}
+          <div class="note">{{ symptom.when }}</div>
+        </td>
+        {% for value in ['skip', 'expect_fail', 'expect_pass'] %}
+        <td>
+          <input type="radio" name="choice:{{ symptom.key }}" value="{{ value }}"
+                 {% if form.choices[symptom.key] == value %}checked{% endif %}
+                 aria-label="{{ choices[value] }}">
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<div class="actions">
+  <button class="primary" type="submit">下一步：看机器打算怎么判</button>
+  <span class="note">还不会存盘。下一页会逐条印出最终写进文件的判卷标准。</span>
+</div>
+
+</form>
+
+{% endblock %}

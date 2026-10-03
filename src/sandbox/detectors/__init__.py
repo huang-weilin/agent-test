@@ -44,6 +44,34 @@ KNOWN_DETECTORS: frozenset[str] = frozenset(
 )
 
 
+#: 边界上那四个名字。**它们不在 `KNOWN_DETECTORS` 里，因为不是一个类产出的**：
+#: `tool_scope` / `tool_schema` / `egress` 由代理当场判（`proxy/app.py`），
+#: `token_budget` 由网关在熔断那一刻写（`gateway/app.py`）。它们写的是字面量，
+#: 源码里没有一份可 import 的集合——所以这里是**唯一一处抄写**，代价由闸门兜着：
+#: `tests/test_explain_coverage.py` 把「这个集合 ∪ `KNOWN_DETECTORS`」和
+#: `explain.DETECTOR_HELP` 比对，而后者那边是**从源码现算**出来的
+#: （AST 扫 `detector=` 与 `{"detector": ...}`）。两边不一致就红。
+#:
+#: **别和 `trace/reader.py` 的 `BOUNDARY_DETECTORS` 混。** 那是个同名不同义的集合
+#: （"能从轨迹里读回来的那两条"），只有两个成员。名字像不代表管的是同一件事。
+BOUNDARY_DETECTOR_NAMES: frozenset[str] = frozenset(
+    {"tool_scope", "tool_schema", "egress", "token_budget"}
+)
+
+#: 场景 `expect[].detector` 上允许写的名字。
+#:
+#: 原先这里没有任何校验：`Expectation.detector` 是个裸 `str`，比对时拿它做裸字符串
+#: 相等（`scenario/expect.py`），于是**写错一个字母，那条预期静默地永远配不上**——
+#: 场景照样加载、照样跑、照样出报告，只是那一条从来不参与判定。用户以为自己
+#: 声明过的判卷标准其实不存在。
+#:
+#: 豁免那边**是**校验的（`loader.py` 逐条查 `KNOWN_DETECTORS`），所以这是同一种
+#: 防护只做了一半。补上另一半的时候**不能直接照抄 `KNOWN_DETECTORS`**：实测 29 份
+#: 场景里有 6 处合法声明写的是 `tool_schema`，而它不在那 15 个名字里——只按
+#: `KNOWN_DETECTORS` 判会当场冤枉 6 处。
+SCENARIO_DETECTOR_NAMES: frozenset[str] = KNOWN_DETECTORS | BOUNDARY_DETECTOR_NAMES
+
+
 def run_all(
     calls: list[CallView],
     *,

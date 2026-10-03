@@ -225,6 +225,43 @@ def test_script_calling_an_undeclared_tool_is_rejected(tmp_path: Path) -> None:
         load_scenario(_write(tmp_path, data))
 
 
+def test_an_expectation_on_an_unknown_detector_is_rejected(tmp_path: Path) -> None:
+    """预期写错检测器名 = 这条判卷标准**根本不存在**。
+
+    这是「装上了但没接线」最安静的一种：豁免写错了检测器，那条 fail 照样出现在
+    报告里（用户看得见问题还在）；预期写错了检测器，那条预期既不在「命中」也不在
+    「未命中」——报告上**完全没有它的位置**。用户以为自己声明过「这里不该报警」，
+    而实际上这次运行对那件事一个字都没说过。
+    """
+    data = _scenario_dict(expect=[{"detector": "idempotancy", "verdict": "fail"}])
+    with pytest.raises(ScenarioError, match="未知检测器"):
+        load_scenario(_write(tmp_path, data))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # 边界上那四个。**这条参数化是被一次真事故逼出来的**：先前的计划是照
+        # `KNOWN_DETECTORS` 校验，而实测 29 份场景里有 6 处合法声明写的就是
+        # `tool_schema`——那个集合里没有它。只照那一份清单判，会当场冤枉 6 处。
+        "tool_scope",
+        "tool_schema",
+        "egress",
+        "token_budget",
+        # 一个普通的、`KNOWN_DETECTORS` 里的名字，作为对照。
+        "idempotency",
+    ],
+)
+def test_the_legal_detector_names_load(name: str, tmp_path: Path) -> None:
+    """合法名字一个都不许被冤枉。
+
+    只有反向那条（写错的被拒）的话，一个"什么都不放行"的实现也能过——而那种实现
+    会让每一份现有场景都加载不了。
+    """
+    data = _scenario_dict(expect=[{"detector": name, "verdict": "fail"}])
+    assert load_scenario(_write(tmp_path, data)).expect[0].detector == name
+
+
 def test_a_note_on_an_order_that_does_not_exist_is_rejected(tmp_path: Path) -> None:
     """备注挂在目标系统里没有的单上，Agent 永远读不到它。
 

@@ -31,7 +31,7 @@ import yaml
 
 from sandbox.api import explain
 from sandbox.db.models import DetectorVerdict
-from sandbox.detectors import KNOWN_DETECTORS
+from sandbox.detectors import KNOWN_DETECTORS, SCENARIO_DETECTOR_NAMES
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "sandbox"
@@ -311,6 +311,43 @@ def test_every_section_key_is_rendered_somewhere() -> None:
     unknown = sorted(set(used) - set(explain.SECTION_HELP))
     assert not unknown, (
         f"这些模板引了不存在的章节说明：{ {k: used[k] for k in unknown} }"
+    )
+
+
+def test_the_scenario_side_name_set_is_the_same_set() -> None:
+    """场景加载期认的名字，必须和解释表里那 19 个是**同一个集合**。
+
+    `SCENARIO_DETECTOR_NAMES`（`detectors/__init__.py`）是加载期校验
+    `expect[].detector` 用的合法集合；它里面那四个边界名字**是手抄的**
+    （源码里只有字面量，没有可 import 的集合，见那里的注释）。
+
+    手抄一份清单就是第二份会漂的真相——除非有东西在核。这里就是那个东西：
+    另一边 `explain.DETECTOR_HELP` 已经被上面两条**从源码现算**钉住了
+    （`emitted ⊆ DETECTOR_HELP ⊆ emitted ∪ declared`），所以拿它当参照物，
+    等于让新常量间接对着源码核。
+
+    两个方向都查，因为它们坏起来的后果不一样：
+
+    * 集合**多**一个名字 —— 加载期会放行一个拼错的检测器，那条约预期静默地
+      永远配不上，报告上完全没有它的位置；
+    * 集合**少**一个名字 —— 一份完全合法的场景突然加载不了。这条更响，
+      但响在用户那边，而且他会以为是自己写错了。
+    """
+    expected = set(explain.DETECTOR_HELP)
+    missing = sorted(expected - SCENARIO_DETECTOR_NAMES)
+    extra = sorted(SCENARIO_DETECTOR_NAMES - expected)
+    assert not missing, (
+        f"解释表里有这几个名字，而加载期不认它们——写进场景的 expect 会被拒：{missing}\n"
+        f"把它们补进 detectors.SCENARIO_DETECTOR_NAMES。"
+    )
+    assert not extra, (
+        f"加载期认这几个名字，而解释表里没有它们：{extra}\n"
+        f"这意味着源码里会出现一栏没有任何解释的结论，同时加载期会放行一个"
+        f"根本不会命中的 detector。两边都要补。"
+    )
+    assert len(SCENARIO_DETECTOR_NAMES) >= 19, (
+        f"SCENARIO_DETECTOR_NAMES 只剩 {len(SCENARIO_DETECTOR_NAMES)} 个？"
+        f"它塌了的话上面两条断言会在空集上互相抵消。"
     )
 
 

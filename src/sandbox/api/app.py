@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from sandbox import metrics
-from sandbox.api import explain, paths, queries
+from sandbox.api import explain, paths, queries, wizard
 from sandbox.api.jobs import Job, JobRegistry, JobStep
 from sandbox.checkup import catalog
 from sandbox.checkup import report as checkup_report
@@ -47,7 +47,7 @@ from sandbox.db.engine import init_db
 from sandbox.formatting import byte_size, millis, money, span_human, tokens
 from sandbox.memory.observe import phase_label
 from sandbox.regression import cases, diff
-from sandbox.scenario import identity, loader
+from sandbox.scenario import identity, library, loader
 from sandbox.scenario.loader import ScenarioError
 from sandbox.scenario.spec import Scenario
 
@@ -225,6 +225,14 @@ def create_app(
         # 规矩。这里不是 500：用户改得了，改完再点一次就行。
         return _problem(request, 400, "体检菜单有问题", str(exc))
 
+    @app.exception_handler(library.LibraryError)
+    async def _bad_library(request: Request, exc: library.LibraryError) -> Response:
+        # 工具库同样是手写的。**单独立一条**是因为新建向导直读库、不经过
+        # `parse_scenario`——那条路上没人把 `LibraryError` 转成 `ScenarioError`
+        # （`loader.py:105` 才做那件事），于是库坏掉时用户看到的会是一个 500，
+        # 而消息里只有一句 traceback。库坏了同样是用户改得了的事。
+        return _problem(request, 400, "工具库有问题", str(exc))
+
     def _problem(request: Request, status: int, title: str, detail: str) -> Response:
         log.info("api.problem", path=request.url.path, status=status, detail=detail)
         if _wants_json(request):
@@ -310,6 +318,87 @@ def create_app(
             },
         )
 
+    def _wizard_context(data: wizard.FormData, error: str | None = None) -> dict[str, Any]:
+        """问卷页和确认页共用的上下文。
+
+        **两页从同一个 `FormData` 渲染**，所以「返回改一改」之后再提交，
+        生成的 YAML 和刚才看到的那一份不会有差别——中间没有任何东西被重新
+        解读过一遍。
+        """
+        return {
+            "form": data,
+            "tools": wizard.tool_facts(),
+            "symptoms": wizard.SYMPTOMS,
+            "choices": wizard.CHOICES,
+            "shapes": wizard.SHAPES,
+            "error": error,
+        }
+
+    def _wizard_page(request: Request, data: wizard.FormData, error: str | None = None) -> Response:
+        return templates.TemplateResponse(
+            request, "wizard.html", _wizard_context(data, error)
+        )
+
+    @app.get("/scenarios/new", response_class=HTMLResponse)
+    async def wizard_start(request: Request) -> Response:
+        """新建测试向导。**必须注册在 `/scenarios/{scenario_id}` 之前。**
+
+        路由是先注册的先匹配，反过来的话 `new` 会被当成一个场景标识，于是这一页
+        永远打不开，而报出来的错是「场景不存在」——它指着的是别的问题。
+        `paths.RESERVED_IDS` 是这件事的另一半：一个真叫 `new` 的场景从两边都
+        不可达，所以那个名字一开始就不许用。
+        """
+        return _wizard_page(request, wizard.FormData())
+
+    @app.post("/scenarios/new", response_class=HTMLResponse)
+    async def wizard_preview(request: Request) -> Response:
+        """收问卷 → 回显「机器打算这样判」。
+
+        **这一步不写盘。** 页面上的确认按钮把生成好的 YAML 文本 POST 给现有的
+        `/scenarios/{id}/save`（先 `parse_scenario` 再落盘），所以向导产出的场景
+        和手写的走的是同一条保存路径、同一道校验，没有第二条真相。
+        """
+        raw = await request.form()
+        data = wizard.FormData.from_form(
+            raw, tools=[str(name) for name in raw.getlist("tools")]
+        )
+
+        # 「返回改一改」：把原始表单原样填回问卷，不重新解读。
+        if str(raw.get("submit") or "") == "back":
+            return _wizard_page(request, data)
+
+        try:
+            answers = data.to_answers()
+            paths.check_scenario_id(answers.scenario_id)
+        except (wizard.WizardError, paths.ScenarioPathError) as exc:
+            return _wizard_page(request, data, error=str(exc))
+
+        # 重名必须在这里拦住。保存那一步是**无条件覆盖**的，不拦的话，用户在
+        # 向导里起了一个已经存在的名字，点两下就把那份场景换成了这一份——
+        # 而磁盘上没有任何痕迹说明发生过什么。
+        path = paths.scenario_file(answers.scenario_id, root=app.state.scenarios_root)
+        if path.exists():
+            return _wizard_page(
+                request,
+                data,
+                error=(
+                    f"已经有一个叫 {answers.scenario_id!r} 的场景了"
+                    f"（{path.name}）。换一个名字，或者去"
+                    f"「场景」列表里打开它改——从这里存下去会把它整份覆盖掉。"
+                ),
+            )
+
+        facts = wizard.tool_facts()
+        context = _wizard_context(data) | {
+            "answers": answers,
+            "facts": facts,
+            "yaml_text": wizard.build_yaml(answers, facts),
+            "plan": wizard.plan(answers),
+            "warnings": wizard.warnings(answers, facts),
+            "placeholders": wizard.placeholders_used(answers, facts),
+        }
+        return templates.TemplateResponse(request, "wizard_confirm.html", context)
+
     @app.get("/scenarios/{scenario_id}", response_class=HTMLResponse)
     async def scenario_editor(request: Request, scenario_id: str, saved: int = 0) -> Response:
         path = paths.scenario_file(scenario_id, root=app.state.scenarios_root)
@@ -372,7 +461,29 @@ def create_app(
         try:
             # **先校验，再落盘。** 顺序反过来的话，一次笔误就把场景文件写坏了，
             # 而全部用例都从这些文件来——写坏一个等于弄丢一个用例。
-            loader.parse_scenario(yaml_text, source=f"scenarios/{scenario_id}.yaml")
+            scenario = loader.parse_scenario(
+                yaml_text, source=f"scenarios/{scenario_id}.yaml"
+            )
+
+            # `id:` 和文件名必须一致。
+            #
+            # **这是唯一一处能造出漂移的地方**，所以判在写的这一侧：读的一侧
+            # （首页、运行、回归用例）全都按文件名找人，而**记进库里的
+            # `TestRun.scenario_id` 取的是文件里那个 `id`**。两边不一致时，
+            # 报告上写着"这个场景跑了"，点进去打开的是**另一个场景**的源码——
+            # 报告说了比观测更多的话，而且没有任何东西报错。
+            #
+            # 不放在 `load_scenario` 里：那里只拿得到一个路径，`parse_scenario`
+            # 又只拿得到文本（骨架、编辑器里的草稿都没有文件名，硬判会误伤）。
+            if scenario.id != scenario_id:
+                raise ScenarioError(
+                    f"文件里写的 id 是 {scenario.id!r}，而这份文件叫 "
+                    f"{scenario_id}.yaml——两个名字必须一样。\n"
+                    f"界面上每一个入口都按「文件名」找场景，而运行记录里存的是"
+                    f"文件里那个 id：两边不一致的话，报告点进去打开的是另一个场景，"
+                    f"而且不会有任何东西报错。\n"
+                    f"改哪一边都行，改完再存一次。"
+                )
         except ScenarioError as exc:
             return templates.TemplateResponse(
                 request,

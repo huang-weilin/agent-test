@@ -46,7 +46,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from sandbox.detectors import KNOWN_DETECTORS
+from sandbox.detectors import KNOWN_DETECTORS, SCENARIO_DETECTOR_NAMES
 from sandbox.detectors.base import check_match
 from sandbox.mock.toolspec import SAMPLE_ORDER_IDS
 from sandbox.scenario import library
@@ -133,6 +133,27 @@ def _check_references(scenario: Scenario, source: str) -> None:
         for name in (session.snapshot_before, session.snapshot_after):
             if name:
                 defined.add(name)
+
+    # --- 预期里的检测器名必须真的存在 ---
+    #
+    # 和下面豁免那一段是同一类毛病，而且**更隐蔽**：豁免写错了检测器，规则不生效，
+    # 那条 fail 照样出现在报告里（用户至少看得见问题还在）；预期写错了检测器，
+    # 那条预期永远配不上，于是它**既不在「命中」也不在「未命中」**——报告上完全
+    # 没有它的位置。用户以为自己声明过"这里不该报警"，而实际上这次运行对那件事
+    # 一个字都没说过。
+    #
+    # 合法集合不是 `KNOWN_DETECTORS`：边界上那四个（`tool_scope` / `tool_schema`
+    # / `egress` / `token_budget`）不在里面，而它们是合法的判卷标准——实测 29 份
+    # 场景里有 6 处写的就是 `tool_schema`。见 `detectors.SCENARIO_DETECTOR_NAMES`。
+    for index, expectation in enumerate(scenario.expect):
+        if expectation.detector not in SCENARIO_DETECTOR_NAMES:
+            raise ScenarioError(
+                f"{source}: 预期 #{index} 指向未知检测器 {expectation.detector!r}，"
+                f"它永远不会命中。\n"
+                f"允许的名字：{sorted(SCENARIO_DETECTOR_NAMES)}\n"
+                f"这一条既不会出现在「命中」里，也不会出现在「未命中」里——"
+                f"报告上完全没有它的位置，看起来就像没写过。"
+            )
 
     # --- 豁免规则必须真的能命中 ---
     #
