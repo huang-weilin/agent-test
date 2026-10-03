@@ -37,8 +37,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from sandbox import metrics
-from sandbox.api import explain, paths, queries, wizard
+from sandbox import detectors, metrics
+from sandbox.api import exempt, explain, paths, queries, wizard
 from sandbox.api.jobs import Job, JobRegistry, JobStep
 from sandbox.checkup import catalog
 from sandbox.checkup import report as checkup_report
@@ -129,6 +129,50 @@ def _verdict_label(verdict_ok: bool | None) -> tuple[str, str]:
     if verdict_ok is None:
         return ("unknown", "未留存")
     return ("pass", "通过") if verdict_ok else ("fail", "不通过")
+
+
+def _finding_actions(
+    report: dict[str, Any] | None, scenario: Scenario | None, run_id: str
+) -> dict[str, dict[str, Any]]:
+    """每条检测结论旁边该摆什么——**逐条判三种情形**，不摆一个统一的按钮。
+
+    19 个检测器名里能豁免的只有 6 个，记忆族 3 个另有出口，剩下 10 个那条路上
+    压根没有查豁免那一步。三种情形渲染成一样的话，用户点到后两种上就会撞见一个
+    装上了但不生效的开关——而豁免整个机制存在的意义就是"让结论消失"，一个静音
+    不了的静音开关比没有开关更坏。
+
+    键是 `(检测器, 这条结论序号)`：同一个检测器在一次运行里可以出现好几条，
+    各自该说自己的话。序号用的是**报告里 findings 的原始顺序**，不另排一遍——
+    另排一遍的话，页面上的第 3 条和报告里的第 3 条会是两条不同的结论。
+
+    没有场景文件（被删掉或改坏了）时 `writable` 为假：**没有文件就没有"以后的运行"
+    可改**，按钮一个都不摆，页面上照实说。
+
+    **没有报告快照时返回空表**，不是报错：那种运行（"结论落库"这个字段存在之前跑的）
+    本来就不渲染结论表，页面上另有一块说"这次运行没有留下结论快照"。这一条是 mypy
+    抓出来的——签名原先写死了 `dict`，而 `parse_report` 真的会返回 `None`，
+    于是一份老运行打不开这一页。收窄类型的地方正是"某个分支到底会不会走到"
+    最容易想当然的地方。
+    """
+    if report is None:
+        return {}
+    declared = {t.name: t.is_write for t in scenario.tools} if scenario else {}
+    out: dict[str, dict[str, Any]] = {}
+    for index, finding in enumerate(report.get("findings") or []):
+        detector = str(finding.get("detector") or "")
+        detail = finding.get("detail") or {}
+        tool = detail.get("tool_name")
+        tool = str(tool) if isinstance(tool, str) and tool in declared else None
+        out[f"{detector}#{index}"] = {
+            "kind": detectors.exemption_kind(detector),
+            "detector": detector,
+            "tool": tool,
+            "touches_write": declared[tool] if tool else any(declared.values()),
+            "tools": sorted(declared),
+            "run_id": run_id,
+            "writable": scenario is not None,
+        }
+    return out
 
 
 @asynccontextmanager
@@ -232,6 +276,12 @@ def create_app(
         # （`loader.py:105` 才做那件事），于是库坏掉时用户看到的会是一个 500，
         # 而消息里只有一句 traceback。库坏了同样是用户改得了的事。
         return _problem(request, 400, "工具库有问题", str(exc))
+
+    @app.exception_handler(exempt.ExemptError)
+    async def _bad_exemption(request: Request, exc: exempt.ExemptError) -> Response:
+        # 这一条是**用户改得了的**：理由空着、或者场景里 `exemptions:` 那一行
+        # 写得不是列表。所以是 400 加一句该改什么，不是 500。
+        return _problem(request, 400, "这条豁免写不进去", str(exc))
 
     def _problem(request: Request, status: int, title: str, detail: str) -> Response:
         log.info("api.problem", path=request.url.path, status=status, detail=detail)
@@ -675,7 +725,7 @@ def create_app(
         )
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse)
-    async def run_detail(request: Request, run_id: str) -> Response:
+    async def run_detail(request: Request, run_id: str, exempted: int = 0) -> Response:
         run = await queries.get_run(run_id)
         if run is None:
             return _problem(request, 404, "找不到这次运行", f"运行 {run_id} 不在库里。")
@@ -690,18 +740,115 @@ def create_app(
                 # 报告是当时存下来的快照，本来就不依赖今天的场景文件。
                 scenario = None
 
+        report = queries.parse_report(run)
         return templates.TemplateResponse(
             request,
             "run.html",
             {
                 "run": run,
-                "report": queries.parse_report(run),
+                "report": report,
                 "scenario": scenario,
+                "actions": _finding_actions(report, scenario, run_id),
+                "exempted": bool(exempted),
                 "tool_calls": await queries.tool_calls_for_run(run_id),
                 "snapshots": await queries.snapshots_for_sequence(run.session_sequence_id),
                 "label": _verdict_label(run.verdict_ok),
             },
         )
+
+    @app.post("/runs/{run_id}/exempt", response_class=HTMLResponse)
+    async def exempt_finding(
+        request: Request,
+        run_id: str,
+        detector: str = Form(...),
+        tool: str = Form(""),
+        reason: str = Form(""),
+        acknowledge_write: str = Form(""),
+    ) -> Response:
+        """把「这条我认可是误报」写进**这份运行所跑的那个场景文件**。
+
+        写的是**以后的运行**，不改这次的报告——报告是当时存下来的快照。这一条
+        界面上必须说清楚，否则用户点完回来看报告没变，会以为自己没点成功。
+        """
+        run = await queries.get_run(run_id)
+        if run is None:
+            return _problem(request, 404, "找不到这次运行", f"运行 {run_id} 不在库里。")
+
+        # 只有**真的会去查豁免**的那一类才收。
+        #
+        # 这不是保守：收下一条永远不命中的规则，等于让用户以为自己处理过了——
+        # 而他那条 fail 还在。记忆族另有出口（场景里的 `must_hold` / `forbidden`），
+        # 剩下 10 个名字那条路上压根没有查豁免那一步。三种情形说得不一样，
+        # 见 `detectors.exemption_kind`。
+        kind = detectors.exemption_kind(detector)
+        if kind == detectors.EXEMPT_MEMORY:
+            return _problem(
+                request,
+                400,
+                "这一族不吃豁免",
+                f"{detector} 属于记忆族。它的例外机制不是豁免，而是场景里逐条写下的"
+                f"`must_hold` / `forbidden`——那本来就是「什么算例外」的声明。\n"
+                f"再叠一层豁免等于给同一件事开两个开关，所以引擎会直接拒收。"
+                f"要去改，打开场景文件改 `memory:` 那一段。",
+            )
+        if kind == detectors.EXEMPT_NONE:
+            return _problem(
+                request,
+                400,
+                "这一类今天没有出口",
+                f"{detector} 这条路上「压根没有查豁免那一步」，所以写进去的规则永远"
+                f"不会命中，而报告上看起来和「你处理过了」一模一样。\n"
+                f"与其给你一个按不动的开关，不如直说：这一类今天就是办不到。"
+                f"真要让这条结论消失，只能去改场景本身（把那个条件去掉）。",
+            )
+
+        text = paths.read_scenario_text(run.scenario_id, root=app.state.scenarios_root)
+        scenario = loader.parse_scenario(
+            text, source=f"scenarios/{run.scenario_id}.yaml"
+        )
+
+        declared = {t.name: t.is_write for t in scenario.tools}
+        chosen = tool.strip()
+        if chosen and chosen not in declared:
+            raise ScenarioError(
+                f"这份场景里没有声明过工具 {chosen!r}，所以这条豁免永远不会命中。\n"
+                f"已声明的工具：{sorted(declared) or '（无）'}"
+            )
+        # 会改世界的调用要多一道确认。判据用**场景声明的**写属性——它是全仓
+        # 唯一一处写/读属性的来源（见 `runner._run_detectors` 的说明）。
+        #
+        # 覆盖面按"这条规则能命中哪些调用"算：指名了工具就看那个工具；没指名
+        # 就是所有工具，其中只要有一个会改世界，这条规则就可能落在写调用上。
+        touches_write = (
+            declared[chosen] if chosen else any(declared.values())
+        )
+        if touches_write and acknowledge_write != "1":
+            raise ScenarioError(
+                "这条结论会落在「会改世界的调用」上，所以要多一次确认。\n"
+                "豁免是这套东西里唯一能让结论消失的开关，静音一次重复扣款的告警"
+                "得是一个你写下来的动作，不能是一个顺手点掉的按钮。\n"
+                "确认了就把下面那个框勾上再点一次。"
+            )
+
+        new_text = exempt.append_decl(
+            text,
+            exempt.render_decl(
+                detector=detector,
+                tool=chosen or None,
+                reason=reason,
+                allow_write=touches_write,
+            ),
+        )
+        # **先解析，再落盘。** 插入是一次文本手术，做歪了的表现是"文件还在、
+        # 只是加载不出来了"——而全部用例都在这些文件里。
+        loader.parse_scenario(new_text, source=f"scenarios/{run.scenario_id}.yaml")
+        paths.write_scenario_text(
+            run.scenario_id, new_text, root=app.state.scenarios_root
+        )
+        log.info(
+            "api.exempted", run_id=run_id, scenario=run.scenario_id, detector=detector
+        )
+        return RedirectResponse(f"/runs/{run_id}?exempted=1", status_code=303)
 
     # --- 指标看板（需求 3.7） ---------------------------------------------
     #

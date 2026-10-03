@@ -28,6 +28,33 @@
   {% if scenario %} · <a href="/scenarios/{{ run.scenario_id }}">打开场景</a>{% endif %}
 </p>
 
+{# 刚写完一条豁免的回执。
+
+   这一块**必须有**：写成功之后是重定向回本页，而这一页上的报告一个字都不会变
+   （快照是当时存下来的）。没有回执的话，「写成功了」和「点了个寂寞」在屏幕上
+   长得一模一样——用户会再点一次，于是场景文件里多一条重复的规则。静默的成功
+   和静默的失败分不开，这一页就白设计了。 #}
+{% if exempted %}
+<div class="panel ok">
+  <strong>写下去了。</strong>
+  <p>
+    这条规则已经追加进 <code>scenarios/{{ run.scenario_id }}.yaml</code>。
+    下一次跑这份场景时，这个检测器上<b>这一类的</b>结论就不会再出现——规则认的是
+    「哪个检测器 + 哪个工具」，不是「报告里的第几条」（下面那张表里说得更细）。
+  </p>
+  <p class="plain">
+    这一页上的报告是当时存下来的快照，<b>一个字都不会变</b>。所以你还看得见那条红，
+    那是对的：它记的是那次运行真的发生了什么，而豁免改的是以后的运行。
+    想确认规则写成了什么样，<a href="/scenarios/{{ run.scenario_id }}">打开场景文件</a>
+    看最后的 <code>exemptions:</code> 那一段。
+  </p>
+  <p class="note">
+    代价照旧：它进了这份场景的配置指纹。以后拿这次运行当基线做回归对比，
+    结果会变成「改的是测试本身」，不再计数。
+  </p>
+</div>
+{% endif %}
+
 {% if report is none %}
 <div class="panel warn">
   <strong>这次运行没有留下结论快照。</strong>
@@ -500,6 +527,68 @@
           <summary class="dim">细节</summary>
           <pre class="wrap">{{ f.detail | tojson(indent=2) }}</pre>
         </details>
+        {% endif %}
+        {# 这条结论能不能被认成误报。**三种情形分开渲染**，见 `_finding_actions`：
+           能豁免的才摆表单；记忆族指去 `must_hold` / `forbidden`；剩下的如实说
+           今天没有出口。摆一个统一的按钮，后两种上就是一个按不动的开关。 #}
+        {% set act = actions.get(f.detector ~ '#' ~ loop.index0) %}
+        {% if act and act.kind == 'can' and not act.writable %}
+        <p class="note">这份运行跑的那份场景文件现在打不开（被删了或改坏了），
+          所以没有「以后的运行」可以改。修好那个文件，这一条旁边才会出现出口。</p>
+        {% elif act and act.kind == 'can' %}
+        <details>
+          <summary class="dim">这条我认可是误报</summary>
+          <form class="inline" method="post" action="/runs/{{ act.run_id }}/exempt">
+            <input type="hidden" name="detector" value="{{ act.detector }}">
+            {% if act.tool %}
+            <input type="hidden" name="tool" value="{{ act.tool }}">
+            <label>写给：<code>{{ act.tool }}</code></label>
+            {% else %}
+            <label>写给
+              <select name="tool">
+                <option value="">所有工具</option>
+                {% for t in act.tools %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+              </select>
+            </label>
+            {% endif %}
+            <input name="reason" placeholder="为什么这一条不算问题（必填）" size="48" required>
+            {% if act.touches_write %}
+            <label><input type="checkbox" name="acknowledge_write" value="1">
+              我确认这是会改世界的调用</label>
+            {% endif %}
+            <button type="submit">写进场景文件</button>
+          </form>
+          <p class="note">
+            <b>这条规则认的不是「就这一条」。</b>它认的是「这个检测器 + 这个工具」，
+            所以以后跑这份场景时，同一个检测器在同一个工具上<b>任何一条</b>结论都会被
+            静音——包括那些你还没见过的。想只放过其中一部分，得手工在场景文件的
+            <code>exemptions:</code> 里补一个 <code>match:</code> 条件。
+          </p>
+          <p class="note">
+            这条结论没有指向某一个工具时，豁免会覆盖<b>所有工具</b>上这个检测器的结论。
+          </p>
+          <p class="note">
+            写下去之后，这份场景里就多一条豁免规则。两件代价要先知道：
+            <b>一、它改的是以后的运行</b>，这一页上的报告是当时存下来的快照，一个字都不会变；
+            <b>二、它会进配置指纹</b>——以后拿这次运行当基线做回归对比时，
+            比对结果会变成「改的是测试本身」，也就是<b>不再计数</b>。
+            换句话说，静音一条告警的代价是这份场景从此不再是同一套测试。
+          </p>
+          {% if act.touches_write %}
+          <p class="note">
+            这一条会落在<b>会改世界的调用</b>上，所以要额外勾一次确认。豁免是这套东西里
+            唯一能让结论消失的开关，静音一次重复扣款的告警得是一个你写下来的动作。
+          </p>
+          {% endif %}
+        </details>
+        {% elif act and act.kind == 'memory' %}
+        <p class="note">记忆族不吃豁免。它的例外机制是场景里逐条写下的
+          <code>must_hold</code> / <code>forbidden</code>——那本来就是
+          「什么算例外」的声明，再叠一层等于给同一件事开两个开关。</p>
+        {% elif act %}
+        <p class="note">这一类<b>今天没有出口</b>：这条路上压根没有查豁免那一步，
+          写进去的规则永远不会命中，而报告上看起来和「你处理过了」一模一样。
+          与其给你一个按不动的开关，不如直说。</p>
         {% endif %}
       </td>
     </tr>

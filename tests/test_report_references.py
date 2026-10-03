@@ -23,10 +23,17 @@
 装的是体检报告。拿运行快照的键去要求它们，会当场报出一堆并不存在的缺陷——
 **一个会误报的闸门迟早被整体忽略**，那时它连真的缺陷也一起放过去了。
 
-所以"哪些模板归这里管"由 `app.py` 里 `TemplateResponse` 的实参现推：
-`report` 的值写的是 `parse_report(...)` 的，就是运行快照。这条推法本身也有
-一条相机盯着（`test_the_run_snapshot_template_set_is_what_we_think`），
-免得哪天有人加了一页 `run2.html` 而闸门**静默地**没去看它。
+所以"哪些模板归这里管"由 `app.py` 里 `TemplateResponse` 的实参现推：`report`
+的值来自 `parse_report(...)` 的就是运行快照（直接写在实参里，或者先落到一个局部
+变量再进实参，两种都认）。这条推法本身也有一条相机盯着
+（`test_the_run_snapshot_template_set_is_what_we_think`），免得哪天有人加了一页
+`run2.html` 而闸门**静默地**没去看它。
+
+**它已经咬过一次了。** `run_detail` 后来把那份快照提成了一个局部变量（同一个
+快照还要交给 `_finding_actions`），而推法当时只认"直接写在实参里"这一种——
+`run.html` 于是掉出范围，扫描结果变成空集，五条断言一起红。**那次红是相机在
+干活，不是误报**：闸门真的什么都没查了。修的方向是让推法跟上这种写法（见
+`_run_snapshot_templates` 的说明），不是把代码改回去迁就正则。
 
 范围之外的是什么，写在这儿而不是假装不存在：`metrics.html` 与
 `checkup_result.html` 上那些 `report.X` **没有**被这道闸门核对过。
@@ -91,18 +98,40 @@ _CALL_WINDOW = 600
 _DICT_ATTRS = frozenset({"items", "keys", "values", "get"})
 
 
+#: `report = queries.parse_report(run)` 这种**先落到局部变量、再进实参**的写法。
+#: 命名分组 `name` 是那个变量名。
+_REPORT_LOCAL = re.compile(r"\b(\w+)\s*=\s*[^=\n]*\bparse_report\(")
+
+
 def _run_snapshot_templates() -> set[str]:
     """哪些模板的 `report` 装的是运行快照——**从 `app.py` 现推**。
 
-    推法：`TemplateResponse` 的实参里，`"report"` 的值写成 `parse_report(...)`
-    的那些。写成清单手抄的话，新加一页就漏一页，而漏掉的表现是"这一页没被查过"
+    写成清单手抄的话，新加一页就漏一页，而漏掉的表现是"这一页没被查过"
     ——和"这一页查过了没问题"长得一模一样。
+
+    推法两步：
+
+    1. `"report"` 的值直接在 `TemplateResponse` 的实参里写着 `parse_report(...)`；
+    2. 或者**先落到一个局部变量**再进实参（`report = queries.parse_report(run)`
+       写在上面，实参里是 `"report": report`）。
+
+    第二步不是锦上添花：原先只判第一步，而 `run_detail` 因为要把同一个快照交给
+    `_finding_actions` 而把它提了出去，于是 `run.html` **静默地掉出了这道闸门的
+    范围**——扫描结果变成空表，五条断言一起红。红是好事（`test_the_run_snapshot_
+    template_set_is_what_we_think` 那条相机正是为这一刻准备的），但闸门的正确反应
+    是**跟上这种写法**，不是把代码改回去迁就它：哪一种写法更好读，不该由扫描器的
+    正则决定。
     """
     text = APP_PY.read_text(encoding="utf-8")
+    locals_from_parse = {m.group(1) for m in _REPORT_LOCAL.finditer(text)}
     found: set[str] = set()
     for match in re.finditer(r'"([\w_]+\.html)"', text):
         window = text[match.start() : match.start() + _CALL_WINDOW]
         if "parse_report(" in window:
+            found.add(match.group(1))
+            continue
+        bound = re.search(r'"report"\s*:\s*(\w+)', window)
+        if bound and bound.group(1) in locals_from_parse:
             found.add(match.group(1))
     return found
 

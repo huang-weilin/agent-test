@@ -12,7 +12,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from sandbox.detectors.autonomy import AutonomyDetector
-from sandbox.detectors.base import CallView, ExemptionSet, Finding
+from sandbox.detectors.base import (
+    EXEMPTION_AWARE,
+    NOT_EXEMPTIBLE,
+    CallView,
+    ExemptionSet,
+    Finding,
+)
 from sandbox.detectors.idempotency import IdempotencyDetector, ToolFacts
 from sandbox.detectors.loop import LoopDetector
 from sandbox.detectors.memory import MemoryDetector, MemoryRules
@@ -70,6 +76,42 @@ BOUNDARY_DETECTOR_NAMES: frozenset[str] = frozenset(
 #: 场景里有 6 处合法声明写的是 `tool_schema`，而它不在那 15 个名字里——只按
 #: `KNOWN_DETECTORS` 判会当场冤枉 6 处。
 SCENARIO_DETECTOR_NAMES: frozenset[str] = KNOWN_DETECTORS | BOUNDARY_DETECTOR_NAMES
+
+#: 用户在报告页上，对一条结论能做什么。三选一，**不是一个"能不能豁免"的布尔值**：
+#: 这三种情形对用户的下一步动作完全不同，合成一个真假值就必然要对其中两种撒谎。
+EXEMPT_CAN = "can"
+"""能豁免：这条路上真的会去查豁免规则。"""
+
+EXEMPT_MEMORY = "memory"
+"""记忆族：有例外机制，但不是豁免——是场景里逐条声明的 `must_hold` / `forbidden`。"""
+
+EXEMPT_NONE = "none"
+"""没有出口：那条路上压根没有查豁免那一步。今天就是办不到，如实说。"""
+
+
+def exemption_kind(detector: str) -> str:
+    """这个检测器上的结论，用户有没有办法说「这条我认可是误报」。
+
+    **必须三种分开**。界面上写成"每条结论旁边都有个按钮"的话，用户点到后两种
+    上就会撞见一个装上了但不生效的开关——豁免机制自己最不能出的就是这个毛病
+    （它整个存在的意义就是"让结论消失"，一个静音不了的静音开关比没有更坏）。
+
+    实测：19 个检测器名里能豁免的只有 6 个，记忆族 3 个，剩下 10 个没有出口。
+
+    名字不认识就**报错**，不返回 `EXEMPT_NONE`——一个拼错的检测器名会安安静静地
+    被归进"没有出口"，而它看起来和"这条确实办不到"一模一样。
+    """
+    if detector in EXEMPTION_AWARE:
+        return EXEMPT_CAN
+    if detector in NOT_EXEMPTIBLE:
+        return EXEMPT_MEMORY
+    if detector in SCENARIO_DETECTOR_NAMES:
+        return EXEMPT_NONE
+    raise ValueError(
+        f"不认识的检测器名 {detector!r}。认得的名字在 `SCENARIO_DETECTOR_NAMES` 里。"
+        f"（这里不接受没见过的名字：把它归进「没有出口」的话，"
+        f"一个拼错的名字会看起来像一条真的办不到的结论。）"
+    )
 
 
 def run_all(
