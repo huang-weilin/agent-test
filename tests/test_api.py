@@ -582,7 +582,11 @@ async def test_legacy_run_shows_unknown_not_failed(
     resp = await client.get(f"/runs/{legacy_run}")
     assert resp.status_code == 200
     assert "未留存" in resp.text
-    assert "不通过" not in resp.text
+    # 判的是**页面上没有那个红标签**，不是"这三个字不出现"。
+    # 2026-10-03 改：页面上多了一层给外行看的说明，其中一句正确地写着
+    # 「这不是通过，也不是不通过」——它没有声称这次失败，却会让子串检查变红。
+    # 一条会对合法文案误报的闸门，迟早被人改宽或者整体忽略。
+    assert '<span class="badge fail">不通过</span>' not in resp.text
     # 明细表里的东西仍然要显示出来——审计轨迹不依赖那份结论快照
     assert "工具调用审计" in resp.text
 
@@ -780,7 +784,10 @@ async def test_a_run_without_a_clock_shows_no_world_time_section(
     """
     resp = await client.get(f"/runs/{baseline_run}")
     assert resp.status_code == 200
-    assert "世界时间" not in resp.text
+    # 判的是**这一节标题没出现**，不是"这四个字不出现"：别处的说明里可以正当
+    # 地提到"世界时间"这个词（会话那一节的说明就提到了），而这条测的是这一节
+    # 本身在不在。理由同上一条。
+    assert "<h2>世界时间</h2>" not in resp.text
 
 
 # --- 自主行为：授权必须和结论挨着出现 ---

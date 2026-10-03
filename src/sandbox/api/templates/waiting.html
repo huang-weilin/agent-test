@@ -12,19 +12,49 @@
 <meta http-equiv="refresh" content="2">
 {% endif %}
 
+{% if job.checkup %}
+<h1>正在体检：{{ job.checkup }}</h1>
+{% else %}
 <h1>正在运行 <code>{{ job.scenario_id }}</code></h1>
+{% endif %}
 
 {% if job.is_running %}
 <div class="panel">
+  {% if job.checkup %}
+  <p>这是一趟体检：{{ job.steps | length }} 项依次跑，每项起一次运行。
+     一项十几秒，跑完一项自动接下一项。</p>
+  {# 进度表是**按项列出来**的，不是一个"3/6"的进度条：哪一项卡住了、哪一项
+     已经出了结论，只有逐项列才看得出来。 #}
+  <table class="grid tight">
+    <thead><tr><th>#</th><th>场景</th><th>状态</th><th>记录</th></tr></thead>
+    <tbody>
+      {% for step in job.steps %}
+      <tr>
+        <td class="num">{{ loop.index }}</td>
+        <td><code>{{ step.scenario_id }}</code></td>
+        <td class="nowrap">
+          {% if step.state == 'running' %}<span class="badge unknown">正在跑</span>
+          {% elif step.state == 'done' %}<span class="badge pass">跑完</span>
+          {% else %}<span class="dim">等前面跑完</span>{% endif %}
+        </td>
+        <td>{% if step.run_id %}<a href="/runs/{{ step.run_id }}">{{ step.run_id }}</a>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="note">本页每 2 秒自动刷新。已经跑了
+     {{ job.started_at | localdt('%H:%M:%S') }} 起。</p>
+  {% else %}
   <p>起三个服务（网关 / 出口代理 / mock 目标系统），逐会话拉起 Agent 进程，
      跑完检测器再比对预期。</p>
   <p class="note">本页每 2 秒自动刷新。已经跑了
      {{ job.started_at | localdt('%H:%M:%S') }} 起。</p>
+  {% endif %}
 </div>
 {% else %}
   {% if job.error %}
   <div class="panel bad">
-    <strong>执行失败。</strong>
+    <strong>{% if job.checkup %}这一趟体检被中断了。{% else %}执行失败。{% endif %}</strong>
     <pre class="wrap">{{ job.error }}</pre>
     <p class="note">
       执行失败和"没通过"是两回事：前者说明这次测试根本没跑成，
@@ -32,7 +62,10 @@
     </p>
   </div>
   {% endif %}
-  {% if not job.run_id %}
+  {# 体检作业**永远**没有 `job.run_id`（它一趟跑六次运行，每项各一个），所以
+     这一段必须先把体检排除掉。不排除的话，一趟正常的体检会被这段话宣判成
+     "运行记录都没建起来"。 #}
+  {% if not job.run_id and not job.checkup %}
   <div class="panel bad">
     运行记录都没有建起来就失败了，所以没有报告可看。
     <a href="/">回到场景列表</a>

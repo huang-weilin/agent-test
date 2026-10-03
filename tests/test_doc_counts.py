@@ -33,6 +33,24 @@ README 里那两处测试计数原先**没有东西在核**（同一种毛病：
 代价是**每加一条测试都要来改一次那两句**——和上面"句子改了也会红"是同一笔交易，同样
 是有意的。
 
+2026-10-03 又接上一句：`docs/ui.md` 测试那一节写着「`tests/test_api.py`，105 条」，
+而它当时已经 120 条了。**同一个毛病，只是那一次没被这条闸门管到**——所以现在那两句
+之外还有一句，真值同样从收集里来（这次点名一个文件）。发现它的场合是给那个文件
+补文档：一个手写的数字，在有人去读它旁边那句话之前，一直和真话长得一样。
+
+## 数不到数，也是一种假红
+
+同一天，整仓跑第一次把这道闸门跑红：子进程的输出按 UTF-8 硬解，而它写出来的
+是 GBK——`tests/test_cost_by_tool.py` 的测试函数名是中文，收集出来的用例名跟着
+子进程的控制台编码走（实测 93286 字节里有 852 个字节不是 UTF-8）。读线程抛异常，
+`proc.stdout` 变成 None，于是报出来的是「这条闸门什么也没数到」。
+
+**报错内容指错了方向**：那既不是 README 的数不对，也不是收集塌了，是这两个进程
+没在说同一种编码。所以这里既让子进程开口就说 UTF-8，也让解码退化成乱码而不是
+让读线程死掉——两种坏法都要留下能读的现场。同一条经验的另外两处：
+`tests/test_types.py`（起 mypy 时带 `PYTHONIOENCODING`）、
+`tests/test_memory_snapshot.py`（起 `mklink` 时带 `errors="replace"`）。
+
 子进程那段输出是 pytest 的界面文字，不是稳定接口。所以认不出来时必须**报错**，不许
 当成"没意见"：一个什么都没数到的检查，看起来和数过了一模一样。
 
@@ -93,6 +111,7 @@ README 里那两处测试计数原先**没有东西在核**（同一种毛病：
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -188,20 +207,35 @@ def _check(where: str, template: str, values: dict[str, int], truth: str) -> str
     return f"{where}：这句出现了 {hits} 次，闸门认不出该核哪一处：\n    {filled}"
 
 
-def _collected_count() -> int:
+def _collected_count(*paths: str) -> int:
     """起一个 `--collect-only` 子进程，问出这次会话一共收集多少条。
 
     **不递归**：子进程带 `--collect-only`，一条都不会执行。认不出那句汇总就报错，
     见文件头最后一段。
+
+    可以不传路径（整仓），也可以点名一个文件——`docs/ui.md` 那句
+    「`tests/test_api.py`，N 条」要的是后者。
     """
     proc = subprocess.run(
         # `-p no:cacheprovider`：这条闸门是在 pytest 里起 pytest，两个进程会同时写
         # 同一份 `.pytest_cache`（Windows 上那是个可能被锁住的文件）。收集数不需要缓存。
-        [sys.executable, "-m", "pytest", "--collect-only", "-p", "no:cacheprovider"],
+        [sys.executable, "-m", "pytest", "--collect-only", "-p", "no:cacheprovider", *paths],
         cwd=ROOT,
         capture_output=True,
         text=True,
         encoding="utf-8",
+        # 子进程的编码跟着它自己的控制台走，**不跟着这里写的 `encoding` 走**：那台机器上
+        # 首选编码是 GBK，而 `tests/test_cost_by_tool.py` 的测试函数名是中文，于是
+        # 收集出来的用例名全是 GBK 字节。不加这一行，读线程会抛 UnicodeDecodeError，
+        # `proc.stdout` 于是是 None，报出来的是「什么也没数到」——
+        # **明明是编码对不上，读起来像闸门自己没跑成**。同一帖药见 `tests/test_types.py`
+        # （它起 mypy 子进程时也带这一行）。
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        # `errors="replace"` 是同一件事的第二道：万一哪天子进程又不肯说 UTF-8，
+        # 让它退化成一段乱码（人能看懂是乱码），而不是让读线程死掉、把
+        # 「子进程说了别的编码」变成「子进程什么都没说」。
+        # 同一处做法见 `tests/test_memory_snapshot.py` 起 `mklink` 那一段。
+        errors="replace",
         timeout=300,
     )
     match = re.search(r"(\d+) tests? collected", proc.stdout or "")
@@ -232,6 +266,32 @@ def test_the_test_count_in_readme_is_real() -> None:
     assert not missing, (
         f"README 里的测试计数和真值（{real} 条，`--collect-only` 数出来的）对不上。"
         f"要改的是 README，不是这里；这两句该长这样：\n  " + "\n  ".join(missing)
+    )
+
+
+#: `docs/ui.md` 测试那一节里那句「这一份文件有多少条」。占位符是条数。
+_UI_API_FILE = "tests/test_api.py"
+_UI_API_COUNT = "`tests/test_api.py`，{n} 条"
+
+
+def test_the_api_test_count_in_the_ui_doc_is_real() -> None:
+    """`docs/ui.md` 里那句「`tests/test_api.py`，N 条」也是数出来的。
+
+    这一句原先写的是 105，而它当时已经涨到 120 了——**没有东西在核它**，而它读起来
+    和一句真话一模一样（同一种毛病，见文件头）。修那个数字的时候顺手把两边接上：
+    以后改这一句的人一定会再看一眼真值。
+
+    单独成一条、不复用 `build_places`：那一条流水线比的是**从 yaml 数出来的**数，
+    而这一句的真值要起一个收集子进程，出处不同，报错里那句"真值从哪来"也不同
+    （同一条理由见 `_check` 的 `truth` 参数）。
+    """
+    real = _collected_count(_UI_API_FILE)
+    filled = _UI_API_COUNT.format(n=real)
+    hits = _read("docs/ui.md").count(_flat(filled))
+    assert hits == 1, (
+        f"docs/ui.md 里找不到这句（或者数字对不上）：\n    {filled}\n"
+        f"    真值是从 `pytest --collect-only {_UI_API_FILE}` 数出来的：{real} 条。"
+        f"改了文案就来改 tests/test_doc_counts.py 里的 `_UI_API_COUNT`。"
     )
 
 

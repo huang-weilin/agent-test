@@ -12,6 +12,11 @@
 所以这里**不做队列**。第二个请求直接拒绝，并且明说"上一个还没跑完"。排队
 看起来更友好，但用户点了"运行"之后对着一个没有任何解释的转圈等一分钟，
 和收到一句"`clean` 正在跑，等它结束"相比，后者才是可理解的。
+
+**一键体检（`checkup:`）在这里是"一个作业、串行 N 步"，不是 N 个作业。**
+理由还是上面那条：执行位只有一格。拆成 N 个作业的话，中间会被别人的"运行"
+插进来，而体检那一页的结论是**跨这几支场景**读的——插进来的一支会让那页
+多出一项或者少掉一项，而且看起来完全正常。
 """
 
 from __future__ import annotations
@@ -32,6 +37,25 @@ log = structlog.get_logger(__name__)
 # （`TestRun.report_json`），内存里这份只是为了"刚点完那一下"的重定向。
 # 留几个是为了宽容一点：用户开了两个标签页点同一个场景。
 _HISTORY = 20
+
+
+@dataclass
+class JobStep:
+    """体检里的一项在作业里的进度。**一项一支场景，依次跑。**
+
+    `run_id` 在这里是**每一步各有一个**（一项一次运行记录），和 `Job.run_id`
+    不是一回事：那个是单项作业的那一个。
+    """
+
+    scenario_id: str
+    #: 对应菜单里的哪一项。**结论页按它对回菜单**，不按数组下标对——
+    #: 菜单是在磁盘上、随时能改的文件，跑到一半被改过的话，按下标对会把
+    #: 一项的结论安到另一项的问题底下，而那一页看起来完全正常。
+    item_id: str | None = None
+    state: str = "pending"  # pending | running | done
+    run_id: str | None = None
+    ok: bool | None = None
+    error: str = ""
 
 
 @dataclass
@@ -59,10 +83,37 @@ class Job:
     #: 不用再点一次。**不由请求里的参数决定**（那会变成一个开放重定向），
     #: 调用方在服务端拼好，见 `_safe_return_to`。
     return_to: str | None = None
+    #: 体检菜单名。None = 单项作业。
+    #:
+    #: 它一非空，这个作业就是"串行跑完好几个场景"，页面和跳转都换一套：
+    #: 跑完的结论要从**每一步各自的运行记录**里读回来合成一页，不是从
+    #: `result` 里拿——`result` 只留最后一步的。
+    checkup: str | None = None
+    #: 体检：要依次跑的全部场景。单项作业是空列表。
+    steps: list[JobStep] = field(default_factory=list)
 
     @property
     def is_running(self) -> bool:
         return self.state == "running"
+
+    @property
+    def label(self) -> str:
+        """拒绝别人时该说的名字。**体检和单项要说得不一样**：体检跑到一半的
+        时候，作业上挂着的场景只是它那六项里的某一项，用户看到「上一次运行
+        （clean）还没结束」会去找那一次 `clean` 的结论，而那个结论还没生成。
+        """
+        if self.checkup is None:
+            return self.scenario_id
+        done = sum(1 for s in self.steps if s.state == "done")
+        return f"体检「{self.checkup}」（{len(self.steps)} 项里跑完了 {done} 项）"
+
+    @property
+    def current_scenario(self) -> str | None:
+        """正在跑的那一项。没有在跑的就返回 None。"""
+        for step in self.steps:
+            if step.state == "running":
+                return step.scenario_id
+        return None
 
 
 class JobRegistry:
@@ -110,6 +161,64 @@ class JobRegistry:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return job
+
+    def start_many(self, plans: list[tuple[str, Scenario]], *, checkup: str) -> Job | None:
+        """体检：占住执行位，依次跑完这一串。已经有运行在跑时返回 None。
+
+        `plans` 是 `(体检项标识, 场景)` 的一串，按顺序跑。
+
+        **空列表返回 None**，不是"起一个什么都不做的作业"——一个零项的体检
+        跑完之后会渲染出一页"没有任何问题"的结论，而它一项都没跑。
+        """
+        if self._active is not None or not plans:
+            return None
+
+        job = Job(
+            id=str(uuid.uuid4()),
+            # 页头那个"正在跑 X"要有个名字。体检跑到第几项是变的，所以这里
+            # 放的是**它这一趟要跑的第一支**，当前那一项看 `current_scenario`。
+            scenario_id=plans[0][1].id,
+            started_at=datetime.now(UTC),
+            checkup=checkup,
+            steps=[JobStep(scenario_id=s.id, item_id=item_id) for item_id, s in plans],
+        )
+        self._active = job
+        task = asyncio.create_task(self._execute_many(job, plans))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return job
+
+    async def _execute_many(self, job: Job, plans: list[tuple[str, Scenario]]) -> None:
+        """**一项失败了继续跑下一项。**
+
+        理由和"不排队"那条是同一个：体检的用处在于"这一趟看出了什么"，而
+        中间某一项起不来（场景文件坏了、Agent 崩了）不该让其余五项一起没有
+        结论。失败那一项会以"没跑成"的样子**出现在结论页上**，不会被跳过，
+        也不会读成"它没问题"。
+        """
+        try:
+            for (_, scenario), step in zip(plans, job.steps, strict=True):
+                step.state = "running"
+                try:
+                    result = await self._runner_factory().run(scenario)
+                except Exception as exc:  # noqa: BLE001 — 一项的异常不该带走整趟体检
+                    log.exception("api.checkup_step_failed", scenario=scenario.id)
+                    step.error = f"{type(exc).__name__}: {exc}"
+                else:
+                    step.run_id = result.run_id or None
+                    step.ok = result.ok
+                    step.error = result.error or ""
+                step.state = "done"
+        except asyncio.CancelledError:
+            job.state = "done"
+            job.error = "服务关闭，这趟体检被中断。"
+            job.finished_at = datetime.now(UTC)
+            self._retire(job)
+            raise
+
+        job.state = "done"
+        job.finished_at = datetime.now(UTC)
+        self._retire(job)
 
     async def _execute(self, job: Job, scenario: Scenario) -> None:
         try:

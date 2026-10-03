@@ -7,6 +7,19 @@
   <code>{{ run.scenario_id }}</code>
   {{ m.verdict_badge(run.verdict_ok) }}
 </h1>
+
+{# 这一页是给两种人看的：改这套系统的人（灰小字的 note）和不写代码的人（灰底
+   的 plain）。整页最上面先说清这一页里都有什么、最上面那个标签是什么意思，
+   再往下才是逐节的细节——外行最容易在第一屏就放弃，后面的解释他再也看不到了。
+
+   标签的解释**跟着这次运行的实际结论走**，不是列一张三格的图例：一次通过的
+   运行旁边写着"未留存是什么意思"，读的人会以为这次是未留存。 #}
+{% set verdict_key = 'unknown' if run.verdict_ok is none else ('pass' if run.verdict_ok else 'fail') %}
+<p class="plain">
+  {{ explain.PAGE_INTRO }}
+  <br>
+  <strong>最上面那个标签</strong>：{{ explain.RUN_VERDICT_HELP[verdict_key] }}
+</p>
 <p class="lede">
   运行 <code>{{ run.id }}</code> ·
   {{ run.started_at | localdt }} 起 ·
@@ -97,6 +110,7 @@
 {# 长时运行专属。**两个数必须并列**：只写"模拟跨度 1.2 天"的话，读的人会以为
    跑一次要一天。这两行是这一整个特性的核心陈述。 #}
 <h2>世界时间</h2>
+<p class="plain">{{ explain.section("world_time") }}</p>
 <section class="panel">
   <p>
     这次是<strong>长时运行</strong>：两段会话之间，<strong>世界</strong>过去了一段时间，
@@ -167,6 +181,7 @@
 {# 只在有无人值守的会话时出现。普通运行里挂一个空的自主行为面板，读的人分不出
    "这次没做自主测试"和"这次做了但没测到东西"——和世界时间那一块同一个道理。 #}
 <h2>自主行为</h2>
+<p class="plain">{{ explain.section("autonomy") }}</p>
 <section class="panel">
   <p>
     这次运行里有 <strong>无人值守</strong>的会话：它被叫醒时没有人在场，
@@ -207,6 +222,7 @@
 {% endif %}
 
 <h2>会话</h2>
+<p class="plain">{{ explain.section("sessions") }}</p>
 <table class="grid">
   <thead>
     <tr>
@@ -278,6 +294,7 @@
    留白最危险：它读起来和"跑过了，没有一次不成功"一模一样。 #}
 {% if report and report.call_chain %}
 <h2>调用链</h2>
+<p class="plain">{{ explain.section("call_chain") }}</p>
 {% for chain in report.call_chain.chains %}
 <h3>会话 #{{ chain.ordinal }}{% if chain.name %} · {{ chain.name }}{% endif %}</h3>
 <p class="note">{{ chain.headline }}</p>
@@ -342,6 +359,7 @@
 
 {% if report and report.session_diff %}
 <h2>跨会话差异</h2>
+<p class="plain">{{ explain.section("session_diff") }}</p>
 {% for note in report.session_diff.notes %}
 <p class="dim">{{ note }}</p>
 {% endfor %}
@@ -428,6 +446,15 @@
 {% endif %}
 
 <h2>检测结论</h2>
+<p class="plain">{{ explain.section("findings") }}</p>
+{# 四态图例。**四种都要列，包括这次没出现的那几种**——只解释出现过的那些，
+   读的人就不知道"没出现的那些"是什么意思了；而这一页最容易被误读的恰恰是
+   没出现的那几种（没报 = 通过？还是没查？）。 #}
+<p class="plain">
+  {% for v in ("pass", "fail", "warning", "inconclusive") %}
+  {{ m.verdict_pill(v) }} {{ explain.verdict_help(v) }}{% if not loop.last %}<br>{% endif %}
+  {% endfor %}
+</p>
 {% if report.findings %}
 <table class="grid">
   <thead><tr><th>结论</th><th>检测器</th><th>说明</th></tr></thead>
@@ -438,6 +465,12 @@
       <td><code>{{ f.detector }}</code></td>
       <td>
         {{ f.summary }}
+        <div class="plain">
+          {{ explain.detector_help(f.detector) }}
+          {% if f.detail and f.detail.reason_code %}
+          <br>{{ explain.reason_help(f.detail.reason_code) }}
+          {% endif %}
+        </div>
         {% if f.detail %}
         <details>
           <summary class="dim">细节</summary>
@@ -456,6 +489,7 @@
 
 {% if report.expectation %}
 <h2>预期比对</h2>
+<p class="plain">{{ explain.section("expectation") }}</p>
 <table class="grid">
   <tbody>
     {% for row in report.expectation.matched %}
@@ -524,6 +558,7 @@
 {% endif %}
 
 <h2>工具调用审计</h2>
+<p class="plain">{{ explain.section("tool_audit") }}</p>
 {% if tool_calls %}
 <table class="grid">
   <thead>
@@ -593,6 +628,7 @@
 {% endif %}
 
 <h2>记忆观测</h2>
+<p class="plain">{{ explain.section("memory_obs") }}</p>
 {% if report and report.memory %}
 <table class="grid">
   <thead>
@@ -652,6 +688,7 @@
 {% endif %}
 
 <h2>记忆快照</h2>
+<p class="plain">{{ explain.section("memory_snapshots") }}</p>
 {% if snapshots %}
 <table class="grid">
   <thead>
@@ -683,6 +720,7 @@
 
 {% if report and report.cost %}
 <h2>成本</h2>
+<p class="plain">{{ explain.section("cost") }}</p>
 <p class="lede">
   {{ report.cost.llm_calls }} 次 LLM 调用 ·
   输入 {{ report.cost.input_tokens | tokens }} ·

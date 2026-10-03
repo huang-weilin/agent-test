@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}一键体检{% endblock %}
+{% block body %}
+
+<h1>一键体检</h1>
+<p class="plain">
+  体检这件事的意思是：你不用挑场景、不用挑检测器，只回答一个问题——
+  「要查哪种毛病」。菜单里那几条就是一个一个的毛病，按一下按钮，
+  它自己把这几种毛病各演一遍，最后只给你一页纸：哪一种抓到了、哪一种没抓到、
+  哪几格这次压根没测。
+</p>
+
+{% if active %}
+<div class="actions">
+  <span class="note">
+    现在有运行在跑（{{ active.label }}），跑完再开始体检。
+    沙箱一次只能跑一个——两个同时跑会互相改掉对方的目标系统地址，
+    两边都会给出看起来正常的报告，而数据是串的。
+  </span>
+</div>
+{% endif %}
+
+{% for entry in checkups %}
+  {% if entry.checkup %}
+  <div class="panel">
+    <h2>{{ entry.checkup.name }}</h2>
+    <p class="plain">{{ entry.checkup.summary }}</p>
+    <p class="note">{{ entry.checkup.subject_note }}</p>
+
+    <table class="grid tight">
+      <thead>
+        <tr><th>要查的毛病</th><th>用什么演</th><th>为什么要查</th></tr>
+      </thead>
+      <tbody>
+        {% for item in entry.checkup.items %}
+        <tr>
+          <td><strong>{{ item.question }}</strong></td>
+          <td><code>{{ item.scenario }}</code></td>
+          <td class="note">{{ item.why }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <form class="inline" method="post" action="/checkup/{{ entry.name }}/start">
+      <button class="primary" type="submit" {% if active %}disabled{% endif %}>
+        开始体检（{{ entry.checkup.items | length }} 项，依次跑）
+      </button>
+      <span class="note">
+        一项十几秒，六项大约一分多钟。本页每 2 秒自动刷新，跑完直接出结论。
+      </span>
+    </form>
+  </div>
+  {% else %}
+  <div class="panel bad">
+    <h2>{{ entry.name }}</h2>
+    <p><strong>这份菜单打不开。</strong></p>
+    <pre class="wrap">{{ entry.error }}</pre>
+    <p class="note">
+      菜单是 <code>checkups/{{ entry.name }}.yaml</code>，人手编辑的。
+      照上面那句话改掉就能跑。
+    </p>
+  </div>
+  {% endif %}
+{% else %}
+<div class="panel">
+  <p><code>checkups/</code> 目录里一份菜单都没有。</p>
+  <p class="note">
+    菜单是这个目录下的 <code>.yaml</code> 文件，写法见
+    <code>docs/checkup.md</code>。没有菜单就没得体检——这一页不会
+    退化成"随便挑一支场景跑跑"，因为那样跑出来的结论没人知道覆盖了什么。
+  </p>
+</div>
+{% endfor %}
+
+{% endblock %}

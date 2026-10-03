@@ -38,8 +38,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from sandbox import metrics
-from sandbox.api import paths, queries
-from sandbox.api.jobs import JobRegistry
+from sandbox.api import explain, paths, queries
+from sandbox.api.jobs import Job, JobRegistry, JobStep
+from sandbox.checkup import catalog
+from sandbox.checkup import report as checkup_report
 from sandbox.cost import aggregator as cost
 from sandbox.db.engine import init_db
 from sandbox.formatting import byte_size, millis, money, span_human, tokens
@@ -47,6 +49,7 @@ from sandbox.memory.observe import phase_label
 from sandbox.regression import cases, diff
 from sandbox.scenario import identity, loader
 from sandbox.scenario.loader import ScenarioError
+from sandbox.scenario.spec import Scenario
 
 log = structlog.get_logger(__name__)
 
@@ -157,6 +160,7 @@ def _job_return_to(job: Any) -> str | None:
 def create_app(
     *,
     scenarios_root: Path | None = None,
+    checkups_root: Path | None = None,
     registry: JobRegistry | None = None,
 ) -> FastAPI:
     app = FastAPI(
@@ -168,6 +172,9 @@ def create_app(
         redoc_url=None,
     )
     app.state.scenarios_root = scenarios_root
+    # 菜单目录同样可覆盖，理由和场景目录一样：测试要在一个临时目录里造一份
+    # 小菜单（真菜单跑一趟一分多钟，而起六个服务不是这层测试要测的东西）。
+    app.state.checkups_root = checkups_root
     app.state.jobs = registry or JobRegistry()
 
     templates = Jinja2Templates(directory=str(_TEMPLATES))
@@ -190,6 +197,10 @@ def create_app(
     # 写法，而读的人只会觉得报告马虎。（过滤器收的是整条观测，不是两个参数——
     # 模板里拿到的是 `summarize_observations` 写下的那个字典。）
     templates.env.filters["phase_label"] = _phase_label_of
+    # 给不写代码的人看的那一层解释，走 Jinja 全局而不是每个路由的 context：
+    # 前者漏了会**当场报错**（模板里 `explain` 未定义），后者漏了是渲染成空白
+    # ——而空白和"这一节没什么好说的"在页面上一模一样。见 `api/explain.py`。
+    templates.env.globals["explain"] = explain
 
     app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 
@@ -208,6 +219,12 @@ def create_app(
     async def _bad_scenario(request: Request, exc: ScenarioError) -> Response:
         return _problem(request, 400, "场景文件有问题", str(exc))
 
+    @app.exception_handler(catalog.CheckupError)
+    async def _bad_checkup(request: Request, exc: catalog.CheckupError) -> Response:
+        # 菜单是人手编辑的，报错要说清是哪一行该改什么——和场景文件同一条
+        # 规矩。这里不是 500：用户改得了，改完再点一次就行。
+        return _problem(request, 400, "体检菜单有问题", str(exc))
+
     def _problem(request: Request, status: int, title: str, detail: str) -> Response:
         log.info("api.problem", path=request.url.path, status=status, detail=detail)
         if _wants_json(request):
@@ -219,6 +236,24 @@ def create_app(
             "problem.html",
             {"title": title, "detail": detail},
             status_code=status,
+        )
+
+    def _busy_problem(request: Request, blocker: Job) -> Response:
+        """执行位被占着。**三处入口共用这一句**（单项运行、一键回归、体检）。
+
+        共用不是为了少写几个字：这段话要解释的是"为什么不能同时跑两个"，
+        而三处各写一份的话，迟早有一处漏掉那半句解释，用户看到的就是一个
+        没有任何理由的 409。
+        """
+        return _problem(
+            request,
+            409,
+            # 与 `/api/runs` 那个 JSON 分支里的措辞保持一致：同一个拒绝理由
+            # 在两个入口上说成两句话，用户会以为是两种不同的情况。
+            "已经有一次运行在跑",
+            f"上一个还没结束：{blocker.label}。"
+            f"沙箱一次只能跑一个场景——两次运行会互相改掉对方的上游地址，"
+            f"两边都会给出看起来正常的报告，而数据是串的。请等它跑完。",
         )
 
     def _scenario_exists(application: FastAPI, scenario_id: str) -> bool:
@@ -364,14 +399,7 @@ def create_app(
         scenario = loader.load_scenario(path)
         blocker = app.state.jobs.active
         if blocker is not None:
-            return _problem(
-                request,
-                409,
-                "已经有一次运行在跑",
-                f"上一次运行（{blocker.scenario_id}）还没结束。"
-                f"沙箱一次只能跑一个场景——两次运行会互相改掉对方的上游地址，"
-                f"两边都会给出看起来正常的报告，而数据是串的。请等它跑完。",
-            )
+            return _busy_problem(request, blocker)
         job = app.state.jobs.start(scenario)
         assert job is not None  # 上面刚确认过没有活跃作业，且这里没有 await
         return RedirectResponse(f"/jobs/{job.id}", status_code=303)
@@ -389,6 +417,16 @@ def create_app(
                 "服务可能重启过，内存里的作业记录不在了。"
                 "如果它当时已经跑完，结论在「运行记录」里能查到。",
             )
+        # 体检：跑的时候是进度页，跑完就地变成结论页。**不跳走**——一趟体检
+        # 有六次运行记录，跳去哪一次都是错的，而结论是这六次合起来的那一份。
+        if job.checkup is not None:
+            if job.state == "running":
+                return templates.TemplateResponse(
+                    request,
+                    "waiting.html",
+                    {"job": job, "active": app.state.jobs.active},
+                )
+            return await _checkup_result(request, job)
         if job.state == "done" and job.run_id:
             target = _job_return_to(job)
             return RedirectResponse(target or f"/runs/{job.run_id}", status_code=303)
@@ -397,6 +435,120 @@ def create_app(
             "waiting.html",
             {"job": job, "active": app.state.jobs.active},
         )
+
+    async def _checkup_result(request: Request, job: Job) -> Response:
+        """把一趟体检的六次运行读回来，合成一页结论。
+
+        **结论页是现算的，不是跑的时候存下来的。** 每次运行各自的结论都快照在
+        自己的运行记录里（那是永久的那一份），这里只做"换个读法"。存一份合成
+        结果的话，两处会漂——而漂了之后没有任何东西会让它变红。
+        """
+        assert job.checkup is not None
+        checkup = catalog.load_checkup(
+            job.checkup,
+            root=app.state.checkups_root,
+            scenarios_root=app.state.scenarios_root,
+        )
+        by_item = {item.id: item for item in checkup.items}
+
+        runs: list[checkup_report.ItemRun] = []
+        unmatched: list[JobStep] = []
+        for step in job.steps:
+            item = by_item.get(step.item_id or "")
+            if item is None:
+                # 菜单在跑的过程中被改过（这一项被删了，或者标识改了）。**不
+                # 按下标硬对**：把 A 项的结论安到 B 项的问题底下，那一页读起来
+                # 完全正常，而它是错的。对不上的步骤原样列出来。
+                unmatched.append(step)
+                continue
+            run = await queries.get_run(step.run_id) if step.run_id else None
+            runs.append(
+                checkup_report.ItemRun(
+                    item=item,
+                    run_id=step.run_id,
+                    report=queries.parse_report(run) if run is not None else None,
+                    error=step.error,
+                )
+            )
+
+        return templates.TemplateResponse(
+            request,
+            "checkup_result.html",
+            {
+                "job": job,
+                "report": checkup_report.build(checkup, runs),
+                "checkup_name": checkup.name,
+                "unmatched": unmatched,
+                "caveat": checkup_report.NO_FINDING_CAVEAT,
+                "active": app.state.jobs.active,
+            },
+        )
+
+    # --- 一键体检 ---------------------------------------------------------
+    #
+    # 这一页和别处的差别只有一条：**读者是谁**。它假定读者不知道检测器叫什么、
+    # 不知道"预期比对"是什么，只想知道"我这个 Agent 有没有毛病"。所以菜单上
+    # 每一项是一个问句（「同一笔钱，它会不会付两次？」），而不是一支场景名。
+    #
+    # 有一件事必须在页面上说死：现在菜单里挂的场景测的是**仓库自带的演示
+    # Agent**，它被写成一定会犯这些错。所以这一页的结论是"这套工具能抓住什么"，
+    # 不是"你的系统有多少毛病"。那句话由菜单的 `subject_note` 提供，见
+    # `checkup/catalog.py`——不由路由临场拼，因为它得跟着菜单的实际情况变。
+
+    @app.get("/checkup", response_class=HTMLResponse)
+    async def checkup_list(request: Request) -> Response:
+        entries = []
+        for name, _path in catalog.list_checkups(root=app.state.checkups_root):
+            entry: dict[str, Any] = {"name": name, "usable": catalog.is_valid_id(name)}
+            if entry["usable"]:
+                try:
+                    entry["checkup"] = catalog.load_checkup(
+                        name,
+                        root=app.state.checkups_root,
+                        scenarios_root=app.state.scenarios_root,
+                    )
+                    entry["error"] = None
+                except catalog.CheckupError as exc:
+                    # 打不开的菜单也列出来，并说清为什么——和场景列表同一条
+                    # 规矩：磁盘上看得见、界面上找不到，用户没有任何线索。
+                    entry |= {"checkup": None, "error": str(exc)}
+            else:
+                entry |= {"checkup": None, "error": "文件名不合法，界面无法打开或运行它。"}
+            entries.append(entry)
+
+        return templates.TemplateResponse(
+            request,
+            "checkup.html",
+            {
+                "checkups": entries,
+                "active": app.state.jobs.active,
+            },
+        )
+
+    @app.post("/checkup/{name}/start", response_class=HTMLResponse)
+    async def checkup_start(request: Request, name: str) -> Response:
+        checkup = catalog.load_checkup(
+            name,
+            root=app.state.checkups_root,
+            scenarios_root=app.state.scenarios_root,
+        )
+        blocker = app.state.jobs.active
+        if blocker is not None:
+            return _busy_problem(request, blocker)
+
+        # **菜单点名的场景先全部加载出来，再开始跑。** 加载失败就在这里报错，
+        # 不放到跑的时候：跑到第三项才发现文件坏了，前两项已经花掉了一分钟，
+        # 而且那份结论会缺一块。
+        plans: list[tuple[str, Scenario]] = []
+        for item in checkup.items:
+            path = paths.scenario_file(item.scenario, root=app.state.scenarios_root)
+            # 加载失败会把 `ScenarioError` 抛给上面那个处理器，页面显示文件名
+            # 和原因——这正是我们想要的，不吞掉它。
+            plans.append((item.id, loader.load_scenario(path)))
+
+        job = app.state.jobs.start_many(plans, checkup=name)
+        assert job is not None  # 上面刚确认过没有活跃作业和空菜单
+        return RedirectResponse(f"/jobs/{job.id}", status_code=303)
 
     @app.get("/runs", response_class=HTMLResponse)
     async def run_list(request: Request, scenario_id: str | None = None) -> Response:
@@ -672,14 +824,7 @@ def create_app(
         scenario = loader.load_scenario(path)
         blocker = app.state.jobs.active
         if blocker is not None:
-            return _problem(
-                request,
-                409,
-                "已经有一次运行在跑",
-                f"上一次运行（{blocker.scenario_id}）还没结束。"
-                f"沙箱一次只能跑一个场景——两次运行会互相改掉对方的上游地址，"
-                f"两边都会给出看起来正常的报告，而数据是串的。请等它跑完。",
-            )
+            return _busy_problem(request, blocker)
         # 跑完直接回到对比页，带上这次的 run_id。**这里是服务端拼的**，
         # 没有一处用到请求里的字符串——所以不存在开放重定向。
         job = app.state.jobs.start(

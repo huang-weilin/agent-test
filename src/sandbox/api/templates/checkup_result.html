@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}体检结论：{{ checkup_name }}{% endblock %}
+{% block body %}
+
+{# 这一页的排版顺序就是**该读的顺序**，而它不是按"好消息坏消息"排的：
+
+   1. 这一页本身有没有问题（哪几项没得出结论、检查过程有没有异常）
+   2. 抓到的
+   3. 值得看一眼的
+   4. 没事的
+   5. 判不了的
+
+   第 1 节排在最前面是因为它决定**后面几节的可信范围**：一项没跑成，后面就
+   少一格；检查自己漏报了，某一格就是空的而看不出来。把这些压到最后当"备注"，
+   读的人已经先信了前四节。 #}
+
+<h1>体检结论：{{ checkup_name }}</h1>
+
+<p class="plain">{{ report.checkup.subject_note }}</p>
+
+<div class="panel">
+  <p><strong>{{ report.headline }}</strong></p>
+  <p class="note">
+    这一趟依次跑了 {{ report.items | length }} 支场景，是
+    {{ job.started_at | localdt('%m-%d %H:%M') }} 起的。
+    每一项的完整过程各自留在运行记录里，下面每一条都能点进去。
+  </p>
+</div>
+
+{% if unmatched %}
+<div class="panel bad">
+  <strong>这趟跑完之后，菜单被改过。</strong>
+  <p>有 {{ unmatched | length }} 项对不回菜单里现在的那几项，所以它们没进下面的结论：</p>
+  <ul>
+    {% for step in unmatched %}
+    <li>
+      <code>{{ step.scenario_id }}</code>
+      {% if step.run_id %}<a href="/runs/{{ step.run_id }}">这一次的记录</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="note">
+    对不回就不硬对——把一项的结论安到另一项的问题底下，那一页读起来完全正常。
+  </p>
+</div>
+{% endif %}
+
+{# --- 第 1 节：这一页本身 ------------------------------------------------- #}
+
+{% if report.incomplete or report.instrument_problems %}
+<h2>先看这一页本身</h2>
+<p class="plain">
+  这一节说的不是被测对象，是这份体检。前面几项没得出结论，或者检查过程本身
+  出了岔子——两者都会让下面那几节的覆盖面比看上去窄。
+</p>
+{% endif %}
+
+{% if report.incomplete %}
+<div class="panel warn">
+  <h3>这 {{ report.incomplete | length }} 项没得出可用结论</h3>
+  <p class="note">
+    没得出结论不等于没问题——它是"这次没测到"。所以它们既不算过关也不算没过关。
+  </p>
+  <table class="grid tight">
+    <thead><tr><th>要查的毛病</th><th>结果</th><th>为什么</th></tr></thead>
+    <tbody>
+      {% for o in report.incomplete %}
+      <tr>
+        <td>{{ o.item.question }}</td>
+        <td class="nowrap">{{ m.item_pill(o.kind) }}</td>
+        <td>
+          {{ o.note }}
+          {% if o.error %}<pre class="wrap">{{ o.error }}</pre>{% endif %}
+          {% if o.run_id %}<a href="/runs/{{ o.run_id }}">这一次的记录</a>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if report.instrument_problems %}
+<div class="panel warn">
+  <h3>检查过程本身有异常的 {{ report.instrument_problems | length }} 项</h3>
+  <p class="note">
+    它们说的不是"被测对象有没有毛病"，是"这几项检查值不值得信"：
+    该响的没响，或者不该响的响了。
+  </p>
+  {% for o in report.instrument_problems %}
+  <h3>{{ o.item.question }} {{ m.item_pill(o.kind) }}</h3>
+  <p class="plain">{{ o.note }}</p>
+  {% if o.missing %}
+  <table class="grid tight">
+    <thead><tr><th>场景本来要它报</th><th>预期结论</th></tr></thead>
+    <tbody>
+      {% for f in o.missing %}
+      <tr>
+        <td><code>{{ f.detector }}</code></td>
+        <td>
+          {{ f.verdict }}{% if f.reason_code %}（{{ f.reason_code }}）{% endif %}
+          {% if f.count > 1 %}<span class="note">这条出现了 {{ f.count }} 次</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if o.unexpected %}
+  <table class="grid tight">
+    <thead><tr><th>它多报的</th><th>结论</th><th>它说</th></tr></thead>
+    <tbody>
+      {% for f in o.unexpected %}
+      <tr>
+        <td><code>{{ f.detector }}</code></td>
+        <td class="nowrap">{{ m.verdict_pill(f.verdict) }}{% if f.count > 1 %}<span class="note">（{{ f.count }} 次）</span>{% endif %}</td>
+        <td>{{ f.summary }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <p class="note">
+    {% if o.run_id %}<a href="/runs/{{ o.run_id }}">看这一次的完整记录</a>{% endif %}
+  </p>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# --- 下面几节：受检对象 ------------------------------------------------ #}
+
+{% macro findings_table(lines) -%}
+{#- 一字不差的几条结论在 `checkup/report.py` 里已经并成一条（`f.count`），这里
+    只负责把次数印出来。**次数必须印**：不印的话，"报了九次"和"报了一次"在页面上
+    长得一模一样，而它正是读的人判断严重程度的第一眼。 -#}
+<table class="grid tight">
+  <thead><tr><th>检查</th><th>结论</th><th>它凭什么这么说</th></tr></thead>
+  <tbody>
+    {% for f in lines %}
+    <tr>
+      <td class="nowrap"><code>{{ f.detector }}</code></td>
+      <td class="nowrap">{{ m.verdict_pill(f.verdict) }}{% if f.count > 1 %}<span class="note">（{{ f.count }} 次）</span>{% endif %}</td>
+      <td>
+        {{ f.summary }}
+        <div class="plain">
+          {{ explain.detector_help(f.detector) }}
+          {% if f.reason_code %}<br>{{ explain.reason_help(f.reason_code) }}{% endif %}
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{%- endmacro %}
+
+<h2>抓到的</h2>
+{% if report.findings %}
+<p class="plain">
+  这几项，被测对象把毛病犯了，而且被抓住了。每一行下面是这条检查在说什么、
+  以及它是凭什么判的。
+</p>
+{% for o in report.findings %}
+<div class="panel bad">
+  <h3>{{ o.item.question }} {{ m.item_pill(o.kind) }}</h3>
+  {{ findings_table(o.caught) }}
+  <p class="note">
+    {% if o.fine %}另外 {{ o.fine }} 条顺带做的检查是正常的。{% endif %}
+    {% if o.run_id %}<a href="/runs/{{ o.run_id }}">看这一次的完整记录</a>{% endif %}
+  </p>
+</div>
+{% endfor %}
+{% else %}
+<div class="panel">
+  <p>这一类毛病，这几支场景一次都没抓到。</p>
+  <p class="note">{{ caveat }}</p>
+</div>
+{% endif %}
+
+{% if report.notes %}
+<h2>值得看一眼</h2>
+<p class="plain">
+  这几项不算错，但有值得看一眼的地方。它不会让这次运行算"不通过"——
+  只是提醒你这里有个东西。
+</p>
+{% for o in report.notes %}
+<div class="panel warn">
+  <h3>{{ o.item.question }} {{ m.item_pill(o.kind) }}</h3>
+  {{ findings_table(o.noted) }}
+  <p class="note">
+    {% if o.fine %}另外 {{ o.fine }} 条顺带做的检查是正常的。{% endif %}
+    {% if o.run_id %}<a href="/runs/{{ o.run_id }}">看这一次的完整记录</a>{% endif %}
+  </p>
+</div>
+{% endfor %}
+{% endif %}
+
+<h2>这次没事的</h2>
+{% if report.clear %}
+<p class="plain">
+  这几项做完了，没发现问题。注意它说的是"这几支剧本里没演出来"——
+  不保险的部分见下面那一节。
+</p>
+<table class="grid tight">
+  <thead><tr><th>要查的毛病</th><th>结果</th><th>说明</th></tr></thead>
+  <tbody>
+    {% for o in report.clear %}
+    <tr>
+      <td>{{ o.item.question }}</td>
+      <td class="nowrap">{{ m.item_pill(o.kind) }}</td>
+      <td>
+        {{ o.note }}
+        {% if o.run_id %}<a href="/runs/{{ o.run_id }}">记录</a>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="note">这一趟没有哪一项是"什么都没发生"的。</p>
+{% endif %}
+
+<h2>这次判不了的</h2>
+<p class="plain">
+  这几格这次没有判过。判不了的意思是：这一次没有足够的信息能判——它不等于
+  「没问题」，也不等于「正常」。列在这里正是为了不让你把它当成一个好消息。
+  一格里很多项都出现同一个名字，多半是这支场景本来就没演那件事
+  （比如场景里没有无人值守的会话，那"半夜越权"这一格自然没得判）。
+</p>
+{% if report.unknown %}
+<table class="grid tight">
+  <thead>
+    <tr><th>没判的那一格</th><th class="num">几项里出现</th><th>它为什么判不了（取其中一条）</th></tr>
+  </thead>
+  <tbody>
+    {% for u in report.unknown %}
+    <tr>
+      <td class="nowrap"><code>{{ u.detector }}</code></td>
+      <td class="num">{{ u.count }}</td>
+      <td>
+        {{ u.example }}
+        {% if u.declared %}
+        <div class="note">其中 {{ u.declared }} 条是场景事先说好这次就判不了的。</div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="note">这一趟没有判不了的格子。</p>
+{% endif %}
+
+{% endblock %}

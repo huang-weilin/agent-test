@@ -65,6 +65,20 @@ h3 { font-size: 1rem; margin: 1.4rem 0 0.5rem; font-weight: 600; }
 
 .lede { color: var(--dim); margin: 0 0 1.2rem; }
 .note { color: var(--dim); font-size: 0.88em; margin: 0.5rem 0; }
+
+/* 说人话的那一层（`api/explain.py`）。**它和 `.note` 是两种读者**：
+   `.note` 是工程细节（口径、边界、为什么这么判），灰小字；`.plain` 是写给
+   不写代码的人的（这一栏在说什么），灰底左边一条竖线，一眼能认出"这段是
+   给我的"。混在一起的话，外行会把两段都当成必读，然后放弃。 */
+.plain {
+  color: #3c4043;
+  background: #f8f9fa;
+  border-left: 3px solid #dadce0;
+  border-radius: 0 3px 3px 0;
+  padding: 0.5rem 0.8rem;
+  margin: 0.5rem 0 1rem;
+  font-size: 0.93em;
+}
 .nowrap { white-space: nowrap; }
 .dim { color: var(--dim); }
 .bad { color: #c5221f; }
