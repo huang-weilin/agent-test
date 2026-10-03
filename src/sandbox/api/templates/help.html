@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}使用手册{% endblock %}
+{% block body %}
+
+<h1>使用手册</h1>
+
+<p class="lede">
+  这一页就是仓库里的 <code>docs/manual.md</code>，不是另抄的一份——改手册改那个文件，
+  这里跟着变。左边没有目录菜单，是因为这一页本身就够长：下面这些就是全部章节。
+</p>
+
+<nav class="doc-toc">
+  <ol>
+    {% for anchor, title in outline %}
+      <li><a href="#{{ anchor }}">{{ title }}</a></li>
+    {% endfor %}
+  </ol>
+</nav>
+
+<hr>
+
+<article class="doc">
+{{ manual }}
+</article>
+
+{% endblock %}

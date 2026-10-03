@@ -217,3 +217,48 @@ dd { margin: 0.1rem 0 0; }
 details { margin-top: 0.4rem; }
 details summary { cursor: pointer; font-size: 0.88em; }
 details pre { background: #f6f7f8; padding: 0.6rem; border-radius: 4px; margin: 0.4rem 0 0; }
+
+/* --- 使用手册（`/help`，渲染 `docs/manual.md`） --------------------------- */
+
+/* 只有这一页的正文是**自动渲染出来的**，别处每块 HTML 都是手写的、结构已知。
+   所以这里的规矩是"给未知块补默认样式"，而不是"给已知块加样式"：手册里
+   加了新写法，页面至少要是**能读的**，不会因为少一条 CSS 就糊成一团。
+   块级选择器全部挂在 .doc 下面，不会漏到别的页面上。 */
+
+.doc { max-width: 76ch; }
+.doc > :first-child { margin-top: 0; }
+.doc p { margin: 0.75rem 0; }
+.doc ul, .doc ol { margin: 0.7rem 0; padding-left: 1.5rem; }
+.doc li { margin: 0.35rem 0; }
+.doc h4 { font-size: 0.95rem; margin: 1.1rem 0 0.4rem; font-weight: 600; }
+.doc h5, .doc h6 { font-size: 0.92rem; margin: 1rem 0 0.4rem; font-weight: 600; }
+
+.doc hr { border: none; border-top: 1px solid var(--line); margin: 2rem 0; }
+
+.doc blockquote {
+  margin: 0.9rem 0; padding: 0.1rem 0 0.1rem 0.9rem;
+  border-left: 3px solid var(--line); color: var(--dim);
+}
+
+.doc table.grid { margin: 0.9rem 0 1.1rem; }
+/* 手册里的表格列宽是内容定的，别让长句子把某一列压成一格一个字。 */
+.doc table.grid td, .doc table.grid th { word-break: break-word; }
+
+.doc code {
+  background: #f0f1f3; padding: 0.06rem 0.3rem; border-radius: 3px;
+}
+.doc pre {
+  background: #f6f7f8; border: 1px solid var(--line); border-radius: 4px;
+  padding: 0.7rem 0.8rem; overflow-x: auto; margin: 0.9rem 0;
+}
+/* `pre` 里的 `code` 已经是等宽、已经在灰底上了，再套一层内边距会缩进一格。 */
+.doc pre code { background: none; padding: 0; }
+
+/* 目录：13 条，排成一列太长——按两栏折，窄屏退回一列。 */
+.doc-toc { margin: 1.2rem 0 0; }
+.doc-toc ol {
+  columns: 2; column-gap: 2rem; margin: 0; padding-left: 1.4rem;
+  color: var(--dim); font-size: 0.94em;
+}
+.doc-toc li { margin: 0.2rem 0; break-inside: avoid; }
+@media (max-width: 720px) { .doc-toc ol { columns: 1; } }

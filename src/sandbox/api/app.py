@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from sandbox import detectors, metrics
-from sandbox.api import exempt, explain, paths, queries, wizard
+from sandbox.api import exempt, explain, manual, paths, queries, wizard
 from sandbox.api.jobs import Job, JobRegistry, JobStep
 from sandbox.checkup import catalog
 from sandbox.checkup import report as checkup_report
@@ -1090,6 +1090,33 @@ def create_app(
         )
         assert job is not None
         return RedirectResponse(f"/jobs/{job.id}", status_code=303)
+
+    # --- 使用手册 ---------------------------------------------------------
+
+    @app.get("/help", response_class=HTMLResponse)
+    async def help_view(request: Request) -> Response:
+        # 手册是**磁盘上的一个 markdown 文件**，不在进程里缓存：改完存盘、
+        # 刷新一下就看见新的。这一页是给人边看边改的，加一层缓存换来的
+        # 那点毫秒要用"我明明改了怎么没变"来还。
+        #
+        # 文件不在（有人挪了 `docs/`）时给一页能读懂的话，不要 500：这一页
+        # 恰恰是用户在别处撞了墙才会点开的。
+        try:
+            text = manual.manual_text()
+        except OSError as exc:
+            return _problem(
+                request,
+                500,
+                "手册文件读不到",
+                f"{manual.MANUAL_PATH} 打不开（{exc}）。它是仓库里的一个普通文件，"
+                f"从代码仓库里恢复它即可——界面其余部分不受影响。",
+            )
+        body, outline = manual.page(text)
+        return templates.TemplateResponse(
+            request,
+            "help.html",
+            {"manual": body, "outline": outline, "active": app.state.jobs.active},
+        )
 
     # --- JSON 接口 --------------------------------------------------------
     #
