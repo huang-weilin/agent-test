@@ -393,6 +393,17 @@ class SessionSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
     name: str
+
+    #: 这一段由**哪一个** Agent 跑——`agents:` 里的序号，从 0 开始。
+    #:
+    #: `None` = 不指名，用 0 号。所以单 Agent 的场景一个字都不用写，而
+    #: `agents:` 只写一个的场景也一样。
+    #:
+    #: **它是串联测试的全部表达力**：同一个场景里 A 跑第一段、B 跑第二段，
+    #: 于是引擎在每一段拉起的是不同的进程、给的是不同的记忆目录。
+    #: 不指名就等于"还是那一个"——这是安全的一侧，也是绝大多数场景的形态。
+    agent: int | None = None
+
     # 脚本化上游的步骤。见 gateway/stub.py。
     script: list[dict[str, Any]] = Field(default_factory=list)
     restore_from: str | None = None
@@ -514,6 +525,16 @@ class MustHoldDecl(BaseModel):
     path: str
     reason: str
 
+    #: 判的是**哪一个** Agent 的记忆——`agents:` 里的序号，从 0 开始。
+    #:
+    #: `None` = 不指名，0 号。单 Agent 场景一个字都不用写。
+    #:
+    #: **串联场景里它是必填的**（见 `_one_agent_list`）。理由：记忆是每个 Agent
+    #: 各自的一份目录，同一份记忆判据落到不同 Agent 上会得到相反的结论，
+    #: 而不写就没人知道作者想判谁——引擎替他挑一个的话，报告会拿着一份答案
+    #: 去回答另一个问题，且看上去完全正常。
+    agent: int | None = None
+
 
 class ForbiddenTextDecl(BaseModel):
     """一段不允许出现在记忆里的文本。
@@ -527,6 +548,9 @@ class ForbiddenTextDecl(BaseModel):
 
     text: str
     reason: str
+
+    #: 同上：这一段文本不许出现在**哪一个** Agent 的记忆里。
+    agent: int | None = None
 
 
 class MemoryDecl(BaseModel):
@@ -636,7 +660,32 @@ class Scenario(BaseModel):
 
     id: str
     description: str = ""
+
+    #: 被测 Agent。**两种写法都认，但只能写一种**：
+    #:
+    #:   `agent:`   —— 单数，只有一个 Agent 时的糖（今天 29 份场景全是这一种）；
+    #:   `agents:`  —— 复数，**串联测试**用它：A 跑第一段、B 跑第二段。
+    #:
+    #: 两个字段都在模型上（而不是拿一个 `AgentSpec | list[AgentSpec]` 去接），
+    #: 是为了让"写错位置"变成一句好话：pydantic 对联合类型报的是
+    #: `Input should be a valid dictionary or instance of AgentSpec`，而这里
+    #: 报的是"两种写法同时出现，选一种"。
+    #:
+    #: `agent` 在经过校验之后**总是**等于 `agents[0]`（见 `_one_agent_list`）。
+    #: 于是所有读 `scenario.agent.X` 的地方（引擎起进程、配置指纹、界面、
+    #: 体检菜单，19 处）在单 Agent 场景下一字不用改，也不会各自判断一次
+    #: "这场景有几个 Agent"。**它是派生值，不是第二份真相**——唯一的写者
+    #: 是那个校验器，`tests/test_multi_agent.py` 里有一条盯着它们不许分叉。
+    #:
+    #: 两个字段都**不带 `| None`**，尽管输入时可以只写一个：收拢发生在
+    #: `mode="before"` 的校验器里（早于字段校验），所以到字段这一层两者都已经
+    #: 有值了。这一点是**类型检查器替我们守着的**——写成 `AgentSpec | None` 的话，
+    #: 那 19 处 `scenario.agent.X` 会各自变成"可能没有 Agent"，myy 会逐处报错，
+    #: 而每一处的"修法"都是加一个没人能证明成立的断言。让收拢发生在上一层，
+    #: `scenario.agent` 就是一个全函数，和从前一样。
     agent: AgentSpec
+    agents: list[AgentSpec]
+
     tools: list[ToolDecl]
     sessions: list[SessionSpec]
     expect: list[Expectation] = Field(default_factory=list)
@@ -691,6 +740,102 @@ class Scenario(BaseModel):
     # 反过来，"记忆守卫拦住了重复支付"这种正样本也只能靠它证明：边界上
     # 什么都看不到，没有扣款流水就没有证据。
     expected_charges: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _one_agent_list(cls, data: Any) -> Any:
+        """`agent` 与 `agents` **在字段校验之前**就收成一份名单。
+
+        三条规矩：
+
+        1. 一个都没写 —— 这份场景测谁？报错，不猜。
+        2. 两种写法同时出现 —— 报错。两个说法同时在场时，读的人永远不知道
+           哪个算数；而"两个都写、引擎挑一个"正是最坏的那种：文件里躺着
+           另一份看起来同样有效的配置。（豁免那边同一个道理：宁可拒收。）
+        3. 只写 `agent` —— 收成 `agents: [agent]`，并把 0 号回填给 `agent`。
+
+        写成 `mode="before"` 而不是 `mode="after"`，是为了让两个字段都**不带
+        `| None`**：到字段那一层两者都已经有值，`scenario.agent` 于是是全函数。
+        放在 `after` 里的话字段类型只能写成 `AgentSpec | None`，而那 19 处
+        `scenario.agent.X` 会各自变成"可能没有 Agent"——每一处的"修法"都是加一个
+        没人能证明成立的断言。**能靠结构排除的，不要靠断言。**
+        """
+        if not isinstance(data, dict):
+            # 输入不是字典（比如拿一个已有的场景实例再 `model_validate` 一次）：
+            # 这一层只管"输入里两种写法怎么收"，收不动就原样交下去。
+            return data
+        payload = dict(data)
+        single = payload.get("agent")
+        many = payload.get("agents")
+        if not many and single is None:
+            raise ValueError(
+                "场景没有写被测 Agent。写 `agent:`（只有一个）或者 `agents:`（一队）。"
+            )
+        if many and single is not None:
+            raise ValueError(
+                "`agent:` 和 `agents:` 同时写了。留一个：\n"
+                "  只有一个 Agent 就写 `agent:`；\n"
+                "  串联测试（A 跑一段、B 跑一段）写 `agents:`，"
+                "再用每个会话的 `agent: <序号>` 指明这一段由谁跑。\n"
+                "两个都写的话，文件里躺着的那一份到底算不算数没人说得清。"
+            )
+        if not many:
+            many = [single]
+        payload["agents"] = many
+        payload["agent"] = many[0]
+        return payload
+
+    @model_validator(mode="after")
+    def _agent_indices_resolve(self) -> Scenario:
+        """会话与记忆判据指名的那个 Agent 必须真的存在。
+
+        放在 `after` 里：这一步要**同时**看会话/判据上的序号和收拢之后的名单，
+        而名单是上一步才收到的。
+
+        两句都是**必须报错、不能兜底成 0**：兜底的话，"B 跑第二段"会静默地变成
+        "A 又跑了一段"，报告上一切正常，测的却是另一件事。
+        """
+        for index, session in enumerate(self.sessions):
+            if session.agent is not None and not 0 <= session.agent < len(self.agents):
+                raise ValueError(
+                    f"会话 #{index}（{session.name}）指名了 agent: {session.agent}，"
+                    f"但这份场景只声明了 {len(self.agents)} 个 Agent"
+                    f"（合法的序号是 0 到 {len(self.agents) - 1}）。\n"
+                    f"序号是从 0 开始的，没有 `agents:` 时唯一那个就是 0。"
+                )
+
+        # 记忆判据也必须指到人。
+        #
+        # 两件事在这里一起管：序号越界（写错了），以及**多 Agent 场景里没写**
+        # （写漏了）。后者是这一段的重点：一条 `must_hold` 判的是某一份记忆，
+        # 而串联场景里有好几份。不写 `agent:` 时引擎可以"顺手挑 0 号"，
+        # 报告看起来一模一样——它拿着一份答案去回答另一个问题。宁可拒收。
+        # 两张表先拼成"哪一节、第几条、指名了谁"的三元组，再统一检查。
+        # 分别写两遍循环的话，"越界"和"没写"这两种错会在两处各判一次，
+        # 而两处的判据迟早会不一致——那时候哪一种错被漏掉取决于它是哪一节。
+        named: list[tuple[str, int, int | None]] = [
+            ("must_hold", i, r.agent) for i, r in enumerate(self.memory.must_hold)
+        ] + [("forbidden", i, r.agent) for i, r in enumerate(self.memory.forbidden)]
+        for where, index, target in named:
+            if target is None:
+                if len(self.agents) > 1:
+                    raise ValueError(
+                        f"`memory.{where}[{index}]` 没写 `agent:`，"
+                        f"而这份场景声明了 {len(self.agents)} 个 Agent。\n"
+                        f"记忆是每个 Agent 各自的一份，这条判据落在谁头上"
+                        f"不定下来，报告就会拿着一份答案去回答另一个问题。\n"
+                        f"补上 `agent: 0` 到 `agent: {len(self.agents) - 1}` "
+                        f"里的一个（序号见 `agents:` 里的顺序）。"
+                    )
+                continue
+            if not 0 <= target < len(self.agents):
+                raise ValueError(
+                    f"`memory.{where}[{index}]` 指名了 agent: {target}，"
+                    f"但这份场景只声明了 {len(self.agents)} 个 Agent"
+                    f"（合法的序号是 0 到 {len(self.agents) - 1}）。\n"
+                    f"序号是从 0 开始的，没有 `agents:` 时唯一那个就是 0。"
+                )
+        return self
 
     @field_validator("unexpected_failures", mode="before")
     @classmethod
@@ -949,10 +1094,14 @@ class Scenario(BaseModel):
         `loader._check_references` 先调一遍，用户 YAML 里的错在加载时就报出来。
         """
         return MemoryRules(
+            # `agent` 原样带过去：检测器靠它把观测筛成"这个人的那一份"。
+            # 到这里为止单 Agent 场景里它一直是 None，检测器再折成 0 号。
             must_hold=tuple(
-                MustHold(path=r.path, reason=r.reason) for r in self.memory.must_hold
+                MustHold(path=r.path, reason=r.reason, agent=r.agent)
+                for r in self.memory.must_hold
             ),
             forbidden=tuple(
-                ForbiddenText(text=r.text, reason=r.reason) for r in self.memory.forbidden
+                ForbiddenText(text=r.text, reason=r.reason, agent=r.agent)
+                for r in self.memory.forbidden
             ),
         )

@@ -73,6 +73,30 @@ expect:
     detector: idempotency
 """
 
+#: 串联场景：两个 Agent，第二段由 1 号跑。`agent:` 那一栏的**写了一定进指纹**
+#: 这一条要用它来验——单 Agent 的底本里根本写不出"这一段换人了"。
+TWO_AGENTS = """
+id: handoff
+description: 串联
+agents:
+  - version: react_demo@0.1
+    task: 先把订单读出来。
+  - version: react_demo@0.2
+    task: 接着把它付掉。
+tools:
+  - name: get_order
+    description: 查订单
+    is_write: false
+sessions:
+  - name: 第一次
+    script:
+      - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
+  - name: 第二次
+    agent: 1
+    script:
+      - tool_calls: [{name: get_order, arguments: {order_id: A1}}]
+"""
+
 #: 只改一处的变体 → (底本里的原文, 换成什么, 期望被认出来的那一节)。
 MUTATIONS: dict[str, tuple[str, str, str]] = {
     "改了 Prompt": ("查一下订单 A1。", "查一下订单 A2。", "prompt"),
@@ -297,17 +321,25 @@ def test_every_scenario_field_enters_the_fingerprint_or_is_listed_as_prose() -> 
 
 
 def test_the_session_name_is_the_only_thing_a_session_hides() -> None:
-    """会话那一节只许抹掉一个字段——`name`。
+    """会话那一节只许**永远**抹掉一个字段——`name`。
 
     抹掉的动作是**减法**：`SessionSpec` 上以后再加字段（比如别的计数器），
     它会一声不响地落在指纹之外，而这一节看起来还是"什么都比"。所以抹掉的名单
     要和模型的字段表对上：`SessionSpec` 减去名单，剩下的必须是这一节里真的
     出现的字段。
+
+    **还有第二类隐身：没写就不进。** `SESSION_FIELDS_OMITTED_WHEN_DEFAULT` 里的
+    字段不写时不在指纹里，写了一定在——上面那条减法要连这一类一起减掉，否则
+    每一次往模型上加一个可选字段，红的都是这一条，而它红的原因和它守的东西
+    （"多藏了一个字段"）毫无关系。减掉之后**下面那条"写了一定在"就是它的补丁**：
+    只减不补的话，一个"永远隐身"的字段和"没写才隐身"的字段在这一节里长得一样。
     """
     payload = identity.sections(_scenario())["script"][0]
     hidden = set(identity.SESSION_FIELDS_NOT_IN_FINGERPRINT)
-    assert set(SessionSpec.model_fields) - hidden == set(payload), (
-        "会话那一节的字段和 `SESSION_FIELDS_NOT_IN_FINGERPRINT` 对不上"
+    optional = set(identity.SESSION_FIELDS_OMITTED_WHEN_DEFAULT)
+    assert set(SessionSpec.model_fields) - hidden - optional == set(payload), (
+        "会话那一节的字段和 `SESSION_FIELDS_NOT_IN_FINGERPRINT` / "
+        "`SESSION_FIELDS_OMITTED_WHEN_DEFAULT` 对不上"
     )
     assert "name" not in payload
 
@@ -320,6 +352,20 @@ def test_the_session_name_is_the_only_thing_a_session_hides() -> None:
     assert identity.SESSION_FIELDS_NOT_IN_FINGERPRINT == ("name",), (
         "会话里被藏起来的东西不止 `name` 一个——多藏一个字段，这一节就少比一样"
         "东西，而报告上看起来还是「这一节比过了」。"
+    )
+    assert identity.SESSION_FIELDS_OMITTED_WHEN_DEFAULT == ("agent",), (
+        "「没写就不进」的名单长了一条。这类字段**写了一定要进**——"
+        "换谁跑这一段是换了一次测试，前后两次运行不该拿来比「失败少了几个」。"
+    )
+
+    # 写了一定在。这条看不见「减过头」，但看得见「减错方向」：
+    # 真把 `agent` 做成永远隐身，上面的减法照样全绿，而串联场景里
+    # "这一段换人了"会从指纹里消失——最该被看见的那个信号。
+    script = identity.sections(_scenario(TWO_AGENTS, name="<串联>"))["script"]
+    assert "agent" not in script[0], "第一段没写 `agent:`，它不该凭空出现在指纹里"
+    assert script[1].get("agent") == 1, (
+        "会话上写了 `agent:` 却没进指纹——串联场景里「这一段换人了」会读成"
+        "「配置没变，行为变了」。"
     )
 
 

@@ -199,6 +199,26 @@ async def create_run(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
             err_type="bad_declared_writes",
         )
 
+    # 第 0 段由谁跑（`agents:` 里的序号）。**默认 0，也就是"只有一个 Agent"的那一份，
+    # 行为和从前逐字相同**；串联场景里第 0 段可能不是 0 号跑的，那就得说出来。
+    #
+    # 这里只校验形状，不校验范围：范围由场景自己保证（跑器是按号从 `scenario.agents`
+    # 里取的，越界会当场 IndexError，不会静默）。这里拦的是另一类错——把一个字符串
+    # 或 `true` 塞进来，`memory_through` 里就多出一个谁也认不出来的键，那个 Agent
+    # 此后自然延续时算出来的视野永远是"什么都没记住"，而报告上那句话读起来只是
+    # "它不知道"，看不出是载荷写错了。
+    #
+    # `null` 与"没给"折叠成同一件事（都是 0）：这里没有第三种含义可用，
+    # 与 `declared_writes` 那种"空表 = 没有写操作、没给 = 不知道"的场合不同。
+    raw_first_agent = payload.get("first_session_agent")
+    first_agent = 0 if raw_first_agent is None else raw_first_agent
+    if isinstance(first_agent, bool) or not isinstance(first_agent, int) or first_agent < 0:
+        return _error(
+            400,
+            "first_session_agent 必须是 0 或更大的整数（第 0 段由 agents 里第几号跑）。",
+            err_type="bad_first_session_agent",
+        )
+
     ctx = await start_run(
         scenario_id=payload.get("scenario_id", "adhoc"),
         agent_version=payload.get("agent_version", "unknown"),
@@ -206,6 +226,7 @@ async def create_run(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
         env=payload.get("env") or {},
         declared_writes=set(raw_writes) if raw_writes is not None else None,
         idempotency_key_params=payload.get("idempotency_key_params") or {},
+        first_session_agent=first_agent,
     )
     # 豁免规则也要在场——**看门狗读的就是它**（见 `runtime.ActiveRun.exemptions`）。
     # 校验在这里照走一遍：线上的形状是 JSON，手工 curl 也会走这条路，规则写错

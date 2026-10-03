@@ -74,6 +74,7 @@ def make_call():
         session_id: str = "sess-1",
         session_ordinal: int = 0,
         memory_horizon_ordinal: int | None = None,
+        agent_index: int = 0,
     ) -> CallView:
         normalized = normalize_args(args or {})
         # 记忆视野默认按"自然延续"推导（记得此前一切），而不是写死 -1：
@@ -95,6 +96,7 @@ def make_call():
             session_id=session_id,
             session_ordinal=session_ordinal,
             memory_horizon_ordinal=horizon,
+            agent_index=agent_index,
             idempotency_key=idempotency_key,
             replay_reason=replay_reason,
             blocked_by_proxy=blocked_by_proxy,

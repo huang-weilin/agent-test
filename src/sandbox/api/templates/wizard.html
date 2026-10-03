@@ -63,6 +63,22 @@
     <label for="agent_task">这一趟你对它说什么（它收到的那句指令）</label><br>
     <textarea id="agent_task" name="agent_task" rows="3" cols="80">{{ form.agent_task }}</textarea>
   </p>
+
+  <p>
+    <label for="agent2_version">第二段谁接手（只有下面选「换成另一个 Agent 接手」时才用得上）</label><br>
+    <input id="agent2_version" name="agent2_version" value="{{ form.agent2_version }}" size="32">
+    <span class="note">
+      留空 = 没有第二个人。串联（A 跑第一段、B 跑第二段）测的是
+      <strong>换人之后记忆不跟着走</strong>：两段各有一份互不相通的记忆，
+      所以重复扣款真的会发生，而报告会说该去修<strong>接缝</strong>，不是哪一个人。
+      写一个和上面不同的版本号，比如 <code>react_demo@0.2</code>。
+    </span>
+  </p>
+
+  <p>
+    <label for="agent2_task">接手的那一个收到的那句指令</label><br>
+    <textarea id="agent2_task" name="agent2_task" rows="2" cols="80">{{ form.agent2_task }}</textarea>
+  </p>
 </section>
 
 <section class="panel">

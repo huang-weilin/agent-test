@@ -86,6 +86,9 @@ def _outcome(**kw: Any) -> SessionOutcome:
     base: dict[str, Any] = {
         "name": "s",
         "ordinal": 0,
+        # 这一段的会话由谁跑。这些用例全是单 Agent 的，所以是 0 号；
+        # 串联那一路在 `tests/test_multi_agent.py`。
+        "agent_index": 0,
         "memory_horizon_ordinal": -1,
         "restored_from": None,
         "exit_code": 0,

@@ -323,6 +323,25 @@ PAIRS: tuple[Controlled, ...] = (
             "script[n].restore_from",
         ),
     ),
+    Controlled(
+        scenarios=("cross_session_handoff", "cross_session_same_agent"),
+        claim=(
+            "同一段脚本、同样三段会话、同一份记忆判据：唯一的变量是第二段换不换人"
+            "（换 → 记忆不跟着走，重复扣款、归因指向接缝；不换 → 只扣一笔）。"
+        ),
+        # 五处，全是"名单里多了一个人"这一件事的不同侧面：`others[0]` 那四项是
+        # 1 号那份 AgentSpec 的字段（directory/entry/env 在两边其实取同一个值，
+        # 差别只在"有没有这一项"），`script[1].agent` 是会话上指名了谁。
+        # 没有任何一处是行为或判据上的差别——那正是这一对要的：**归因的翻转
+        # 只由"换人"这一个变量造成**。
+        differs_in=(
+            "agent.others[n].version",
+            "agent.others[n].directory",
+            "agent.others[n].entry",
+            "agent.others[n].env",
+            "script[n].agent",
+        ),
+    ),
 )
 
 #: 没进任何对照的场景，以及为什么。**每一份场景都要么在账本里、要么在这里**——

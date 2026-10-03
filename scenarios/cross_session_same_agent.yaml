@@ -1,0 +1,88 @@
+id: cross_session_same_agent
+description: >
+  三段会话全由同一个 Agent 跑：第一段把订单 A1 付掉，后面两段又想付一次，
+  每一次它自己的记忆里都有那笔付款，于是都被拦下——钱只扣了一笔。
+
+  这一份是 cross_session_handoff 的对照支。两份的脚本、工具、世界、三段会话
+  的写法一字不差，唯一的差别是第二段换不换人：这份还是同一个人跑（第二段
+  没有写 `agent:`），那份换成了 1 号。不换人时记忆是连着的，它认得出重复；
+  换了人，那份记忆就不属于接手的那一个，于是重复扣款，而报告说的是"接缝的锅"
+  ——不是任何一个人的锅。
+
+  所以这一对要证明的是一句很具体的话：跨会话测试里「谁的错」完全由换不换人
+  决定，而这件事在报告上是量出来的（看记忆视野），不是猜的。
+  两份的 expected_charges 也不同：这一份 1，那一份 2。
+
+agents:
+  - version: react_demo@0.1
+    task: 帮我把订单 A1 处理掉。
+    model: stub-model
+
+tools:
+  - use: get_order
+
+  - use: create_payment
+
+sessions:
+  - name: 第一段：付 A1
+    script:
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 订单 A1 已支付。
+
+  - name: 第二段：再处理一次 A1
+    script:
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 订单 A1 已支付。
+
+  - name: 第三段：又过了一段，还是 A1
+    script:
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - content: 订单 A1 已支付。
+
+# 一笔。第二、三段里脚本**要求**它再付一次，而它每次都答"记忆里显示已经付过了"，
+# 于是那两次请求根本没有发出去——边界上什么都看不到。这就是"记忆起作用了"的
+# 唯一证据：不是它说了什么，而是钱没有第二次动。
+expected_charges: 1
+
+memory:
+  # 判据与对照支逐字相同（同一句理由、同一个路径、同样指名 0 号）：这一对里
+  # 变的是"第二段谁跑"，判据本身不许跟着变，否则结论的差别就说不清是谁造成的。
+  must_hold:
+    - agent: 0
+      path: actions.jsonl
+      reason: >
+        0 号自己的那份记忆必须原样不动：它付过一次款，此后每一次会话开始时
+        那条记录都该在，结束时也还是那一条——它不该再写出第二条来。这一条
+        守住了，才说得上"0 号这边没有问题"；它要是变了，那就成了另一个故事
+        （Agent 弄丢或改写了记忆），而那要记在它头上。
+        （这一条判的是 0 号那份记忆：`agent: 0` 是必需的，串联场景里
+        没有它这条判据落在谁头上就不定。）
+
+expect:
+  - detector: idempotency
+    verdict: pass
+    note: >
+      同一操作只在第一段出现过一次，后面两段的重复请求被 Agent 自己拦在了
+      发出去之前。注意这条 pass 是**记忆起作用了**，不是"边界上没看见"——
+      判据里带一句它比的是"有没有两次的规范化参数完全相同"（见
+      docs/detectors.md 第五节）：边界上看不见的调用和没发生过的调用，在
+      检测器眼里是同一件事，所以这句话必须靠 expected_charges 从目标系统
+      那一侧补上独立证据（那里是 1 笔）。
+
+  - detector: memory.drift
+    verdict: pass
+    note: >
+      0 号那份记忆守住了。它跑满三段，三段里那条付款记录一个字都没变——
+      这和对照支里同一条判据的结论相同，也是刻意的：**这一对里变的只有
+      归因，记忆本身两边都是好的**。
+
+  - detector: memory
+    verdict: pass
+    note: >
+      族级汇总。它跟着上面那条具体结论一起是 pass，本身不是一次独立观测。

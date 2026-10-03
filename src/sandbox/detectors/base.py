@@ -84,6 +84,14 @@ class CallView:
     # 小，说明这段记忆被回滚掉了，Agent 不可能知道——归因的分界线就在这里。
     session_ordinal: int = 0
     memory_horizon_ordinal: int = -1
+    # 这次调用是**哪一个** Agent 发出来的（`agents:` 里的序号）。
+    #
+    # 和上面两个字段同一个道理，也是会话的属性冗余到调用上。它回答的是另一个
+    # 问题：跨会话重复抓到"A 在第 0 段付了、B 在第 1 段又付了"时，光看视野
+    # 只会说"B 不可能知道"——而事实是**两个人各付了一次**，错在接缝（两份记忆、
+    # 一个世界），不在任何一个人身上。少了这个字段，报告只能把这句话记到 B 头上，
+    # 那是一条我们编出来的结论：它没有做错任何事。
+    agent_index: int = 0
     idempotency_key: str | None = None
     replay_reason: str | None = None
     blocked_by_proxy: bool = False

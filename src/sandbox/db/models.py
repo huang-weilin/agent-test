@@ -195,6 +195,19 @@ class Session(Base):
     memory_horizon_ordinal: Mapped[int] = mapped_column(Integer, default=-1)
     restored_from_snapshot_id: Mapped[str | None] = mapped_column(String(36))
 
+    # --- 这一段由**哪一个** Agent 跑（`agents:` 里的序号）------------------
+    #
+    # 单 Agent 场景恒为 0；串联场景里 0 号跑第一段、1 号跑第二段。**落了库，
+    # 报告才说得清"这条结论是哪一段、哪个人"**——不落的话，运行当中知道，
+    # 跑完之后只剩一串会话序号，而"是 A 的锅还是 B 的"这个问题在报告里
+    # 根本无从问起。
+    #
+    # `server_default="0"` 是给**旧库**的：这一列出现之前的运行全都是单 Agent，
+    # 0 是它们的事实，不是猜的。可空的话读取侧到处都要处理 NULL，而那个 NULL
+    # 没有任何第三种含义可用。（这条 DDL 走 `db/engine._add_missing_columns`，
+    # 非空 + 默认值是它允许的两种写法之一，已实测过。）
+    agent_index: Mapped[int] = mapped_column(Integer, server_default="0")
+
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(16), default="active")

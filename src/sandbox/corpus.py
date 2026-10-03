@@ -98,8 +98,8 @@ _TOOL_KEYS = {"is_write", "enforces_idempotency", "may_run_unattended", "identit
 #: `ForbiddenTextDecl` 的字段），有测试钉着两边不许漂移。
 #: `observations` 只属于语料：真实运行的观测由引擎在会话边界上拍，不是写出来的。
 MEMORY_KEYS: frozenset[str] = frozenset({"observations", "must_hold", "forbidden"})
-MUST_HOLD_KEYS: frozenset[str] = frozenset({"path", "reason"})
-FORBIDDEN_KEYS: frozenset[str] = frozenset({"text", "reason"})
+MUST_HOLD_KEYS: frozenset[str] = frozenset({"path", "reason", "agent"})
+FORBIDDEN_KEYS: frozenset[str] = frozenset({"text", "reason", "agent"})
 OBSERVATION_KEYS: frozenset[str] = frozenset({"ordinal", "phase", "entries", "horizon"})
 
 
@@ -214,6 +214,24 @@ def _reject_unknown(keys: Any, allowed: set[str] | frozenset[str], what: str, pa
         )
 
 
+def _agent_of(rule: dict[str, Any], where: str) -> int | None:
+    """一条判据指名的 Agent 序号。**语料里只可能是 0 号，或者不写。**
+
+    语料来自真实轨迹，而一条真实轨迹里只有一个 Agent。写 `agent: 1` 是在指一个
+    不存在的人——放行的话这条判据会去筛一份空的观测集，然后以"一次都没出现过"
+    的形式给出 inconclusive，看起来像"这份记忆没记到"，而不是"你指错了人"。
+    """
+    value = rule.get("agent")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value != 0:
+        raise CorpusError(
+            f"{where} 的 agent 只能是 0（收到 {value!r}）：一份语料只有一个 Agent。"
+            f"真实轨迹里没有第二个 Agent 可以指。"
+        )
+    return value
+
+
 def _parse_memory(
     raw: Any, path: str
 ) -> tuple[list[MemoryObservation], MemoryRules]:
@@ -277,7 +295,7 @@ def _parse_memory(
         reason = str(rule.get("reason", ""))
         if not reason.strip():
             raise CorpusError(f"{where}（{target}）缺 reason。没有理由的判据无法复核。")
-        must_hold.append(MustHold(path=target, reason=reason))
+        must_hold.append(MustHold(path=target, reason=reason, agent=_agent_of(rule, where)))
 
     forbidden: list[ForbiddenText] = []
     for i, entry in enumerate(_require_list(mapping.get("forbidden") or [], "forbidden", path)):
@@ -295,7 +313,7 @@ def _parse_memory(
         reason = str(rule.get("reason", ""))
         if not reason.strip():
             raise CorpusError(f"{where}（{text!r}）缺 reason。")
-        forbidden.append(ForbiddenText(text=text, reason=reason))
+        forbidden.append(ForbiddenText(text=text, reason=reason, agent=_agent_of(rule, where)))
 
     return observations, MemoryRules(must_hold=tuple(must_hold), forbidden=tuple(forbidden))
 

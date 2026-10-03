@@ -123,6 +123,7 @@ def run_all(
     exemptions: ExemptionSet | None = None,
     memories: Sequence[MemoryObservation] = (),
     memory_rules: MemoryRules | None = None,
+    agent_count: int = 1,
     loop_field_weights: dict[str, float] | None = None,
 ) -> list[Finding]:
     """跑全套检测器。顺序固定：输出稳定，比对预期时不会因字典序漂移而时红时绿。
@@ -135,6 +136,10 @@ def run_all(
     取决于参数形状而不是行为**——实测翻页到第 10 页会被切成 5+3 两个簇，
     于是"翻了很多页也不停"这个结论根本到不了告警阈值（见 `LoopDetector.key_weights`）。
     真实运行与看门狗两条路径都必须拿到**同一张表**，否则熔断与事后报告会各说各话。
+
+    `agent_count` 只往记忆族传一层：它决定结论句子要不要点名"这是谁的记忆"
+    （串联场景里不点名的话，读的人分不清那条判据说的是 A 还是 B）。判定不受它
+    影响——每条记忆判据自己带着 `agent`。
 
     `memories` 是**第二条观测通道**：记忆内容不是边界上的调用，`CallView` 里没有
     它要的东西（见 detectors/memory.py 的说明）。两个通道都从参数进来，位置并列，
@@ -151,5 +156,5 @@ def run_all(
             autonomous_ordinals=autonomous_ordinals,
         ).run(calls, ex)
     )
-    findings.extend(MemoryDetector(memory_rules).inspect(memories))
+    findings.extend(MemoryDetector(memory_rules, agent_count).inspect(memories))
     return findings

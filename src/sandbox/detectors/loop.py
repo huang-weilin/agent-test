@@ -797,6 +797,23 @@ class LoopDetector:
             last = max(per_session)
             horizon = per_session[last][0].memory_horizon_ordinal
             first = min(per_session)
+            # 首尾两段是不是同一个人跑的。串联场景里"两次一样的调用"可能来自
+            # 两个 Agent，那时它连"它可能不知道"都说不上——不是不知道，是那根本
+            # 不是它的记忆。措辞要分开，理由和幂等那边同一处：说成记忆没接上，
+            # 用户会去查快照回滚，而这里没有人回滚过。
+            relay = per_session[first][0].agent_index != per_session[last][0].agent_index
+            if relay:
+                note = (
+                    f"这两段不是同一个 Agent 跑的（{per_session[first][0].agent_index} 号"
+                    f"与 {per_session[last][0].agent_index} 号），各有一份记忆，"
+                    f"谁都不知道对方调过。"
+                )
+            elif first <= horizon:
+                note = ""
+            else:
+                note = (
+                    f"注意会话 #{last} 的记忆只覆盖到 #{horizon}，它可能根本不知道之前调过。"
+                )
             findings.append(
                 Finding(
                     detector=f"{self.name}.cross_session",
@@ -804,20 +821,17 @@ class LoopDetector:
                     summary=(
                         f"{tool_name} 的同一调用出现在 {len(per_session)} 个会话中"
                         f"（#{'、#'.join(str(o) for o in sorted(per_session))}），"
-                        f"疑似跨会话重复。"
-                        + (
-                            ""
-                            if first <= horizon
-                            else f"注意会话 #{last} 的记忆只覆盖到 #{horizon}，"
-                            f"它可能根本不知道之前调过。"
-                        )
+                        f"疑似跨会话重复。" + note
                     ),
                     confidence=Confidence.MEDIUM,
                     detail={
                         "tool_name": tool_name,
                         "fingerprint": fp[:16],
-                        "sessions": {str(o): len(g) for o, g in sorted(per_session.items())},
+                        "sessions": {str(o): len(g) for o, g in per_session.items()},
                         "memory_horizon_ordinal": horizon,
+                        "agent_indices": {
+                            str(o): g[0].agent_index for o, g in sorted(per_session.items())
+                        },
                     },
                 )
             )

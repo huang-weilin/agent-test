@@ -76,6 +76,16 @@ class MemoryObservation:
     entries: tuple[MemoryEntry, ...] = ()
     horizon: int | None = None
 
+    #: 这是**哪一个** Agent 的记忆（`agents:` 里的序号，从 0 开始）。
+    #:
+    #: 串联测试里 A 和 B 各有一份记忆目录，切面因此是两份不同的东西。
+    #: **没有这个字段的话，把 A 的切面和 B 的切面放在一起看会得出一句纯粹由
+    #: 我们的目录布局造出来的话**："上次看到的三个文件全没了"——而 B 那一份
+    #: 本来就还没写过东西。读的人会去查 Agent 为什么弄丢记忆。
+    #:
+    #: 默认 0：单 Agent 场景（今天全部场景）不用写，和从前一样。
+    agent_index: int = 0
+
     @property
     def label(self) -> str:
         return phase_label(self.ordinal, self.phase)
@@ -129,19 +139,30 @@ def chronological(observations: list[MemoryObservation]) -> list[MemoryObservati
 
 
 def observe_memory(
-    adapter: MemoryAdapter, *, ordinal: int, phase: str, horizon: int | None = None
+    adapter: MemoryAdapter,
+    *,
+    ordinal: int,
+    phase: str,
+    horizon: int | None = None,
+    agent_index: int = 0,
 ) -> MemoryObservation:
     """在会话边界上拍一张记忆切面。
 
     `adapter` 只要满足 `MemoryAdapter` 协议即可——内容怎么读是适配器自己的事，
     这里不碰文件系统。适配器不支持枚举条目的话会在 `entries_of` 上报错，
     而不是悄悄返回一份空观测：**空观测会被读成"记忆里什么都没有"**。
+
+    `adapter` 和 `agent_index` 必须说的是**同一个** Agent：串联测试里适配器是
+    按会话挑的（这一段谁跑就用谁的目录），而 `agent_index` 是那份切面的署名。
+    对不上的话，报告会把 A 的记忆标成 B 的——两边的条目数都正常，没有任何一处
+    看起来像坏了。
     """
     return MemoryObservation(
         ordinal=ordinal,
         phase=phase,
         entries=tuple(adapter.entries_of(adapter.capture())),
         horizon=horizon,
+        agent_index=agent_index,
     )
 
 
@@ -155,23 +176,33 @@ def summarize_observations(observations: list[MemoryObservation]) -> list[dict[s
     另附 `changed`：相对上一个观测点，哪些条目出现了、哪些消失了、哪些内容变了。
     这一栏**不是判定**——Agent 往记忆里写东西是正常的。它的用处是让读报告的人
     看到"这段会话动过哪些文件"，而判定只发生在场景声明过的判据上。
+
+    **"上一个观测点"是同一个 Agent 的上一个。** 串联场景里 A 和 B 各有一份记忆
+    目录，拿 B 的第一个切面去比 A 的最后一个切面，得到的是一句纯粹由我们的目录
+    布局造出来的话："上次看到的三个文件全没了"。B 那一份本来就还没写过东西，
+    而报告会推出一个"Agent 弄丢了记忆"的结论。
     """
     ordered = chronological(observations)
     out: list[dict[str, object]] = []
-    previous: dict[str, str] = {}
+    # 每个 Agent 各记各的"上一次"。单 Agent 场景只有一个键，行为和从前一样。
+    previous: dict[int, dict[str, str]] = {}
     for observation in ordered:
         digests = {entry.path: entry.sha256 for entry in observation.entries}
+        seen_before = previous.get(observation.agent_index, {})
         changed = sorted(
             path
             for path, digest in digests.items()
-            if path in previous and previous[path] != digest
+            if path in seen_before and seen_before[path] != digest
         )
-        added = sorted(path for path in digests if path not in previous)
-        removed = sorted(path for path in previous if path not in digests)
+        added = sorted(path for path in digests if path not in seen_before)
+        removed = sorted(path for path in seen_before if path not in digests)
         out.append(
             {
                 "ordinal": observation.ordinal,
                 "phase": observation.phase,
+                # 这一行是谁的记忆。少了它，串联报告里的 `removed` 会被读成
+                # "它把记忆弄丢了"——而实际上那是另一个人的那一份。
+                "agent_index": observation.agent_index,
                 # 这段会话开始时记忆覆盖到哪儿。**跨会话结论的归因靠它**：
                 # horizon 比某件事发生的序号小，就说明那件事被回滚掉了，
                 # "记忆不见了"得记在恢复机制头上而不是 Agent 头上。
@@ -183,5 +214,5 @@ def summarize_observations(observations: list[MemoryObservation]) -> list[dict[s
                 "changed": changed,
             }
         )
-        previous = digests
+        previous[observation.agent_index] = digests
     return out

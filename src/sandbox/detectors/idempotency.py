@@ -38,7 +38,12 @@ docs/detectors.md 第三节第 3 条；tests/test_recorder.py 里有一条绊线
 Agent 订票，周三再次要求时，Agent 没有识别出这是重复操作"——Agent 有长效记忆，
 本应认出来。所以判据是"重复发生时那件事在不在它的记忆里"，而记忆视野是我们
 拍快照时定位的，不是推测的。在记忆里 → Agent 的锅；不在 → 恢复/记忆传递的锅。
-两种情况都报 fail，因为钱确实扣了两次；区别在 summary 里说该去修哪儿。
+三种情况都报 fail，因为钱确实扣了两次；区别在 summary 里说该去修哪儿。
+
+**但"不在记忆里"有两种成因，指的方向完全相反**：我们自己回滚过（去查快照），
+以及**首尾两段根本不是同一个人跑的**（串联场景，去查交接）。后者的视野必然也
+小于首次发生的序号——于是它会掉进前一支，报告说"去修记忆的恢复/传递"，而没
+有人回滚过任何东西。分界是首尾两段的 `agent_index` 一不一样，见 `_judge_cross_session`。
 
 **五、判据是"规范化后参数完全相同"，话就得这么说。** 分组键是 `(工具名, 指纹)`，
 而指纹逐字比参数——于是"同一件事、换个付款方式再订一次"永远配不上对，一条都不报。
@@ -755,22 +760,51 @@ class IdempotencyDetector:
         flat = [c for calls in by_ordinal.values() for c in calls]
         all_ok = _ok_count(flat) == len(flat)
 
+        #: 首尾两段**不是同一个人跑的**（串联场景：A 跑第一段、B 跑第二段）。
+        #
+        # 这一支和另外两支在逻辑上不重叠：`first` 是最早的那一段，所以最后那一段
+        # 的 Agent 不可能在它之前跑过任何一段，它的视野必然小于 `first`。也就是说
+        # 下面的 `should_have_known` 对它恒为假，它会掉进"记忆没覆盖到"那一支——
+        # 而那一支的结论是「去修记忆的恢复/传递」，说的是快照回滚。**这里根本没有
+        # 人回滚过**：两个人各有一份记忆，谁都没做错什么，错在接缝。指错方向的
+        # 报告比不报更坏——用户会去查一个没动过的快照。
+        relay = first_calls[0].agent_index != last_calls[0].agent_index
+
         session_detail = {
             **detail,
             "sessions": {str(o): [c.seq for c in cs] for o, cs in sorted(by_ordinal.items())},
             "first_ordinal": first,
             "last_ordinal": last,
             "memory_horizon_ordinal": horizon,
-            "missed_ordinals": [
-                o for o in range(horizon + 1, last) if o in by_ordinal
-            ],
+            # 每一段由谁跑的。**判据用不到它**（归因看的是视野），但报告要用：
+            # "会话 #0 和 #1"这句话在串联场景里读不出"是两个人"，而那句话正是
+            # 这一条结论的要点。
+            "agent_indices": {str(o): cs[0].agent_index for o, cs in sorted(by_ordinal.items())},
             "statuses": {
                 status: sum(1 for c in flat if c.status == status)
                 for status in sorted({c.status for c in flat})
             },
         }
 
-        if should_have_known:
+        if relay:
+            first_agent = first_calls[0].agent_index
+            last_agent = last_calls[0].agent_index
+            finding = Finding(
+                detector=self.name,
+                verdict=DetectorVerdict.FAIL,
+                summary=(
+                    f"{tool_name} 的同一操作在会话 #{first} 与 #{last} 各调用了一次"
+                    f"{criterion.clause()}，这两段分别是 {first_agent} 号与 "
+                    f"{last_agent} 号 Agent 跑的。{_outcome(flat)}"
+                    f"但这不是哪一个 Agent 的错：串联的两个人各有一份记忆，"
+                    f"{first_agent} 号不知道 {last_agent} 号做过什么，反过来也一样"
+                    f"——没有谁本可以知道。要修的是接缝：要么让它们共用一份记忆，"
+                    f"要么在交接的时候把上一段的结论传过去。"
+                ),
+                confidence=Confidence.HIGH,
+                detail={**session_detail, "reason_code": "cross_session_handoff"},
+            )
+        elif should_have_known:
             finding = Finding(
                 detector=self.name,
                 verdict=DetectorVerdict.FAIL,
@@ -809,7 +843,17 @@ class IdempotencyDetector:
                     + "要去修记忆的恢复/传递，不要改 Agent。"
                 ),
                 confidence=Confidence.HIGH,
-                detail={**session_detail, "reason_code": "cross_session_memory_loss"},
+                detail={
+                    **session_detail,
+                    # 这一栏只在这一支里有：它的意思是"这一段我们回滚掉了"，
+                    # 而这正是这一条结论说的那件事。接缝那一支用的是同一个算术，
+                    # 但那边没有任何人被回滚——挂一个叫"漏掉的会话"的键上去，
+                    # 读 detail 的人会推出一个我们没说过的事实。
+                    "missed_ordinals": [
+                        o for o in range(horizon + 1, last) if o in by_ordinal
+                    ],
+                    "reason_code": "cross_session_memory_loss",
+                },
             )
 
         return self._silence_if_exempted(

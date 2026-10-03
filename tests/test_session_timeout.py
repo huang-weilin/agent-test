@@ -159,8 +159,11 @@ async def _launch(tmp_path: Path, body: str, *, timeout_s: float):
     # 借演示 Agent 的解释器：这里要验的是**超时那条路**，不是 Agent 本身，
     # 而解释器只要是个能跑 Python 的真实独立进程就够了。
     runner = ScenarioRunner(session_timeout_s=timeout_s)
+    # 传 `.agent` 而不是整个场景：串联之后这个参数是"**这一段**由谁跑"，
+    # 收窄成 AgentSpec 就是为了让"每一段都拉起 0 号"写不出来
+    # （见 `runner._launch_agent` 的 docstring）。
     return await runner._launch_agent(
-        _scenario(entry), "sk-sandbox-x", 1, 2, tmp_path, {"proc": None}, "随便"
+        _scenario(entry).agent, "sk-sandbox-x", 1, 2, tmp_path, {"proc": None}, "随便"
     )
 
 
@@ -205,6 +208,9 @@ def _outcome(**kwargs) -> SessionOutcome:
     base = {
         "name": "会话",
         "ordinal": 0,
+        # 这些用例测的是超时和输出留不留，跟"谁跑的"无关——但它是必填的：
+        # 少写一次，串联场景里 1 号的会话就会被读成 0 号的（`runner.py:785`）。
+        "agent_index": 0,
         "memory_horizon_ordinal": -1,
         "restored_from": None,
         "exit_code": 0,

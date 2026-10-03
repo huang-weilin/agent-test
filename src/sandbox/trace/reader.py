@@ -45,6 +45,7 @@ def _row_to_view(
     *,
     session_ordinal: int = 0,
     memory_horizon_ordinal: int = -1,
+    agent_index: int = 0,
 ) -> CallView:
     try:
         args = json.loads(row.args_json) if row.args_json else {}
@@ -63,6 +64,7 @@ def _row_to_view(
         session_id=row.session_id or "",
         session_ordinal=session_ordinal,
         memory_horizon_ordinal=memory_horizon_ordinal,
+        agent_index=agent_index,
         idempotency_key=row.idempotency_key,
         replay_reason=row.replay_reason,
         blocked_by_proxy=bool(row.blocked_by_proxy),
@@ -89,6 +91,7 @@ async def load_call_views(run_id: str) -> list[CallView]:
                 call,
                 session_ordinal=session.ordinal if session else 0,
                 memory_horizon_ordinal=session.memory_horizon_ordinal if session else -1,
+                agent_index=session.agent_index if session else 0,
             )
             for call, session in rows
         ]
@@ -124,6 +127,7 @@ async def load_session_sequence(session_sequence_id: str) -> list[CallView]:
                 call,
                 session_ordinal=session.ordinal if session else 0,
                 memory_horizon_ordinal=session.memory_horizon_ordinal if session else -1,
+                agent_index=session.agent_index if session else 0,
             )
             for call, session in rows
         ]

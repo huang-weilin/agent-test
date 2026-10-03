@@ -212,6 +212,9 @@ def _outcome(**kwargs) -> SessionOutcome:
     base = {
         "name": "会话",
         "ordinal": 0,
+        # 这些用例测的是虚拟时钟走没走，跟"谁跑的"无关——但它是必填的：
+        # 少写一次，串联场景里 1 号的会话就会被读成 0 号的（`runner.py:785`）。
+        "agent_index": 0,
         "memory_horizon_ordinal": -1,
         "restored_from": None,
         "exit_code": 0,

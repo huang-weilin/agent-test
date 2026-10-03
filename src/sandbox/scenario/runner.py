@@ -77,7 +77,7 @@ from sandbox.memory.observe import (
 from sandbox.memory.snapshot import SnapshotRef, SnapshotStore
 from sandbox.scenario import call_chain, identity, session_diff
 from sandbox.scenario.expect import ExpectResult, evaluate
-from sandbox.scenario.spec import Scenario
+from sandbox.scenario.spec import AgentSpec, Scenario
 from sandbox.trace.reader import load_boundary_findings, load_session_sequence
 from sandbox.watchdog import summarize_verdicts
 
@@ -101,6 +101,11 @@ class SessionOutcome:
 
     name: str
     ordinal: int
+    #: 这一段是**哪一个** Agent 跑的——`agents:` 里的序号，从 0 开始。
+    #:
+    #: 报告靠它把"谁的会话"分开。少了它，串联场景的每一段看起来都是同一个
+    #: Agent 跑的，"接缝上的问题"就只能靠人回忆场景文件里写了什么。
+    agent_index: int
     memory_horizon_ordinal: int
     restored_from: str | None
     exit_code: int | None
@@ -187,6 +192,7 @@ class SessionOutcome:
         return {
             "name": self.name,
             "ordinal": self.ordinal,
+            "agent_index": self.agent_index,
             "memory_horizon_ordinal": self.memory_horizon_ordinal,
             "restored_from": self.restored_from,
             "exit_code": self.exit_code,
@@ -522,6 +528,11 @@ def registration_payload(scenario: Scenario) -> dict[str, Any]:
         # 用的是场景声明的那张表，看门狗用的是空的——同一段轨迹，
         # 一边判成正常遍历、一边判成循环，而两边看起来都对。
         "loop_field_weights": scenario.loop_field_weights(),
+        # 第 0 段由谁跑。单 Agent 场景恒为 0，网关那边默认也是 0，
+        # 所以这一行在 29 份场景上不改变任何行为；串联场景里第 0 段由
+        # 别的号跑时，它决定"这一段跑完算谁记得"——不说的话，0 号会被
+        # 判成"它本可以知道第 0 段的事"，而它根本没跑过那一段。
+        "first_session_agent": scenario.sessions[0].agent or 0,
     }
 
 
@@ -710,7 +721,19 @@ class ScenarioRunner:
         if memory_root.exists():
             shutil.rmtree(memory_root)
         memory_root.mkdir(parents=True, exist_ok=True)
-        adapter = FileMemoryAdapter(root=memory_root)
+        # **每个 Agent 一个目录，一人一份适配器。**
+        #
+        # 串联测试里 A 跑第一段、B 跑第二段，两份记忆是两个东西：B 读到 A 的记忆
+        # 的话，"B 到底记得什么"这个问题的答案就被 A 改写了，而报告上看不出来——
+        # 它只会显示成"B 记得这件事"，看起来完全正常。共用目录时那正是默认行为，
+        # 所以隔离必须是结构性的，不能靠"记得别读"。
+        #
+        # 单 Agent 场景也走这条（就 `agent-0` 一个目录）。让它和串联场景走同一条
+        # 代码路径，是有意的：多分支的话，跑得少的那一支坏了不会有人发现。
+        agent_roots = [memory_root / f"agent-{i}" for i in range(len(scenario.agents))]
+        for root in agent_roots:
+            root.mkdir(parents=True, exist_ok=True)
+        adapters = [FileMemoryAdapter(root=root) for root in agent_roots]
         store = SnapshotStore()
         # 名字 → 快照引用。场景用名字引用快照，引擎记住这个名字对应哪一次。
         named: dict[str, SnapshotRef] = {}
@@ -755,6 +778,16 @@ class ScenarioRunner:
             for index, spec in enumerate(scenario.sessions):
                 ordinal = index  # 会话 0 由 start_run 建出，从会话 1 起要显式开
 
+                # 这一段由谁跑：会话上指了名就是它，没指名就是 0 号。校验器
+                # （`spec.Scenario._one_agent_list`）已经保证序号在名单里，
+                # 所以这里是全函数，不用兜底——**兜底会把"B 跑第二段"静默地
+                # 变成"A 又跑了一段"**，那正是这段最该说清的事。
+                agent_index = spec.agent or 0
+                agent = scenario.agents[agent_index]
+                # 记忆目录、快照恢复、切面观测，这一段一律只碰**这个** Agent 的
+                # 那一份。见上面 `agent_roots` 的理由。
+                adapter = adapters[agent_index]
+
                 # **把世界往前拨，然后什么也不等。** 这就是时间加速的全部：一段
                 # 声明的间隔立刻过去，目标系统上该变的都变了，真实耗时是零。
                 # 被测 Agent 这段时间本来就不在跑——云端常驻 Agent 也是被定时器
@@ -776,7 +809,14 @@ class ScenarioRunner:
                     await restore_snapshot(restored, adapter, store, allow_create=True)
 
                 if index > 0:
-                    await start_session(active.ctx, restored_from=restored)
+                    await start_session(
+                        active.ctx, restored_from=restored, agent_index=agent_index
+                    )
+                # 第 0 段不进这个分支：`start_run` 已经用它开过头了（那一步也要走
+                # 同一条归因规则，见 `recorder.start_run` 的 `first_session_agent`），
+                # 而 `start_session` 这个入口要求序号递增，再进来一次会当场报错。
+                # 换句话说，第 0 段的"谁跑、记得什么"由注册载荷那一份决定，
+                # 和后面每一段用的是同一个 `enter_agent`。
 
                 # 记忆切面：会话**开始时**是什么样。
                 #
@@ -795,6 +835,9 @@ class ScenarioRunner:
                         # 这段会话的记忆视野。判定"键不见了"时用它分清算谁的账：
                         # 视野比写下它的时刻还早，那就是我们自己回滚掉了。
                         horizon=active.ctx.memory_horizon_ordinal,
+                        # 这是谁的记忆。**少了它，"记忆里少了三样东西"会被读成
+                        # Agent 弄丢了——而实际上是换了个人，那一份本来就空。**
+                        agent_index=agent_index,
                     )
                 )
 
@@ -809,14 +852,16 @@ class ScenarioRunner:
                 # 后者才是"循环场景如期触发"。
                 killed_before = active.killed
                 exit_code, timed_out, stdout, elapsed = await self._launch_agent(
-                    scenario,
+                    agent,
                     run["api_key"],
                     gw_port,
                     px_port,
-                    memory_root,
+                    agent_roots[agent_index],
                     current,
-                    # 这一段用户说的是什么。没写就沿用场景级的 task。
-                    spec.task or scenario.agent.task,
+                    # 这一段用户说的是什么。没写就沿用**这个 Agent 的** task——
+                    # 用 0 号的会把 B 要做的事写成 A 的，而两句话都在场景里躺着，
+                    # 读报告的人分不出哪句发给了谁。
+                    spec.task or agent.task,
                 )
                 cursor_after = scripted_upstream.calls_made(run_id)
 
@@ -829,6 +874,7 @@ class ScenarioRunner:
                         ordinal=ordinal,
                         phase=PHASE_END,
                         horizon=active.ctx.memory_horizon_ordinal,
+                        agent_index=agent_index,
                     )
                 )
 
@@ -841,6 +887,7 @@ class ScenarioRunner:
                     SessionOutcome(
                         name=spec.name,
                         ordinal=ordinal,
+                        agent_index=agent_index,
                         memory_horizon_ordinal=active.ctx.memory_horizon_ordinal,
                         restored_from=spec.restore_from,
                         exit_code=exit_code,
@@ -947,7 +994,7 @@ class ScenarioRunner:
 
     async def _launch_agent(
         self,
-        scenario: Scenario,
+        agent: AgentSpec,
         token: str,
         gw_port: int,
         px_port: int,
@@ -957,9 +1004,11 @@ class ScenarioRunner:
     ) -> tuple[int | None, bool, str, float]:
         """拉起被测 Agent 进程，等它退出。返回 (退出码, 是否超时, 输出, 耗时)。
 
-        `task` 是**这一段**会话里用户说的话（见 `SessionSpec.task`）。
+        `agent` 是**这一段会话**由谁跑（见 `SessionSpec.agent`）——串联场景里
+        它随会话变，不是场景级的那一个。`task` 是这一段会话里用户说的话
+        （见 `SessionSpec.task`）。
         """
-        agent_dir = self.repo_root / "agents" / scenario.agent.directory
+        agent_dir = self.repo_root / "agents" / agent.directory
         python = agent_dir / ".venv" / "Scripts" / "python.exe"
         if not python.exists():
             # Windows 的 venv 布局。非 Windows 上退回 posix 布局，让这个
@@ -969,18 +1018,18 @@ class ScenarioRunner:
         if not python.exists():
             raise FileNotFoundError(
                 f"Agent 解释器不存在：{python}。请先在 {agent_dir} 下建好 venv 并装依赖"
-                f"（见 agents/{scenario.agent.directory}/README.md）。"
+                f"（见 agents/{agent.directory}/README.md）。"
             )
 
         env = {
             # 场景自带的环境变量放在前面，让沙箱注入的**覆盖**它。
             # 反过来的话，场景可以把 Agent 指向真实上游，那观测就断了。
-            **scenario.agent.env,
+            **agent.env,
             **{k: v for k, v in os.environ.items() if k not in _STRIP_FROM_AGENT_ENV},
             "SANDBOX_GATEWAY_BASE_URL": f"http://127.0.0.1:{gw_port}/v1",
             "SANDBOX_AGENT_API_KEY": token,
             "SANDBOX_TOOL_BASE_URL": f"http://127.0.0.1:{px_port}",
-            "SANDBOX_AGENT_MODEL": scenario.agent.model,
+            "SANDBOX_AGENT_MODEL": agent.model,
             "SANDBOX_AGENT_TASK": task,
             # 记忆目录由引擎创建并告知 Agent。Agent 不该自己猜路径，
             # 否则测试框架的回滚就回滚到了一处它不读的地方。
@@ -991,7 +1040,7 @@ class ScenarioRunner:
 
         started = time.perf_counter()
         proc = subprocess.Popen(
-            [str(python), scenario.agent.entry],
+            [str(python), agent.entry],
             cwd=str(agent_dir),
             env=env,
             stdout=subprocess.PIPE,
@@ -1053,6 +1102,7 @@ def _run_detectors(
         exemptions=scenario.exemption_set(),
         memories=memories,
         memory_rules=scenario.memory_rules(),
+        agent_count=len(scenario.agents),
         loop_field_weights=scenario.loop_field_weights(),
     )
 

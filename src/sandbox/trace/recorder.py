@@ -99,6 +99,14 @@ class RunContext:
     session_ordinal: int = 0
     memory_horizon_ordinal: int = -1
 
+    #: **每个 Agent 各自**的记忆覆盖到哪个会话序号（没跑过就是"什么都不知道"）。
+    #:
+    #: 串联场景里这个"各算各的"是硬要求：A 跑完第 0 段、B 跑第 1 段时，B 的记忆
+    #: 里没有第 0 段那件事。拿整条会话序列的进度去判，会得出"B 本可以知道"——
+    #: 把接缝上的遗漏记到 B 头上，而 B 根本拿不到那份记忆。单 Agent 场景里这张表
+    #: 只有一个键，算术和从前完全一样（第 k 段自然延续时视野就是 k-1）。
+    memory_through: dict[int, int] = field(default_factory=dict)
+
     _seq: int = 0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
@@ -140,8 +148,16 @@ async def start_run(
     session_sequence_id: str | None = None,
     declared_writes: set[str] | None = None,
     idempotency_key_params: dict[str, str] | None = None,
+    first_session_agent: int = 0,
 ) -> RunContext:
-    """建运行并开第一个会话。"""
+    """建运行并开第一个会话。
+
+    `first_session_agent` 是**第 0 段由谁跑**（`agents:` 里的序号）。默认 0——
+    也就是"只有一个 Agent"的那一份，和从前一样。串联场景里第 0 段可能不是 0 号
+    跑的，那就要说出来：这一段跑完，是**那一个** Agent 记得它，而不是 0 号。
+    说错了方向很具体：0 号此后自然延续时会被判成"它本可以知道第 0 段的事"，
+    而它根本没跑过那一段。
+    """
     run_id = str(uuid.uuid4())
     session_id = str(uuid.uuid4())
     seq_id = session_sequence_id or str(uuid.uuid4())
@@ -168,16 +184,57 @@ async def start_run(
                 test_run_id=run_id,
                 session_sequence_id=seq_id,
                 ordinal=0,
+                agent_index=first_session_agent,
             )
         )
 
-    return RunContext(
+    ctx = RunContext(
         run_id=run_id,
         session_id=session_id,
         session_sequence_id=seq_id,
         declared_writes=declared_writes,
         idempotency_key_params=idempotency_key_params or {},
     )
+    # 第 0 段也是"某个人跑的"。走同一条规则（`enter_agent`），不另写一份——
+    # 两份写法迟早会在某个边界上不一致，而这里不一致的表现是归因错人。
+    enter_agent(ctx, agent_index=first_session_agent, ordinal=0)
+    return ctx
+
+
+def enter_agent(
+    ctx: RunContext,
+    *,
+    agent_index: int,
+    ordinal: int,
+    restored_from: SnapshotRef | None = None,
+) -> int:
+    """换到"这一段由某个 Agent 跑"，并算清**它**这段开始时记得什么。
+
+    返回这一段会话的记忆视野（也就是写进 `Session.memory_horizon_ordinal` 的那个
+    数）。归因规则在这里落地，它是整个跨会话检测的地基：
+
+    - 自然延续（`restored_from is None`）时，这个 Agent 记得**它自己**此前跑过的
+      那几段，`memory_horizon_ordinal` 是它上一次跑到的序号。此后再出现重复，
+      它本可以知道，所以是它的问题。
+    - 从旧快照恢复时，记忆只覆盖到快照那一刻。**快照之后发生的调用，
+      这个会话不可能知道**——再出现重复就是恢复机制制造的。
+
+    两句话的重点都是"这个 Agent：它自己/它的记忆"。串联场景里换人了却沿用
+    上一个人的进度，就是拿别人的记忆去质问它——而报告上那句话看起来完全正常。
+
+    "是谁的锅"不需要猜、也不需要启发式，它由我们回滚到了哪里唯一确定。这也正是
+    把记忆快照做成操纵面（而不是观测面）换来的东西。
+    """
+    horizon = (
+        horizon_of(restored_from)
+        if restored_from is not None
+        else ctx.memory_through.get(agent_index, -1)
+    )
+    ctx.memory_horizon_ordinal = horizon
+    # 这一段之后，它就记得这一段了。**写在进来的时候不算早**：这个值只有在
+    # 这个 Agent 下一次进来时才会被读到，那时这一段早就跑完了。
+    ctx.memory_through[agent_index] = max(horizon, ordinal)
+    return horizon
 
 
 async def start_session(
@@ -185,19 +242,12 @@ async def start_session(
     *,
     ordinal: int | None = None,
     restored_from: SnapshotRef | None = None,
+    agent_index: int = 0,
 ) -> Session:
     """进入会话序列的下一个会话。**跨会话测试的入口。**
 
-    归因规则在这里落地，它是整个跨会话检测的地基：
-
-    - 自然延续（`restored_from is None`）时，新会话记得此前发生的一切，
-      `memory_horizon_ordinal = ordinal - 1`。此后再出现重复，Agent 本可以
-      知道，所以是 Agent 的问题。
-    - 从旧快照恢复时，记忆只覆盖到快照那一刻。**快照之后发生的调用，
-      这个会话不可能知道**——再出现重复就是恢复机制制造的。
-
-    也就是说"是谁的锅"不需要猜、也不需要启发式，它由我们回滚到了哪里
-    唯一确定。这也正是把记忆快照做成操纵面（而不是观测面）换来的东西。
+    记忆视野与归因规则见 `enter_agent`（这里调它，规则只有那一份）。
+    第 0 段不走这里——它由 `start_run` 建出来，而这里的入口要求序号递增。
 
     当前的 `ctx.session_id` 会被切换成新会话，此后所有调用都记在新会话下。
     """
@@ -210,7 +260,9 @@ async def start_session(
             f"会话序列必须单调递增。"
         )
 
-    horizon = new_ordinal - 1 if restored_from is None else horizon_of(restored_from)
+    horizon = enter_agent(
+        ctx, agent_index=agent_index, ordinal=new_ordinal, restored_from=restored_from
+    )
 
     session = Session(
         id=str(uuid.uuid4()),
@@ -219,13 +271,17 @@ async def start_session(
         ordinal=new_ordinal,
         memory_horizon_ordinal=horizon,
         restored_from_snapshot_id=restored_from.id if restored_from else None,
+        # 谁跑的也要落库。**归因和措辞是两个需求**：视野那个数回答"它本可以
+        # 知道吗"，这一列回答"这是谁的记忆"——串联报告里两者都要有，缺了后者
+        # 那句话会被记到错的人头上。（`enter_agent` 拿这个序号算视野，也正是
+        # 因为这个参数就是"这一段由谁跑"，不是只给它算视野用的。）
+        agent_index=agent_index,
     )
     async with session_scope() as db:
         db.add(session)
 
     ctx.session_id = session.id
     ctx.session_ordinal = new_ordinal
-    ctx.memory_horizon_ordinal = horizon
     return session
 
 

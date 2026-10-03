@@ -64,7 +64,7 @@ SECTION_SOURCES: dict[str, tuple[str, ...]] = {
     "prompt": ("agent",),
     "tools": ("tools",),
     "script": ("sessions",),
-    "agent": ("agent",),
+    "agent": ("agent", "agents"),
     "world": ("world",),
     "expect": (
         "expect",
@@ -94,6 +94,84 @@ PROSE_FIELDS: frozenset[str] = frozenset({"id", "description"})
 #: 在那次重跑里改过 Prompt 的话，他会先去看自己的改动，而报告已经在说"比不了"。
 SESSION_FIELDS_NOT_IN_FINGERPRINT: tuple[str, ...] = ("name",)
 
+#: 会话这一节里**可以在指纹里省掉**的字段，以及省掉的条件：它等于默认值。
+#:
+#: 和上面那条不是一回事，混起来会把两种完全不同的东西合成一条规矩：
+#: 上面那条说"这个字段**永远**不进指纹"（会话名是标签，不是输入），
+#: 这条说"它**没写**的时候不进，**写了**就进"。
+#:
+#: 为什么必须有这么一条：往 `SessionSpec` 上加一个可选字段，`model_dump()`
+#: 就会给**每一段会话**都添上 `"agent": null`，于是 29 份场景的指纹在同一天
+#: 全部变一次——而它们一个字都没改。回归对比会说"配置变了"，用户去查一个
+#: 谁都没动过的文件。**假警报一多，真警报就没人看了。**
+#:
+#: 今天只有 `agent`：不写就是"还是那一个"，和"写成 0"在单 Agent 场景下确实
+#: 是同一件事；而多 Agent 场景写了它就一定进指纹——**换谁跑这一段是换了一次
+#: 测试**，前后两次运行不该拿来比"失败少了几个"。
+SESSION_FIELDS_OMITTED_WHEN_DEFAULT: tuple[str, ...] = ("agent",)
+
+#: 记忆判据里同一类字段：没写就不进指纹。
+#:
+#: 今天只有 `agent`（"这条判据判的是谁的记忆"）。和上面那条是同一个理由：
+#: `model_dump()` 会给每一行判据都添上 `"agent": null`，于是**一份判据都没改**的
+#: 场景也会换一次指纹——报告说"判卷标准变了"，用户去查一个没动过的文件。
+MEMORY_FIELDS_OMITTED_WHEN_DEFAULT: tuple[str, ...] = ("agent",)
+
+
+def _agent_section(scenario: Scenario) -> dict[str, Any]:
+    """`agent` 那一节的值。0 号平铺，其余的在 `others` 里。
+
+    单独抽出来是因为它有一处**容易写成"看起来对"的样子**：把名单整体放进指纹
+    （`[a.model_dump() for a in scenario.agents]`）在两份场景上算出来的哈希确实
+    能区分，但它会让 29 份单 Agent 场景在同一天全部换一次指纹——而它们一个字
+    都没改。回归对比于是报"配置变了"，用户去查一个谁都没动过的文件。
+
+    这条规矩和 `expect` 那边用 `exclude_defaults` 是同一个：**加一个可选字段
+    不该让所有场景的指纹动一次。**
+    """
+    out: dict[str, Any] = {
+        "version": scenario.agent.version,
+        "directory": scenario.agent.directory,
+        "entry": scenario.agent.entry,
+        "env": scenario.agent.env,
+    }
+    if len(scenario.agents) > 1:
+        out["others"] = [
+            {
+                "version": a.version,
+                "directory": a.directory,
+                "entry": a.entry,
+                "env": a.env,
+            }
+            for a in scenario.agents[1:]
+        ]
+    return out
+
+
+def _memory_section(scenario: Scenario) -> dict[str, Any]:
+    """`expect` 节里的记忆判据（`must_hold` / `forbidden`）。
+
+    单独抽出来只有一个原因：让每行判据上的 `agent`（这条判据判的是**谁的**记忆）
+    **只有写了才进指纹**。直接 `model_dump()` 的话，一份判据都没改的场景也会换一次
+    指纹——每一行都多了一个 `agent: null`。见
+    `MEMORY_FIELDS_OMITTED_WHEN_DEFAULT`。
+    """
+
+    def rules(decls: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                k: v
+                for k, v in d.model_dump(mode="json").items()
+                if not (k in MEMORY_FIELDS_OMITTED_WHEN_DEFAULT and v is None)
+            }
+            for d in decls
+        ]
+
+    return {
+        "must_hold": rules(scenario.memory.must_hold),
+        "forbidden": rules(scenario.memory.forbidden),
+    }
+
 
 def sections(scenario: Scenario) -> dict[str, Any]:
     """把场景切成"用户会改的那几块"。
@@ -122,16 +200,20 @@ def sections(scenario: Scenario) -> dict[str, Any]:
                 k: v
                 for k, v in s.model_dump(mode="json").items()
                 if k not in SESSION_FIELDS_NOT_IN_FINGERPRINT
+                and not (k in SESSION_FIELDS_OMITTED_WHEN_DEFAULT and v is None)
             }
             for s in scenario.sessions
         ],
         # 被测对象的构建标识与启动方式。
-        "agent": {
-            "version": scenario.agent.version,
-            "directory": scenario.agent.directory,
-            "entry": scenario.agent.entry,
-            "env": scenario.agent.env,
-        },
+        #
+        # 串联测试（`agents:`）时**其余那几个**放在 `others` 里，0 号仍然平铺在
+        # 这一层。两个好处：单 Agent 场景的指纹一个字节都不变（29 份场景今天
+        # 全是这一种），而多 Agent 场景换掉任何一个 Agent 都会进指纹——
+        # 换掉 B 等于换了一次测试，前后两次运行不该拿来比"失败少了几个"。
+        #
+        # `others` 在只有一个 Agent 时**整个不出现**，不是空列表：空列表和
+        # 没有这个键在差异报告里是两种不同的说法，而这里要的是"和从前一样"。
+        "agent": _agent_section(scenario),
         # Agent 醒来时世界里有什么：订单上的自由文本备注（它是个注入面），以及
         # 这次运行的出口放行名单。
         #
@@ -168,7 +250,7 @@ def sections(scenario: Scenario) -> dict[str, Any]:
             # 记忆判据也是判卷标准。**声明本身就是观测的过滤器**：去掉一条
             # must_hold，原本报 fail 的那条会变成 inconclusive——差异报告里
             # 看起来就像"失败少了"。放进这一节，两次运行才被判成不可比。
-            "memory": scenario.memory.model_dump(mode="json"),
+            "memory": _memory_section(scenario),
             "unexpected_failures": scenario.unexpected_failures,
             "expected_charges": scenario.expected_charges,
         },

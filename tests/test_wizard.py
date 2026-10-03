@@ -96,6 +96,12 @@ def _answers(
         "agent_goal": "别重复扣款",
         "agent_version": "react_demo@0.1",
         "agent_task": "帮我把 A1 退了",
+        # 接手那一个**默认填一个不一样的版本号**：留空的话 relay 那一趟连
+        # `to_answers` 都过不去（两条测试专门盯那个报错），而这里生成的其他
+        # 跑法根本用不到它。填成和第一段一样的版本号会触发"名不副实"那条提醒，
+        # 于是"该安静的地方安静"那一组会红——那是对的，它本来就不该安静。
+        "agent2_version": "react_demo@0.2",
+        "agent2_task": "你接手，继续处理 A1",
         "tools": tools,
         "shape": shape,
         "choices": picked,
@@ -154,7 +160,7 @@ def test_every_symptom_points_at_a_detector_that_exists() -> None:
 
 
 @pytest.mark.parametrize("choice", ["expect_fail", "expect_pass"])
-@pytest.mark.parametrize("shape", ["once", "twice", "cross", "overnight"])
+@pytest.mark.parametrize("shape", ["once", "twice", "cross", "relay", "overnight"])
 def test_the_polarity_that_lands_in_the_file_is_the_one_on_the_page(
     lib: list[wizard.ToolFact], choice: str, shape: str
 ) -> None:
@@ -300,7 +306,7 @@ def test_the_warnings_stay_quiet_where_the_answers_do_work(
     assert not said, "这几组答案是能正常工作的，却报了警：\n    " + "\n    ".join(said)
 
 
-@pytest.mark.parametrize("shape", ["once", "twice", "cross", "overnight"])
+@pytest.mark.parametrize("shape", ["once", "twice", "cross", "relay", "overnight"])
 def test_the_charge_count_comes_from_the_real_script(
     lib: list[wizard.ToolFact], shape: str
 ) -> None:
@@ -386,7 +392,7 @@ def test_a_tool_that_is_not_in_the_library_is_called_out(lib: list[wizard.ToolFa
 
 
 @pytest.mark.parametrize("unattended", [False, True])
-@pytest.mark.parametrize("shape", ["once", "twice", "cross", "overnight"])
+@pytest.mark.parametrize("shape", ["once", "twice", "cross", "relay", "overnight"])
 @pytest.mark.parametrize(
     "tools",
     [(), ("get_order",), ("create_payment",), ("get_order", "create_payment")],
@@ -430,7 +436,7 @@ def test_the_real_library_also_produces_something_that_loads() -> None:
     """
     facts = wizard.tool_facts()
     assert facts, "真工具库里一个工具都没有？"
-    for shape in ("once", "twice", "cross", "overnight"):
+    for shape in ("once", "twice", "cross", "relay", "overnight"):
         answers = _answers(
             shape=shape,
             tools=tuple(f.name for f in facts),
@@ -448,6 +454,150 @@ def test_the_yaml_survives_text_that_looks_like_yaml() -> None:
     nasty = '退了：A1 # 不是注释 "引号" \\反斜杠'
     scenario = _parse(_answers(tools=(), agent_task=nasty), wizard.tool_facts())
     assert scenario.agent.task == nasty
+
+
+# --- 四、串联：第二段换人 ---------------------------------------------------
+#
+# 串联是这个向导里唯一一处**会改变归因**的跑法：同一段脚本、同一份判据，
+# 换人之后报告说的话从"Agent 的判重逻辑该改"变成"该修的是接缝"。而生成出来的
+# 两份文件长得几乎一样——所以下面这几条盯的都是"文件里有没有那个把两段分开的东西"。
+
+
+def test_relay_writes_two_agents_and_marks_the_second_session(
+    lib: list[wizard.ToolFact],
+) -> None:
+    """串联那一趟要同时生成 `agents:` 名单**和**第二段上的 `agent: 1`。
+
+    缺一个就是另一份场景：只写名单而会话不指名，两段都是 0 号跑的——它仍然能跑、
+    仍然会报重复扣款，只是报告里那句话从"接缝的锅"变成"Agent 的锅"。用户看到
+    的是一份正常的报告，而他要测的东西根本没测到。
+    """
+    answers = _answers(
+        shape="relay",
+        tools=("get_order", "create_payment"),
+        choices={"charge_twice": "expect_fail"},
+        expected_charges=2,
+    )
+    scenario = _parse(answers, lib)
+    assert [a.version for a in scenario.agents] == ["react_demo@0.1", "react_demo@0.2"]
+    assert [a.task for a in scenario.agents] == ["帮我把 A1 退了", "你接手，继续处理 A1"]
+    assert scenario.sessions[0].agent in (None, 0), "第一段不指名就是 0 号"
+    assert scenario.sessions[1].agent == 1, "第二段必须指名 1 号——这就是「换人」"
+    assert scenario.agent.version == "react_demo@0.1", "平铺的那个 `agent` 是 0 号"
+
+
+def test_relay_does_not_pretend_anyone_rolled_back_the_memory(
+    lib: list[wizard.ToolFact],
+) -> None:
+    """串联那一趟**不写快照、也不写回滚**。
+
+    这是这一组里最要紧的一条，因为差别只在一个字段上、而结论完全不同：
+    带上 `restore_from`，报告会把这次重复读成「记忆被回滚掉了」——那是恢复机制的
+    锅，该去查快照点；串联要测的恰恰是**没有人回滚过任何东西**，两份记忆从头到尾
+    就是分开的，该去修的是交接。两种归因指向两个不同的修复方向，而两份文件读起来
+    都像对的。
+    """
+    scenario = _parse(_answers(shape="relay"), lib)
+    assert scenario.sessions[0].snapshot_after is None
+    assert all(s.restore_from is None for s in scenario.sessions), (
+        "串联里没有人回滚过记忆——写一个 restore_from 进去，"
+        "归因就从「接缝」滑到「恢复机制」"
+    )
+    # 受控对照：上面那两条断言只有在**隔壁那一趟真的写了这两个字段**时才算数，
+    # 否则"没有回滚"和"这个字段本来就没人写"长得一模一样。
+    cross = _parse(_answers(shape="cross"), lib)
+    assert cross.sessions[0].snapshot_after is not None, "对照组没写快照，上面那条是空的"
+    assert cross.sessions[1].restore_from is not None, "对照组没写回滚，上面那条是空的"
+
+
+def test_relay_refuses_to_invent_a_second_agent() -> None:
+    """没写接手的是谁 → 报错，而且报错里要点名**另一条路**。
+
+    留空时替用户挑一个版本号，等于我们替他编了一个人，而报告上会印出那个名字；
+    但更常见的情况是**他真正想测的是"同一个人接着跑"**——那只要换个跑法，
+    一个字段都不用加。所以这句报错必须把那一步指出来，而不是只说"这里必填"。
+    """
+    data = wizard.FormData(scenario_id="gen", agent_version="react_demo@0.1", shape="relay")
+    with pytest.raises(wizard.WizardError) as caught:
+        data.to_answers()
+    said = str(caught.value)
+    assert "接手的是哪一个 Agent" in said
+    assert "第二段接着第一段" in said, "报错里没指出另一条路，用户只会以为向导坏了"
+
+
+def test_the_cross_session_warning_is_not_a_lie_for_relay(
+    lib: list[wizard.ToolFact],
+) -> None:
+    """「只有一段会话」这句话**不许**在串联那一趟出现——它有两段。
+
+    原先那条判据只认 `cross` 一种跑法，于是串联会被报成"这一趟只有一段会话"。
+    那是一句**假的真话**：它说的现象（跨会话的重复看不见）确实会让那条判据永远
+    配不上，而这一趟根本不是那个形状。用户照着它去改跑法，改完发现自己真正要测的
+    东西没了——而"改完不再报警了"看起来就像修好了。
+    """
+    for shape in ("cross", "relay"):
+        said = "\n".join(
+            wizard.warnings(
+                _answers(
+                    shape=shape,
+                    tools=("get_order",),
+                    choices={"cross_session": "expect_fail"},
+                ),
+                lib,
+            )
+        )
+        assert "只有一段会话" not in said, (
+            f"{shape} 有两段会话，却被报成「只有一段会话」：{said}"
+        )
+    # 只跑一遍那一趟该报的还得报——上面那条断言不许把这条闸门改哑。
+    once = "\n".join(
+        wizard.warnings(
+            _answers(shape="once", tools=("get_order",), choices={"cross_session": "expect_fail"}),
+            lib,
+        )
+    )
+    assert "只有一段会话" in once
+
+
+def test_a_relay_whose_two_halves_are_the_same_version_says_so(
+    lib: list[wizard.ToolFact],
+) -> None:
+    """两段写同一个版本号 → 提醒，但不拦（它仍然是一份能跑的场景）。
+
+    引擎照样会给它们各开一份记忆目录，报告也照样说"0 号与 1 号"——而两段跑的
+    是同一份代码，那句"换人"就名不副实了。用户拿着这份报告去改接缝，改的其实是
+    自己跟自己之间的接缝。
+    """
+    said = "\n".join(
+        wizard.warnings(_answers(shape="relay", agent2_version="react_demo@0.1"), lib)
+    )
+    assert "同一个版本号" in said
+    both = _parse(_answers(shape="relay", agent2_version="react_demo@0.1"), lib)
+    assert [a.version for a in both.agents] == ["react_demo@0.1", "react_demo@0.1"], (
+        "提醒归提醒——它不替代用户做决定，文件照他要的生成"
+    )
+
+
+def test_relay_and_cross_differ_only_in_who_runs_the_second_half(
+    lib: list[wizard.ToolFact],
+) -> None:
+    """串联与「同一个人接着跑」两趟，**工具调用逐字相同**。
+
+    这是向导这一层能给出的最强说法：两趟之间变的是"第二段谁跑"，所以报告里的
+    归因差别只可能来自它。不去手抄一份期望的话，只能验到这一步——真正的端到端
+    对照在 `tests/test_multi_agent.py` 里，那儿有真的跑一遍、真的数钱。
+
+    收尾那句 `content` 两趟不同（"又做了一遍" vs "接手的人又做了一遍"）：它只是
+    脚本化上游回的文本，不进任何判定，也不改变任何一次调用。
+    """
+    calls = lambda shape: [  # noqa: E731 - 就地取两趟的调用序列，不做别的
+        call
+        for steps in wizard.session_scripts(_answers(shape=shape), lib)
+        for step in steps
+        for call in step.get("tool_calls") or ()
+    ]
+    assert calls("relay") == calls("cross")
+    assert calls("relay"), "两趟都是空脚本的话，上面这条相等断言什么都没验"
 
 
 # --- 页面 ------------------------------------------------------------------
@@ -509,6 +659,56 @@ def _form(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+@pytest.mark.asyncio
+async def test_the_relay_answers_survive_the_round_trip_through_the_pages(ui: Ui) -> None:
+    """串联那一趟的两个框走一遍真正的 HTTP：填 → 确认页 → 存 → 打开。
+
+    上面那些直接调 `build_yaml` 的用例验的是生成器；这一条验的是"用户能走到那里"。
+    差一段的是新增的字段有没有接进表单读取、`scalars` 回显和模板——**任何一处漏掉，
+    用户看到的是一个永远空的输入框**，而他会以为是自己没填。
+    """
+    response = await ui.client.post(
+        "/scenarios/new",
+        data=_form(
+            shape="relay",
+            agent2_version="react_demo@0.2",
+            agent2_task="你接手，继续处理 A1",
+        ),
+    )
+    assert response.status_code == 200, response.text[:2000]
+    page = response.text
+    assert "agents:" in page
+    assert "agent: 1" in page, "确认页上的 YAML 里没有指名第二段由谁跑"
+    assert "接缝" in page, "确认页没解释这一趟的重复会记在谁头上"
+
+    match = re.search(r"<pre>(.*?)</pre>", page, re.S)
+    assert match
+    saved = await ui.client.post(
+        "/scenarios/my-first/save", data={"yaml_text": html_module.unescape(match.group(1))}
+    )
+    assert saved.status_code == 303, saved.text[:2000]
+
+    parsed = loader.load_scenario(ui.root / "my-first.yaml")
+    assert [a.version for a in parsed.agents] == ["react_demo@0.1", "react_demo@0.2"]
+    assert parsed.sessions[1].agent == 1
+
+    # 「返回改一改」：**只带确认页上真正印出来的那些隐藏字段**回去，不能拿
+    # 自己手上那份答案重发——那就绕过了回显这道关，`scalars` 里漏掉一个键
+    # 也照样绿（第一版就是这么写的，改坏了都不红）。
+    carried = {
+        m.group(1): html_module.unescape(m.group(2))
+        for m in re.finditer(r'<input type="hidden" name="([^"]+)" value="([^"]*)"', page)
+    }
+    assert carried, "确认页上一个隐藏字段都没有，返回那一步带不回任何东西"
+    assert carried.get("agent2_version") == "react_demo@0.2", (
+        f"确认页没把接手的那一个带回去，返回改一改之后那个框会是空的：{carried}"
+    )
+    back = await ui.client.post("/scenarios/new", data={**carried, "submit": "back"})
+    assert back.status_code == 200
+    assert 'value="react_demo@0.2"' in back.text
+    assert "你接手，继续处理 A1" in back.text, "接手那句指令没回到框里"
 
 
 @pytest.mark.asyncio

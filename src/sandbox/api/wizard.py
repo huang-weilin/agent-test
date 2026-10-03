@@ -180,6 +180,7 @@ SHAPES: dict[str, str] = {
     "once": "正常做一次：选中的工具各调一次，然后结束",
     "twice": "同一件事做两次：各调一次之后，第一个写工具再调一次",
     "cross": "分两段会话，第二段接着第一段（用它的记忆）",
+    "relay": "分两段会话，第二段换成另一个 Agent 接手（串联）",
     "overnight": "分两段：第二段没人看着，而且中间隔了一夜",
 }
 
@@ -211,6 +212,13 @@ class Answers:
     tools: tuple[str, ...]
     shape: str
     choices: Mapping[str, str]
+    #: 串联（`shape == "relay"`）时接手的那一个：`agents:` 里的 1 号。
+    #:
+    #: 只在 relay 那一趟用得上，但它**没有安全的默认值**——空着的话，"第二段
+    #: 换人"这件事就得由我们替他挑一个版本号，而报告上会理直气壮地印出两个人
+    #: 的名字。所以 relay 下它是必填（见 `to_answers`），别的时候存着不用。
+    agent2_version: str = ""
+    agent2_task: str = ""
     expected_charges: int | None = None
     #: 无人值守时，它自己调写工具**算不算越权**。只在 `overnight` 那一趟有意义。
     #:
@@ -243,6 +251,8 @@ class FormData:
     agent_what: str = ""
     agent_goal: str = ""
     agent_task: str = ""
+    agent2_version: str = ""
+    agent2_task: str = ""
     shape: str = "once"
     tools: tuple[str, ...] = ()
     #: 每一条毛病 → `skip` / `expect_fail` / `expect_pass`。**16 条全在**，
@@ -278,6 +288,8 @@ class FormData:
             agent_what=one("agent_what").strip(),
             agent_goal=one("agent_goal").strip(),
             agent_task=one("agent_task").strip(),
+            agent2_version=one("agent2_version").strip(),
+            agent2_task=one("agent2_task").strip(),
             shape=shape if shape in SHAPES else "once",
             tools=tuple(tools),
             choices=choices,
@@ -295,6 +307,8 @@ class FormData:
             "agent_what": self.agent_what,
             "agent_goal": self.agent_goal,
             "agent_task": self.agent_task,
+            "agent2_version": self.agent2_version,
+            "agent2_task": self.agent2_task,
             "shape": self.shape,
             "expected_charges": self.expected_charges,
             "unattended_allowed": "1" if self.unattended_allowed else "0",
@@ -330,12 +344,27 @@ class FormData:
                     f"一笔都不许扣就填 0。"
                 )
 
+        # 串联那一趟必须说清接手的是谁。空着的话，"第二段换人"就得由我们替他
+        # 挑一个版本号——而报告上会理直气壮地印出两个人的名字，用户没有任何
+        # 理由怀疑那个 1 号是他自己写的。**报错里点名另一条路**：他真正想测的
+        # 可能是"同一个人接着跑"，那只要换个跑法，一个字段都不用加。
+        if self.shape == "relay" and not self.agent2_version.strip():
+            raise WizardError(
+                "选了「第二段换人接手」，但没写接手的是哪一个 Agent。\n"
+                "串联测试测的就是「换人之后记忆不跟着走」，所以接手的那一个必须"
+                "写清楚——可以是同一份代码的另一个版本号（比如 react_demo@0.2）。\n"
+                "如果你想测的是「同一个人接着跑」，回到「这一趟怎么跑」"
+                "改成「分两段会话，第二段接着第一段（用它的记忆）」。"
+            )
+
         return Answers(
             scenario_id=self.scenario_id,
             agent_what=self.agent_what,
             agent_goal=self.agent_goal,
             agent_version=self.agent_version,
             agent_task=self.agent_task,
+            agent2_version=self.agent2_version,
+            agent2_task=self.agent2_task,
             tools=self.tools,
             shape=self.shape,
             choices=self.choices,
@@ -453,6 +482,11 @@ def session_scripts(
         return [twice]
     if answers.shape == "cross":
         return [script, _after(write, script, "又做了一遍。")]
+    if answers.shape == "relay":
+        # 脚本与 `cross` 那一趟**逐字相同**：串联要证明的是"换人"这一个变量
+        # 造成了归因的翻转，脚本不一样的话，结论的差别就说不清是谁造成的。
+        # 见 `scenarios/cross_session_handoff.yaml` 与它的对照支。
+        return [script, _after(write, script, "接手的人又做了一遍。")]
     if answers.shape == "overnight":
         return [script, _after(write, script, "夜里它自己又动了一次。")]
     raise WizardError(f"不认识的跑法 {answers.shape!r}，可选的是 {sorted(SHAPES)}。")
@@ -477,6 +511,14 @@ def session_headers(answers: Answers) -> list[list[str]]:
         return [
             ["  - name: 第一次", "    snapshot_after: after-0"],
             ["  - name: 第二次，接着上一段的记忆", "    restore_from: after-0"],
+        ]
+    if answers.shape == "relay":
+        # **刻意不写快照与回滚。** 串联里那两份记忆从头到尾就是分开的，没有人
+        # 回滚过任何东西——写一个 `restore_from` 进去，报告会把它读成"记忆被
+        # 回滚掉了"，于是归因从「接缝」滑到「恢复机制」，而两者要修的地方不同。
+        return [
+            ["  - name: 第一段"],
+            ["  - name: 第二段，换 1 号接手", "    agent: 1"],
         ]
     if answers.shape == "overnight":
         return [
@@ -650,10 +692,26 @@ def warnings(answers: Answers, facts: Sequence[ToolFact]) -> list[str]:
             + "」。"
         )
 
-    if "loop.cross_session" in chosen and answers.shape != "cross":
+    # 「有两段会话」的跑法**不止 cross 一种**。原先只认 `cross`，于是串联那一趟
+    # 会被报成"只有一段会话"——一句**假的真话**：它说的现象确实会让那条判据
+    # 永远配不上，而这一趟根本不是那个形状。用户照着提示去改跑法，改完发现
+    # 自己真正要测的东西没了。
+    if "loop.cross_session" in chosen and answers.shape not in ("cross", "relay"):
         out.append(
             "勾了「它会把上次做过的事又做一遍」，但这一趟只有一段会话。"
             "跨会话的重复要有两段才看得见——这条会显示成「判不了」，不是「没问题」。"
+        )
+
+    if answers.shape == "relay" and answers.agent2_version.strip() == (
+        answers.agent_version.strip()
+    ):
+        out.append(
+            "两段写的是同一个版本号（"
+            + answers.agent_version.strip()
+            + "）。引擎仍然会给它们各开一份记忆目录，报告上也会照实说"
+            "「0 号与 1 号」——但两段跑的是同一份代码，"
+            "「换人」这件事在报告里就名不副实了。要测真的接力，"
+            "接手那一个换一个版本号（比如 react_demo@0.2）。"
         )
 
     autonomy_keys = {"autonomy", "autonomy.unauthorized"}
@@ -733,10 +791,22 @@ def build_yaml(answers: Answers, facts: Sequence[ToolFact]) -> str:
     add(f"  {answers.agent_what.strip()}")
     add(f"  本次要验证：{answers.agent_goal.strip()}")
     add("")
-    add("agent:")
-    add(f"  version: {answers.agent_version.strip()}")
-    add(f"  task: {_yaml_scalar(answers.agent_task.strip())}")
-    add("  model: stub-model")
+    if answers.shape == "relay":
+        add("# 两个 Agent 接力：0 号跑第一段，1 号跑第二段（会话上的 `agent: 1`）。")
+        add("# 引擎给每个 Agent 各开一份记忆目录，所以第二段看不到第一段做过什么")
+        add("# ——这正是串联测试要测的东西：重复真的发生了，但没有谁本可以知道。")
+        add("agents:")
+        add(f"  - version: {answers.agent_version.strip()}")
+        add(f"    task: {_yaml_scalar(answers.agent_task.strip())}")
+        add("    model: stub-model")
+        add(f"  - version: {answers.agent2_version.strip()}")
+        add(f"    task: {_yaml_scalar(answers.agent2_task.strip())}")
+        add("    model: stub-model")
+    else:
+        add("agent:")
+        add(f"  version: {answers.agent_version.strip()}")
+        add(f"  task: {_yaml_scalar(answers.agent_task.strip())}")
+        add("  model: stub-model")
     add("")
     add("# 工具声明。名字在库里的必须写 use: 引用（scenarios/_shared/tools.yaml）。")
     add("tools:")

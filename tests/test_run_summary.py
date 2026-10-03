@@ -80,6 +80,7 @@ def _session(*, premise_held: bool = True) -> SessionOutcome:
     return SessionOutcome(
         name="s0",
         ordinal=0,
+        agent_index=0,
         memory_horizon_ordinal=-1,
         restored_from=None,
         exit_code=0,
