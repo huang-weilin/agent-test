@@ -3,12 +3,7 @@
 {% block body %}
 
 <h1>一键体检</h1>
-<p class="plain">
-  体检这件事的意思是：你不用挑场景、不用挑检测器，只回答一个问题——
-  「要查哪种毛病」。菜单里那几条就是一个一个的毛病，按一下按钮，
-  它自己把这几种毛病各演一遍，最后只给你一页纸：哪一种抓到了、哪一种没抓到、
-  哪几格这次压根没测。
-</p>
+<p class="plain">不用挑场景、不用挑检测器：选菜单、按按钮，它把几种毛病各演一遍，一页纸出结论。</p>
 
 {% if active %}
 <div class="actions">
@@ -20,10 +15,19 @@
 </div>
 {% endif %}
 
-{% for entry in checkups %}
-  {% if entry.checkup %}
+{% set good = checkups | rejectattr('checkup', 'none') | list %}
+{% set vertical = good | selectattr('kind', 'equalto', 'vertical') | list %}
+{% set generic = good | selectattr('kind', 'equalto', 'generic') | list %}
+{% set broken = checkups | selectattr('checkup', 'none') | list %}
+
+{% if vertical %}
+<h2>从你的行业开始</h2>
+<p class="plain">不知道要测什么？按行业挑一包：电商履约、金融支付、客服、办公助手。</p>
+{% endif %}
+
+{% for entry in vertical %}
   <div class="panel">
-    <h2>{{ entry.checkup.name }}</h2>
+    <h3>{{ entry.checkup.name }}</h3>
     <p class="plain">{{ entry.checkup.summary }}</p>
     <p class="note">{{ entry.checkup.subject_note }}</p>
 
@@ -47,13 +51,54 @@
         开始体检（{{ entry.checkup.items | length }} 项，依次跑）
       </button>
       <span class="note">
-        一项十几秒，六项大约一分多钟。本页每 2 秒自动刷新，跑完直接出结论。
+        一项十几秒，五项大约一分钟。本页每 2 秒自动刷新，跑完直接出结论。
       </span>
     </form>
   </div>
-  {% else %}
+{% endfor %}
+
+{% if generic %}
+<h2>通用体检</h2>
+<p class="plain">按毛病类型组织：重复扣款、循环、越权、记忆中毒、参数不合规等九支，加一支阴性对照。</p>
+{% endif %}
+
+{% for entry in generic %}
+  {% if entry.checkup %}
+  <div class="panel">
+    <h3>{{ entry.checkup.name }}</h3>
+    <p class="plain">{{ entry.checkup.summary }}</p>
+    <p class="note">{{ entry.checkup.subject_note }}</p>
+
+    <table class="grid tight">
+      <thead>
+        <tr><th>要查的毛病</th><th>用什么演</th><th>为什么要查</th></tr>
+      </thead>
+      <tbody>
+        {% for item in entry.checkup.items %}
+        <tr>
+          <td><strong>{{ item.question }}</strong></td>
+          <td><code>{{ item.scenario }}</code></td>
+          <td class="note">{{ item.why }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <form class="inline" method="post" action="/checkup/{{ entry.name }}/start">
+      <button class="primary" type="submit" {% if active %}disabled{% endif %}>
+        开始体检（{{ entry.checkup.items | length }} 项，依次跑）
+      </button>
+      <span class="note">
+        一项十几秒，九项大约一分多钟。本页每 2 秒自动刷新，跑完直接出结论。
+      </span>
+    </form>
+  </div>
+  {% endif %}
+{% endfor %}
+
+{% for entry in broken %}
   <div class="panel bad">
-    <h2>{{ entry.name }}</h2>
+    <h3>{{ entry.name }}</h3>
     <p><strong>这份菜单打不开。</strong></p>
     <pre class="wrap">{{ entry.error }}</pre>
     <p class="note">
@@ -61,8 +106,9 @@
       照上面那句话改掉就能跑。
     </p>
   </div>
-  {% endif %}
-{% else %}
+{% endfor %}
+
+{% if not checkups %}
 <div class="panel">
   <p><code>checkups/</code> 目录里一份菜单都没有。</p>
   <p class="note">
@@ -71,6 +117,6 @@
     退化成"随便挑一支场景跑跑"，因为那样跑出来的结论没人知道覆盖了什么。
   </p>
 </div>
-{% endfor %}
+{% endif %}
 
 {% endblock %}

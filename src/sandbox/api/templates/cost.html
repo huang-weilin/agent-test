@@ -4,11 +4,7 @@
 {% block body %}
 
 <h1>成本</h1>
-<p class="lede">
-  单次运行的花费随报告出。这一页回答的是另一个问题——
-  <strong>这个月已经烧掉多少、烧在哪儿</strong>。
-  云端常驻 Agent 的成本失控不会发生在一次运行里。
-</p>
+<p class="lede">已经烧掉多少、烧在哪儿。单次运行的花费随报告出。</p>
 
 {% if budget %}
 <section class="cards">
@@ -20,19 +16,13 @@
   </div>
 {% endfor %}
 </section>
-<p class="note">
-  超预算<strong>不会</strong>让任何运行算作不通过——它是对累计花费的陈述，和被测 Agent
-  这次做没做错事没有关系。见 <code>docs/cost.md</code>。
-</p>
+<p class="note">超预算<strong>不会</strong>让任何运行算作不通过——它只是对累计花费的陈述。</p>
 {% else %}
 <div class="panel">
   没设预算。<code>0</code> 表示不设限，这是默认值。
   在 <code>.env</code> 里配 <code>SANDBOX_COST_BUDGET_DAILY_USD</code> /
   <code>_WEEKLY_USD</code> / <code>_MONTHLY_USD</code> 开启。
-  <div class="note">
-    <strong>默认关掉是刻意的。</strong> 一个没配过的阈值一旦生效，就会在别人第一次跑的
-    时候弹出一堆他不认识的告警——而告警一多就会被整体忽略，包括真正要紧的那个。
-  </div>
+  <div class="note"><strong>默认关掉是刻意的</strong>：没配过的阈值会弹出没人认识的告警，告警一多就被整体忽略。</div>
 </div>
 {% endif %}
 
@@ -72,11 +62,7 @@
 {{ rollup_table('按模型', by_model | dictsort, '模型') }}
 {{ m.lower_bound_note(by_model.values() | list) }}
 
-<p class="note">
-  <strong>归期用运行的开始时间，不是每次调用的时间戳。</strong>
-  一次运行整个算在它开始的那个周期里。按调用时间归期的话，跑过零点的运行
-  会被劈成两半，两边的数都对不上任何一次运行——而对不上账的账单比没有账单更糟。
-</p>
+<p class="note"><strong>归期用运行的开始时间</strong>：一次运行整个算在它开始的周期里，跨零点不会被劈成两半。</p>
 
 {% if by_tool and by_tool.tools %}
 {# 这一节的口径和上面几张表**不是一个东西**，所以它单独写，不套 `rollup_table`：
@@ -114,12 +100,9 @@
   </tbody>
 </table>
 <p class="note">
-  上面几张表问的是"花了多少"，这一张问的是<strong>谁在吃上下文</strong>。
-  「租金」是条件数字：假设这个工具的返回体在此后每次请求里原样重发，它一共占多少
-  字节——它只按返回体本身算，而实测的每轮增量比返回体还大（JSON 转义与消息外壳
-  都要算进去），<strong>所以租金是下界，不是账单</strong>。
-  量不到的那几格写「量不到」不写 0：<code>0 B</code> 说的是"它返回了空体"。
-  见 <code>docs/cost.md</code>。
+  这一张问的是<strong>谁在吃上下文</strong>。「租金」是假设返回体此后每次原样重发的字节数，
+  实测增量比返回体还大（转义与外壳），<strong>所以租金是下界，不是账单</strong>。
+  量不到写「量不到」不写 0。
 </p>
 {% endif %}
 

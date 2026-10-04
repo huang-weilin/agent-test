@@ -37,6 +37,9 @@ import html as html_module
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
+
+from jinja2 import Environment, FileSystemLoader
 
 import httpx
 import pytest
@@ -398,7 +401,7 @@ async def test_the_nav_and_the_manual_section_two_agree() -> None:
     原先它对不上——标题写着「九个入口」，表里只有八行，而**没有任何东西报错**。
     加 `/help` 这一页时表补上了第九行，从此这条闸门盯着两边。
     """
-    nav = _nav_entries(BASE_TEMPLATE.read_text(encoding="utf-8"))
+    nav = _nav_entries(_render_base_template())
     rows = _section_two_rows(manual.manual_text())
 
     assert [text for text, _href in nav] == [label for label, _when in rows], (
@@ -409,26 +412,34 @@ async def test_the_nav_and_the_manual_section_two_agree() -> None:
     assert _chinese_count(manual.manual_text()) == len(nav)
 
 
-_NAV = re.compile(r"(?m)^\s*<a\b([^>]*)>([^<]+)</a>\s*$")
-_NAV_HREF = re.compile(r'href="([^"]*)"')
+def _render_base_template() -> str:
+    """渲染 base.html 再解析——导航是 Jinja 循环生成的，源文件里只有 `{{ label }}`。"""
+    env = Environment(loader=FileSystemLoader(str(ROOT / "src" / "sandbox" / "api" / "templates")))
+    return env.get_template("base.html").render(
+        request=SimpleNamespace(url=SimpleNamespace(path="/")), active=None,
+    )
+
+
+#: 侧边导航栏的入口：`class="nav-item"` 的链接，跳过图标 span，取末尾文字。
+_NAV_ITEM = re.compile(
+    r'<a class="nav-item[^"]*"\s+href="([^"]*)">.*?<span class="nav-ico">.*?</span>(?P<label>[^<]+)</a>',
+    re.S,
+)
 
 
 def _nav_entries(source: str) -> list[tuple[str, str]]:
-    """顶栏里那些入口：`(显示名, 链接)`。
+    """导航栏里那些入口：`(显示名, 链接)`。
 
-    **品牌名不算入口**——它回首页，而手册的第 2 节讲的是"每个入口回答一个问题"。
-    排除的判据是 `class="brand"` 这个类名，不是"它在第一个"：靠位置排除的话，
-    将来谁把品牌挪到别处，这条闸门就会把它当成一个入口，然后报一个**假的**不一致
-    （假警报一多，真警报就没人看了）。
+    **品牌名不算入口**——它回首页，而且它的 class 是 `brand`、不是 `nav-item`，
+    所以下面的正则天然不会把它当成一个入口：排除靠类名，不靠位置（假警报一多，
+    真警报就没人看了）。入口按 `nav-group` 的渲染顺序排列，手册第 2 节跟着它走。
     """
-    block = source.split("<nav>", 1)[1].split("</nav>", 1)[0]
     out: list[tuple[str, str]] = []
-    for attrs, text in _NAV.findall(block):
-        if 'class="brand"' in attrs:
-            continue
-        href = _NAV_HREF.search(attrs)
-        assert href is not None, f"顶栏这个入口没有 href：{text}"
-        out.append((text, href.group(1)))
+    for match in _NAV_ITEM.finditer(source):
+        href = match.group(1)
+        label = match.group("label").strip()
+        assert href, f"导航栏这个入口没有 href：{label}"
+        out.append((label, href))
     return out
 
 

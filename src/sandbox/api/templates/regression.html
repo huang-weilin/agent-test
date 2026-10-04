@@ -4,10 +4,7 @@
 {% block body %}
 
 <h1>回归集</h1>
-<p class="lede">
-  回归用例把某次运行的结论<strong>钉成基线</strong>，以后改完东西重跑，就能说清
-  "结论变了没有、变的是不是配置"。用例在「运行记录」里点"存为回归用例"建。
-</p>
+<p class="lede">回归用例把某次运行的结论<strong>钉成基线</strong>，改完东西重跑就能说清"结论变了没有"。在运行记录里点「存为回归用例」建。</p>
 
 {% if cases %}
 <table class="grid">
@@ -34,24 +31,17 @@
         <div class="note"><code>{{ c.baseline_run_id[:8] }}</code></div>
       </td>
       <td class="nowrap">{{ c.created_at | localdt }}</td>
-      <td><a href="/regression/{{ c.id }}">查看对比 →</a></td>
+      <td><a class="btn" href="/regression/{{ c.id }}">查看对比 →</a></td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
 
-<p class="note">
-  <strong>基线是冻结的，不是"指向某次运行"。</strong>
-  用例记的是有人在某个时刻认定"这个结论是对的"——那是一个断言，断言必须自足。
-  只存运行 id 的话，运行记录一旦被清理，用例就静默退化成"没有基线"，而它在
-  这个列表里看起来仍然正常。<strong>静默退化比报错难查得多。</strong>
-  "运行已清理"那一栏是这么来的：出处的运行不在了，但基线本身没丢。
-</p>
+<p class="note"><strong>基线是冻结的，不是"指向某次运行"</strong>：用例记的是"有人当时认定这个结论是对的"，所以出处运行被清理后基线仍然在比。</p>
 {% else %}
-<p class="dim">
-  还没有回归用例。去<a href="/runs">运行记录</a>里打开一次跑得对的运行，
-  点"存为回归用例"。
-</p>
+<div class="empty"><div class="empty-ico">🧪</div>还没有回归用例。<br>
+  去<a href="/runs">运行记录</a>里打开一次跑得对的运行，点"存为回归用例"。
+</div>
 {% endif %}
 
 {% endblock %}

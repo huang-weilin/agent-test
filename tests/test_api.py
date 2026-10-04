@@ -11,6 +11,7 @@ ASGITransport 直接在当前循环里调 ASGI 应用，没有这一层。
 
 from __future__ import annotations
 
+import re
 import asyncio
 import json
 import threading
@@ -309,7 +310,7 @@ async def test_cost_dashboard_shows_the_per_tool_section(
 
     page = (await client.get("/cost")).text
     assert "按工具（上下文占用" in page
-    table, _, rest = page.partition('<h2>按工具')[2].partition('<p class="note">')
+    table, _, rest = re.split(r'<h2[^>]*>按工具', page)[1].partition('<p class="note">')
     note = rest.partition("</p>")[0]
 
     assert "list_orders" in table
@@ -787,7 +788,7 @@ async def test_a_run_without_a_clock_shows_no_world_time_section(
     # 判的是**这一节标题没出现**，不是"这四个字不出现"：别处的说明里可以正当
     # 地提到"世界时间"这个词（会话那一节的说明就提到了），而这条测的是这一节
     # 本身在不在。理由同上一条。
-    assert "<h2>世界时间</h2>" not in resp.text
+    assert not re.search(r"<h2[^>]*>世界时间</h2>", resp.text)
 
 
 # --- 自主行为：授权必须和结论挨着出现 ---
@@ -958,7 +959,7 @@ async def test_the_memory_observation_table_shows_paths_not_contents(
 
     resp = await client.get("/runs/run-memory")
     assert resp.status_code == 200
-    table = resp.text.split("<h2>记忆观测</h2>")[1].split("</table>")[0]
+    table = re.split(r"<h2[^>]*>记忆观测</h2>", resp.text)[1].split("</table>")[0]
     # 时点的说法和命令行报告、检测结论共用同一个拼法（`observe.phase_label`）：
     # 三处各拼一份的话，"会话 1 结束时"会以两种写法出现在同一次运行的报告里。
     assert "会话 1 结束时" in table
@@ -1070,7 +1071,7 @@ async def test_the_session_diff_panel_shows_what_differs_and_what_matched(
 
     resp = await client.get("/runs/run-diff")
     assert resp.status_code == 200
-    panel = resp.text.split("<h2>跨会话差异</h2>")[1].split("<h2>检测结论</h2>")[0]
+    panel = re.split(r"<h2[^>]*>跨会话差异</h2>", resp.text)[1].split("<h2>检测结论</h2>")[0]
     # 差异本身：哪一段多做了、多做了什么。
     assert "create_payment" in panel
     assert "只在会话 #1 出现" in panel
@@ -1114,7 +1115,7 @@ async def test_a_legacy_report_does_not_claim_the_two_sessions_matched(
     # 断言的是**这一栏特有的那句话**：记忆那一栏也写着"没记录不是没问题"，
     # 拿它当判据的话，这一条测试在这句话消失之后照样是绿的。
     assert '这里不写"两段一样"' in resp.text
-    assert "<h2>跨会话差异</h2>" not in resp.text
+    assert not re.search(r"<h2[^>]*>跨会话差异</h2>", resp.text)
 
 
 async def test_a_single_session_report_gets_no_diff_panel(
@@ -1174,8 +1175,8 @@ def _replace_status(call, *, status: str = "ok", blocked: bool = False):
 
 def _chain_panel(text: str) -> str:
     """切出调用链那一节。切到下一个 `<h2>` 为止，免得断言命中别的栏目。"""
-    assert "<h2>调用链</h2>" in text
-    return text.split("<h2>调用链</h2>")[1].split("<h2>跨会话差异</h2>")[0]
+    assert re.search(r"<h2[^>]*>调用链</h2>", text)
+    return re.split(r"<h2[^>]*>调用链</h2>", text)[1].split("<h2>跨会话差异</h2>")[0]
 
 
 async def test_the_call_chain_panel_shows_the_order_and_what_followed(
@@ -1244,7 +1245,7 @@ async def test_a_legacy_report_does_not_claim_nothing_failed(
 
     text = (await client.get("/runs/run-chain-legacy")).text
     assert '这里不写"没有出错"' in text
-    assert "<h2>调用链</h2>" not in text
+    assert not re.search(r"<h2[^>]*>调用链</h2>", text)
 
 
 async def test_a_run_that_never_reached_a_session_gets_no_chain(
@@ -1255,7 +1256,7 @@ async def test_a_run_that_never_reached_a_session_gets_no_chain(
 
     text = (await client.get("/runs/run-chain-none")).text
     assert "没有调用链可看" in text
-    assert "<h2>调用链</h2>" not in text
+    assert not re.search(r"<h2[^>]*>调用链</h2>", text)
 
 
 # --- 会话出岔子时，Agent 的输出要摆出来 ----------------------------------------
@@ -1891,7 +1892,7 @@ async def test_run_page_separates_the_two_kinds_of_missing_watchdog(
     """
     r = await client.get(f"/runs/{watchdog_rows['run_id']}")
     assert r.status_code == 200
-    tbody = r.text.split("<h2>工具调用审计</h2>")[1].split("</tbody>")[0]
+    tbody = re.split(r"<h2[^>]*>工具调用审计</h2>", r.text)[1].split("</tbody>")[0]
 
     # 没跑到的那一格靠这一句读出来（它是那一支独有的话）。断言打在行上，
     # 不打在整段上：整段里既有印了数的行、也有印了「—」的行，混着断言的话
@@ -1922,7 +1923,7 @@ async def test_the_metrics_page_shows_our_own_time_as_its_own_row(
     这一列加出来之前落的行），把那句省掉，"N 次没跑到"就会被一律读成前者。
     """
     page = (await client.get("/metrics")).text
-    table = page.split("<h2>延迟</h2>")[1].split("</table>")[0]
+    table = re.split(r"<h2[^>]*>延迟</h2>", page)[1].split("</table>")[0]
 
     assert "其中：看门狗" in table
     assert "137 ms" in table
@@ -1932,7 +1933,7 @@ async def test_the_metrics_page_shows_our_own_time_as_its_own_row(
         "每一次都是被边界拦下的"
     )
     # 工具调用那一行**不含**看门狗，所以它是另一个数：7 ms / 2 ms 那两条。
-    assert "其中：看门狗" not in page.split("<h2>延迟</h2>")[0]
+    assert "其中：看门狗" not in re.split(r"<h2[^>]*>延迟</h2>", page)[0]
 
 
 def test_templates_do_not_render_markdown_asterisks() -> None:
@@ -2687,7 +2688,7 @@ async def test_run_page_without_the_per_tool_snapshot_still_renders(
 
     resp = await client.get("/runs/run-no-tools")
     assert resp.status_code == 200
-    assert "<h2>成本</h2>" in resp.text
+    assert re.search(r"<h2[^>]*>成本</h2>", resp.text)
     assert "按工具（上下文占用）" not in resp.text
 
 

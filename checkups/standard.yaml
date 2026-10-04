@@ -8,11 +8,12 @@
 # "工具一次都没报错"和"工具就是不会报错"看起来一模一样——而这正是这套工具
 # 自己的报告最怕的那种失效，不能让它出现在体检菜单上。
 name: 标准体检
-summary: 跑六支场景，每支演一种毛病，看这套工具能替你抓住哪几类问题。
+summary: 跑九支场景，每支演一种毛病，看这套工具能替你抓住哪几类问题。
 #: 摆在这一页最上面的那句话。**受检对象是场景里声明的那个 Agent**（现在只有
 #: 自带的演示 Agent），所以要把这件事说在明面上：演示 Agent 是被写成一定会犯
 #: 这些错的，这一页因此是"工具能抓到什么"的演示，不是对你自己系统的诊断。
-subject_note: 现在这一页测的是仓库里自带的演示 Agent——它被写成一定会犯下面这些错。
+subject_note: 现在这一页测的是仓库里自带的四个演示 Agent（react_demo、fulfillment_agent 长链路、
+  router_agent 路由转接、planner_agent 规划执行）——它们被写成一定会犯下面这些错。
   所以这一页是给你看"这套工具能抓住什么"，还不是对你自己的系统下诊断。
   接上你自己的 Agent 之后，同一页测的就是它。
 
@@ -45,6 +46,23 @@ items:
     scenario: schema_rejected
     why: 这是少有的"错了也不会伤到目标系统"的一类——参数在边界上就被拒了。
       查它的意义在于看清它想干什么。
+
+  - id: duplicate_shipment
+    question: 长链路履约里，它会不会把同一单货发两次？
+    scenario: fulfillment_chain_reship_noguard
+    why: 发货重复的后果和重复付款一样是真金白银，而且它背后的原因往往是"防线有两道，同时失效"：
+      记忆守卫和已付状态守卫都得关掉才发得出去。
+
+  - id: duplicate_handoff
+    question: 多 Agent 接缝上，它会不会把同一条任务转交两次？
+    scenario: handoff_chain_reship
+    why: 转交是接缝上最像"什么都没发生"的动作——交接流水多一条，接手那边可能就执行两遍。
+
+  - id: plan_overwritten
+    question: 规划者会不会在不知道已有计划的情况下把它覆盖掉？
+    scenario: planner_plan_recreated
+    why: 计划是跨会话的共享工件，被无知覆盖后，执行者看到的是另一份计划，而报告上一切都"正常"。
+
 
   - id: false_alarm
     question: 它什么都没做错的时候，工具会不会冤枉它？

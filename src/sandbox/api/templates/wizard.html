@@ -3,15 +3,7 @@
 {% block body %}
 
 <h1>新建测试</h1>
-<p class="plain">
-  这一页把你脑子里那件事翻译成一份场景文件。问的只有三件事：
-  <strong>测哪个 Agent</strong>、<strong>这一趟让它做什么</strong>、
-  <strong>怎么算通过</strong>。填完先给你看一遍「机器打算这样判」，
-  你点头才存盘。
-  <br>
-  最后一问是这一页存在的理由：那份场景跑完，报告上那个「通过」到底在判什么，
-  取决于你在这里勾了什么。没勾的方面，那一趟<strong>不算测过</strong>。
-</p>
+<p class="plain">问三件事：<strong>测哪个 Agent</strong>、<strong>这一趟让它做什么</strong>、<strong>怎么算通过</strong>。填完先给你看「机器打算这样判」，你点头才存盘。没勾的方面，那一趟<strong>不算测过</strong>。</p>
 
 {% if error %}
 <div class="panel bad">
@@ -38,10 +30,7 @@
   <p>
     <label for="agent_version">Agent 的版本号</label><br>
     <input id="agent_version" name="agent_version" value="{{ form.agent_version }}" size="32">
-    <span class="note">
-      内置演示 Agent 写 <code>react_demo@0.1</code>。接自己的 Agent 见
-      <code>docs/manual.md</code>。
-    </span>
+    <span class="note">内置演示 Agent 写 <code>react_demo@0.1</code>。</span>
   </p>
 
   <p>
@@ -54,10 +43,7 @@
     <input id="agent_goal" name="agent_goal" value="{{ form.agent_goal }}" size="80">
   </p>
 
-  <p class="note">
-    这两句话会原样写进场景的 <code>description</code>，报告里也原样打出来。
-    <strong>机器不判这两句话</strong>——它们是写给人看的。
-  </p>
+  <p class="note">这两句原样写进 <code>description</code> 并在报告里打出。<strong>机器不判它们</strong>。</p>
 
   <p>
     <label for="agent_task">这一趟你对它说什么（它收到的那句指令）</label><br>
@@ -68,9 +54,8 @@
     <label for="agent2_version">第二段谁接手（只有下面选「换成另一个 Agent 接手」时才用得上）</label><br>
     <input id="agent2_version" name="agent2_version" value="{{ form.agent2_version }}" size="32">
     <span class="note">
-      留空 = 没有第二个人。串联（A 跑第一段、B 跑第二段）测的是
-      <strong>换人之后记忆不跟着走</strong>：两段各有一份互不相通的记忆，
-      所以重复扣款真的会发生，而报告会说该去修<strong>接缝</strong>，不是哪一个人。
+      留空 = 没有第二个人。串联（A 跑第一段、B 跑第二段）测的是<strong>换人之后记忆不
+      跟着走</strong>——重复扣款真会发生，该修的是<strong>接缝</strong>，不是哪一个人。
       写一个和上面不同的版本号，比如 <code>react_demo@0.2</code>。
     </span>
   </p>
@@ -108,10 +93,7 @@
       {% endfor %}
     </tbody>
   </table>
-  <p class="note">
-    这份清单是从工具库 <code>scenarios/_shared/tools.yaml</code> 里读出来的，
-    不是手抄的——库里加了工具，这里就会多一行。
-  </p>
+  <p class="note">清单从 <code>scenarios/_shared/tools.yaml</code> 读出来，库里加了工具这里就会多一行。</p>
 
   <p>
     <label for="shape">这一趟怎么跑</label><br>
@@ -134,21 +116,14 @@
              {% if form.unattended_allowed %}checked{% endif %}>
       不算，是我授权它这么做的
     </label>
-    <span class="note">
-      只有「第二段没人看着」那一趟才用得上这一项。它非问不可：不答的话，
-      半夜那次调用算不算越权<strong>没有任何东西能判</strong>，而报告上看不出来。
-    </span>
+    <span class="note">只有「第二段没人看着」才用得上。不答的话，越权与否<strong>没有任何东西能判</strong>。</span>
   </p>
 
   <p>
     <label for="expected_charges">这一趟，钱最多扣几笔（留空 = 这次不验钱）</label><br>
     <input id="expected_charges" name="expected_charges" value="{{ form.expected_charges }}"
            size="6" inputmode="numeric">
-    <span class="note">
-      这一条是<strong>地面真值</strong>：数的是目标系统里真实扣了几笔，
-      不由检测器怎么看决定。留空的话这一趟<strong>不验钱</strong>——
-      报告上会写着「未检查」，那不是「对得上」。
-    </span>
+    <span class="note"><strong>地面真值</strong>：数目标系统里真实扣了几笔，不由检测器决定。留空 = 这次不验钱。</span>
   </p>
 </section>
 
@@ -156,14 +131,9 @@
   <h2>三、怎么算通过</h2>
 
   <p class="plain">
-    每一条都是「你觉得这一趟会发生什么」。选<strong>该报警</strong>的意思是
-    你<em>故意</em>让它出这个问题，看检测器抓不抓得住；选<strong>不该报警</strong>
-    的意思是这一趟一切正常，看它会不会冤枉人。两个都要有——只测前者的场景，
-    一个凡跑必红的检测器也能全过。
-  </p>
-  <p class="note">
-    没选的那些方面，这一趟<strong>不算测过</strong>。报告里会出现在「未覆盖」
-    那一栏，那是句实话，不是缺陷。
+    每条都是「你觉得这一趟会发生什么」：选<strong>该报警</strong>是你<em>故意</em>让它
+    出问题，看检测器抓不抓得住；选<strong>不该报警</strong>是看它会不会冤枉人。
+    两个都要有。没选的方面，这一趟<strong>不算测过</strong>（报告里出现在「未覆盖」）。
   </p>
 
   <table class="grid tight">
@@ -197,7 +167,7 @@
 
 <div class="actions">
   <button class="primary" type="submit">下一步：看机器打算怎么判</button>
-  <span class="note">还不会存盘。下一页会逐条印出最终写进文件的判卷标准。</span>
+  <span class="note">还不会存盘，下一页逐条印出判卷标准。</span>
 </div>
 
 </form>

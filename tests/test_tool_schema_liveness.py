@@ -29,15 +29,8 @@ SCENARIO_DIR = REPO_ROOT / "scenarios"
 
 #: 白名单里**没有活样本**的关键字，以及为什么。加一行之前先问：真的找不到一个
 #: 场景来用它吗？找不到的话，理由要写到别人读了不会再问一遍的程度。
-NO_LIVE_SAMPLE: dict[str, str] = {
-    "items": (
-        "演示 Agent 手里没有收数组的工具：工具表是按它的 Python 签名过线的，"
-        "而四个工具的签名里没有一个是列表。校验器认得它（单测里 items 的逐条"
-        "递归核对是有样本的），缺的只是「场景里写一条、边界上拦一次」。要补上，"
-        "得先给被测 Agent 加一个收数组的工具——那是改被测对象，不该为了覆盖一个"
-        "关键字去做。"
-    ),
-}
+NO_LIVE_SAMPLE: dict[str, str] = {}
+
 
 
 def _keywords_in(node: Any) -> set[str]:

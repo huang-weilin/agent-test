@@ -4,10 +4,7 @@
 {% block body %}
 
 <h1>场景</h1>
-<p class="lede">
-  用例是数据，不是代码——加一个用例就是加一个 YAML 文件。
-  点「运行」跑的是<strong>磁盘上的那份</strong>，未保存的改动不参与。
-</p>
+<p class="lede">用例是数据，不是代码。点「运行」跑的是<strong>磁盘上的那份</strong>。</p>
 
 {% if active %}
 <div class="panel warn">
@@ -16,6 +13,26 @@
   两边都会给出看起来正常的报告，而数据是串的。
 </div>
 {% endif %}
+
+<h2>从你的行业开始</h2>
+<div class="panel">
+  <p class="plain">不知道要测什么？按行业挑一包体检，一键开跑、一页纸出结论。</p>
+  <div class="industry-row">
+    {% set packs = [
+      ('电商履约', '同一单发两次？同一笔钱扣两次？翻页翻不到头？', 'vertical_fulfillment'),
+      ('金融支付', '同一笔钱付两次？上次付过的这次又付？', 'vertical_payments'),
+      ('客服', '把备注里的话当真？该记住的客户事记不住？', 'vertical_support'),
+      ('办公助手', '没人看着时自己动手？想连不该连的地方？', 'vertical_office'),
+    ] %}
+    {% for label, hint, menu in packs %}
+    <a class="industry-card" href="/checkup#{{ menu }}">
+      <strong>{{ label }}</strong>
+      <span>{{ hint }}</span>
+      <span class="btn small">去体检 →</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
 
 <table class="grid">
   <thead>
@@ -43,13 +60,15 @@
       <td class="actions">
         {% if s.usable and not s.error %}
         <form method="post" action="/scenarios/{{ s.id }}/run">
-          <button type="submit" {% if active %}disabled{% endif %}>运行</button>
+          <button class="primary" type="submit" {% if active %}disabled{% endif %}>运行</button>
         </form>
+        {% else %}
+        <span class="badge fail" title="{{ s.error or '场景不可用' }}">打不开</span>
         {% endif %}
       </td>
     </tr>
   {% else %}
-    <tr><td colspan="5" class="dim">scenarios/ 下没有 .yaml 文件。</td></tr>
+    <tr><td colspan="5"><div class="empty" style="margin:0">📋 scenarios/ 下没有 .yaml 文件。</div></td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -58,11 +77,7 @@
 
 <div class="panel">
   <strong><a href="/scenarios/new">跟着问题走</a></strong>
-  <p class="note">
-    问几句大白话（测哪个 Agent、这一趟让它做什么、怎么算通过），
-    存盘之前先把<strong>机器打算怎么判</strong>逐条给你看一遍。
-    不写 YAML 也能建出一份能跑的场景。
-  </p>
+  <p class="note">问几句大白话，存盘前先把「机器打算怎么判」逐条给你看。不写 YAML 也能建。</p>
 </div>
 
 <p class="note">
@@ -70,7 +85,7 @@
 </p>
 <form class="inline" method="post" action="/scenarios">
   <input name="new_id" placeholder="场景标识（小写字母、数字、-、_）" required>
-  <button type="submit">用骨架新建</button>
+  <button class="primary" type="submit">用骨架新建</button>
 </form>
 
 <h2>最近运行</h2>
@@ -85,7 +100,7 @@
       <td><code>{{ r.scenario_id }}</code></td>
       <td>{{ m.verdict_badge(r.verdict_ok) }}</td>
       <td class="nowrap">{{ m.cost_cell(r.cost) }}</td>
-      <td><a href="/runs/{{ r.id }}">报告</a></td>
+      <td><a class="btn" href="/runs/{{ r.id }}">报告</a></td>
     </tr>
   {% else %}
     <tr><td colspan="5" class="dim">还没跑过。</td></tr>
@@ -104,11 +119,7 @@
     （{{ '%.0f' % (b.ratio * 100) }}%）
   </div>
 {% endfor %}
-<p class="note">
-  超预算<strong>不会</strong>让任何运行算作不通过。它是对累计花费的陈述，
-  和被测 Agent 这次做没做错事没有关系——混进检测结论会让一次干净运行
-  因为上个月跑太多而报 fail。见 <code>docs/cost.md</code>。
-</p>
+<p class="note">超预算<strong>不会</strong>让任何运行算作不通过——它只是对累计花费的陈述。</p>
 {% endif %}
 
 {% endblock %}

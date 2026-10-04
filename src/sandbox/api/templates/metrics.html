@@ -15,11 +15,7 @@
 {% block body %}
 
 <h1>指标</h1>
-<p class="lede">
-  最近这批运行怎么样。这一页回答的是<strong>横着比</strong>的问题——
-  用例最近稳不稳、延迟在哪个量级、不通过的都是因为什么。
-  单次运行怎么样看运行记录，长期花了多少看<a href="/cost">成本</a>。
-</p>
+<p class="lede">最近这批运行：达成率、失败原因、延迟量级。单次看运行记录，长期花费看<a href="/cost">成本</a>。</p>
 
 <nav class="tabs">
   {% for n in [20, 50, 200] %}
@@ -31,11 +27,7 @@
   {% endif %}
 </nav>
 
-<p class="note">
-  范围：{{ report.scope_text }}。
-  <strong>下面每一格取的都是这一批</strong>，包括成本——一个按"最近 N 次"算、
-  另一个按全量算的话，页面上两栏说的就不是一回事，而它们看起来同样正常。
-</p>
+<p class="note">范围：{{ report.scope_text }}。<strong>下面每一格都取这一批</strong>，包括成本。</p>
 
 <section class="cards">
   <div class="card {{ 'bad' if report.outcomes.failed else '' }}">
@@ -80,21 +72,15 @@
 </section>
 
 {% if report.outcomes.no_verdict %}
-<p class="note">
-  <strong>「没有结论」的 {{ report.outcomes.no_verdict }} 条不在达成率的分母里。</strong>
-  它们没留下结论（还在跑，或者没走到收尾）。把没结论读成"不通过"，等于替一条
-  没有结论的运行编一个结论出来——那正是这个工具最想避免的失效方式。
-</p>
+<p class="note"><strong>「没有结论」的 {{ report.outcomes.no_verdict }} 条不在达成率的分母里</strong>——把没结论读成"不通过"，等于给一条没有结论的运行编结论。</p>
 {% endif %}
 
 <h2>这个数不叫「Agent 合格率」</h2>
 <p class="note">
-  它答的是<strong>「这次运行的结果和场景里写下的预期一致吗」</strong>，不是
-  「这个 Agent 行不行」。一次未达成有两种方向相反的成因：出现了没被任何预期
-  覆盖的 fail 结论（多半是被测对象做了一件我们没料到的事），或者预期没命中
-  （<strong>多半是我们预料它做的那个错没出现</strong>——那往往说明用例要改，
-  或者检测器漏报了）。从运行记录里分不出"Agent 真的没犯错"和"检测器没报出来"，
-  所以这里只报"预期达成"，并把两种成因分开列在下面。
+  它答的是<strong>「这次运行的结果和场景里写下的预期一致吗」</strong>，不是「这个 Agent
+  行不行」。一次未达成有两种成因：出现了没被任何预期覆盖的 fail 结论，或预期没命中
+  ——多半是我们预料它做的那个错没出现，那往往说明用例要改，或者检测器漏报了。
+  这里只报「预期达成」，成因分开列在下面。
 </p>
 
 <h2>不通过的 {{ report.failures.failed }} 条，各是因为什么</h2>
@@ -127,10 +113,7 @@
     </tr>
   </tbody>
 </table>
-<p class="note">
-  <strong>一次运行可能同时占好几行</strong>（执行崩了，预期自然也没达成），
-  所以各行相加会大于不通过的 {{ report.failures.failed }} 条。
-</p>
+<p class="note"><strong>一次运行可能同时占好几行</strong>，各行相加会大于不通过的 {{ report.failures.failed }} 条。</p>
 {% else %}
 <p class="note">这一批里没有不通过的运行。</p>
 {% endif %}
@@ -154,22 +137,11 @@
   </tbody>
 </table>
 <p class="note">
-  <strong>报的是中位数不是平均。</strong> 一次被超时强杀的工具调用（默认 180 秒）
-  能把平均拉到任何一次真实调用都没见过的数，而它恰恰是最该看见的那个点——
-  被平均掉了。中位数看"通常多快"，最大值把长尾摆出来。<br>
-  <strong>工具调用那一行不是"Agent 等这个工具等了多久"</strong>：<code>latency_ms</code>
-  在出口代理的看门狗 <code>enforce</code> 之前就量完了，而看门狗是在这个请求里
-  同步跑的——所以那段时间<strong>记在 Agent 的墙钟上、而不在那一行里</strong>。
-  它单列成下面那行的理由就是"谁的错分开写"：一次"因为我们太慢而超时"的运行，
-  原先和一次"Agent 自己慢"的运行在报告上分不开。<br>
-  <strong>「其中：看门狗」只统计跑到看门狗上的那些调用</strong>（
-  <code>watchdog_ms</code> 非空），这一批里有
-  {{ report.latency.calls_without_watchdog }} 次调用<strong>没跑到</strong>——
-  被边界拦下的调用在目标系统上什么都没留下，看门狗不为它们扫；这一列加出来之前
-  落的行也在这里（那时没量过，补不出来）。见
-  <code>docs/detectors.md</code>。没跑到不是 0，所以没并进那一行。<br>
-  <strong>"样本"是这一批里的调用次数，不是运行次数</strong>——0 表示这一批里
-  一次都没有，不是"耗时为 0"。
+  <strong>报中位数不报平均</strong>（一次超时强杀能把平均拉到离谱）。工具调用那行
+  <strong>不含看门狗时间</strong>——<code>latency_ms</code> 在看门狗扫之前量完，看门狗
+  的时间记在 Agent 墙钟上，单列成下一行。「其中：看门狗」只统计跑到的那些，这一批有
+  {{ report.latency.calls_without_watchdog }} 次<strong>没跑到</strong>——被边界拦下的、
+  以及这一列加出来之前落的行（没跑到不是 0）。"样本"是调用次数，不是运行次数。
 </p>
 
 <h2>按场景</h2>
@@ -197,17 +169,9 @@
   {% endfor %}
   </tbody>
 </table>
-<p class="note">
-  分场景看，是因为用例集一直在变：把不同版本的场景混进一个总数里，得到的
-  "达成率"没有任何一个场景对得上号。这一列每一行的分母都只含它自己。
-</p>
+<p class="note">分场景看：用例集一直在变，混进一个总数的"达成率"对不上任何场景。每行分母只含它自己。</p>
 {% else %}
 <p class="note">这一批里一次运行都没有。</p>
 {% endif %}
-
-<p class="note">
-  口径写在 <code>docs/metrics.md</code>；判定与结论三个标签的关系见
-  <code>docs/ui.md</code>。
-</p>
 
 {% endblock %}

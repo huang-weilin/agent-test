@@ -13,11 +13,7 @@
 <div class="panel bad">
   <strong>这个场景现在加载不出来，保存已被拒绝。</strong>
   <pre class="wrap">{{ error }}</pre>
-  <p class="note">
-    磁盘上的文件<strong>没有被改动</strong>——保存路径是先解析、解析通过才落盘。
-    不这样的话，一次笔误就能把场景文件写成一个加载不出来的样子，
-    而本工具的全部用例都在这些文件里。
-  </p>
+  <p class="note">磁盘上的文件<strong>没有被改动</strong>——先解析、通过才落盘。</p>
 </div>
 {% endif %}
 
@@ -33,9 +29,7 @@
       <textarea name="yaml_text" spellcheck="false" rows="34">{{ yaml_text }}</textarea>
       <div class="row">
         <button type="submit">保存</button>
-        <span class="note">
-          保存前会先按场景模型解析一遍。不通过就不写盘，错误显示在上面。
-        </span>
+        <span class="note">保存前先按场景模型解析，不通过不写盘。</span>
       </div>
     </form>
 
@@ -44,9 +38,7 @@
         <button type="submit" class="primary" {% if active %}disabled{% endif %}>
           运行磁盘上的这一份
         </button>
-        <span class="note">
-          <strong>不是</strong>编辑框里的这一份。改了还没保存的话，跑的是旧的。
-        </span>
+        <span class="note"><strong>不是</strong>编辑框里的这一份——没保存就跑的是旧的。</span>
       </div>
     </form>
   </section>
@@ -138,11 +130,7 @@
     {% endif %}
 
     <h2>怎么写的</h2>
-    <p class="note">
-      完整写法见 <code>docs/scenarios.md</code>。
-      <code>is_write</code> 刻意没有默认值：给了 <code>false</code> 默认，
-      忘了声明的写工具会静默变成只读，重复扣款检测根本不覆盖它们。
-    </p>
+    <p class="note">完整写法见 <code>docs/scenarios.md</code>。<code>is_write</code> 刻意没有默认值——忘了声明的写工具会静默变成只读。</p>
   </aside>
 </div>
 

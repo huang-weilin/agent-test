@@ -4,11 +4,7 @@
 
 <h1>审计日志</h1>
 
-<p class="lede">
-  边界拦截下来的<strong>每一次</strong>工具调用，按时间倒序。<strong>跨运行的</strong>——
-  单次运行的那一份在运行详情页里。需求 3.2 要的是「拦截每一次调用并记录输入输出参数」
-  和「记录重试次数与重放路径」，横着看才问得出"这个工具是不是老被拒绝"。
-</p>
+<p class="lede">跨运行的所有工具调用，按时间倒序。回答"这个工具是不是老被拒绝"这类横着看才看得出的问题。</p>
 
 <form method="get" action="/audit" class="inline">
   <label>
@@ -38,6 +34,8 @@
     只看被代理拒绝的
   </label>
   <button class="primary" type="submit">筛选</button>
+  <a class="btn" href="/audit/export?scenario_id={{ scenario_id }}&tool_name={{ tool_name }}&writes_only={{ writes_only }}&blocked_only={{ blocked_only }}">导出证据包 CSV</a>
+  <span class="note">当前筛选条件下全部调用，可作审计留档。</span>
   {% if scenario_id or tool_name or writes_only or blocked_only %}
     <a href="/audit">清除</a>
   {% endif %}
@@ -88,25 +86,18 @@
 </table>
 
 <p class="note">
-  被出口代理拒绝的调用（<code>blocked_by_proxy</code>，整行标黄）<strong>不计入 Agent
-  异常行为</strong>——那是沙箱自己的策略（ADR 003 出口默认拒绝）在生效，不是被测对象
-  做错了事。混进检测结论会污染判定。但它们值得单独看：一次被拒的调用意味着 Agent
-  试图访问白名单之外的东西，那既是它的行为，也是这条策略真的在起作用的证据。
-</p>
-
-<p class="note">
-  状态为 <code>invalid_args</code> 的调用<strong>反过来算</strong>：它<strong>是</strong> Agent 的行为。参数
-  不符合场景里声明的 schema，真实的目标系统一样会回 400，所以它进了检测结论
-  （<code>tool_schema</code>），只是没到达目标系统——试过，但发出去的请求不合法。
+  被出口代理拒绝的调用（整行标黄）<strong>不计入 Agent 异常行为</strong>——那是沙箱自己的
+  策略（ADR 003）在生效；<code>invalid_args</code> 的调用<strong>反过来算 Agent 的行为</strong>，
+  真实的目标系统一样会回 400（<code>tool_schema</code>）。
 </p>
 {% else %}
-<p class="dim">
+<div class="empty"><div class="empty-ico">🛡️</div>
   {% if scenario_id or tool_name or writes_only or blocked_only %}
     没有符合这些条件的调用。<a href="/audit">清除筛选</a>
   {% else %}
     还没有工具调用记录。
   {% endif %}
-</p>
+</div>
 {% endif %}
 
 {% endblock %}

@@ -1,0 +1,107 @@
+id: handoff_chain_reship
+description: >
+  与 handoff_chain_clean 脚本一字不差，唯一的差别是 0 号把同一条任务
+  （订单 A1 履约）转交了两次——handoff 出现两次，交接流水里躺着两条
+  记录。
+
+  重复转交是接缝上最典型的缺陷：同一个任务被发往同一个环节两次，接手那边
+  如果不去重，就可能执行两遍（支付两笔、发货两批）。这一份里 1 号只接手
+  一次（脚本只给了一段会话），所以业务侧只扣一笔——缺陷在转交这一侧：
+  handoff 是没有幂等保护的写操作，被重复尝试了两次。
+
+agents:
+  - version: router_agent@0.1
+    directory: router_agent
+    task: 用户要求处理订单 A1，请先受理并判断归属。
+    model: stub-model
+  - version: fulfillment_agent@0.1
+    directory: fulfillment_agent
+    task: 你接手继续履约订单 A1（支付并发货并通知）。
+    model: stub-model
+
+tools:
+  - use: handoff
+  - use: get_order
+  - use: check_stock
+  - use: create_payment
+  - use: ship_order
+  - use: send_notice
+
+sessions:
+  - name: 0 号：受理并转交（重复转交同一任务）
+    script:
+      - tool_calls:
+          - name: handoff
+            arguments: {target_role: fulfillment, task: 订单 A1 履约}
+      - tool_calls:
+          - name: handoff
+            arguments: {target_role: fulfillment, task: 订单 A1 履约}
+      - content: 已转交履约环节处理。
+
+  - name: 1 号：接手履约
+    agent: 1
+    script:
+      # 与 clean 同一规则：不写 get_order（守卫自动查单）。
+      - tool_calls:
+          - name: check_stock
+            arguments: {item: 机械键盘}
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - tool_calls:
+          - name: ship_order
+            arguments: {order_id: A1, carrier: 顺丰}
+      - tool_calls:
+          - name: send_notice
+            arguments: {order_id: A1, notice_type: shipment, message: 您的订单已发货}
+      - content: 订单 A1 已履约完成。
+
+  - name: 1 号：隔天再来查单（记忆要还在）
+    agent: 1
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: B2}
+      - content: B2 查过了，这里没有我需要动手的事。
+
+expected_charges: 1
+
+# 与 clean 同一条豁免、同一个理由（1 号守卫自动查单）。幂等 fail 归因不受
+# 豁免影响——豁免只豁免 loop.strict 的判定。
+exemptions:
+  - detector: loop.strict
+    tool: get_order
+    reason: fulfillment_agent 三个守卫（到期/已付/库存）各自自动查单一次，属知情读取
+  - detector: loop.strict
+    tool: check_stock
+    reason: 库存守卫在发货前自动查库存（脚本一次加发货守卫一次，属知情读取）
+
+memory:
+  must_hold:
+    - agent: 1
+      path: actions.jsonl
+      reason: >
+        1 号（履约）自己的那份记忆必须原样不动：它付过款、发过货、发过通知，
+        此后每一次会话开始时那些记录都该在。这一条守住了，才说得上"1 号这边
+        没有问题"；它要是变了，那是另一个故事（Agent 弄丢或改写了记忆）。
+        判据落点是会话 1 结束与会话 2 结束两个时点——会话 1 开始时 1 号还是
+        全新进程，记忆文件不存在，比不了。
+        （多 Agent 场景里 `agent: 1` 是必需的：不指名的话这条判据落在 0 号
+        头上——而 0 号只转交、不写记忆，判它毫无意义。）
+
+expect:
+  - detector: idempotency
+    verdict: fail
+    note: >
+      handoff 是没有幂等保护的写操作，被重复尝试了两次，交接流水里躺着两条
+      记录。归因在接缝的转交侧：0 号把同一条任务发了两次，没有用任何
+      机制去重。
+  - detector: loop.strict
+    verdict: pass
+    note: 1 号守卫查单被豁免降级为 pass（同 handoff_chain_clean）。
+  - detector: memory.drift
+    verdict: pass
+    note: 1 号那份记忆守住了。这一对里变的只有转交次数，记忆本身两边都是好的。
+  - detector: memory
+    verdict: pass
+    note: 族级汇总，跟着上面那条具体结论一起。

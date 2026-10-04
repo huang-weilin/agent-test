@@ -7,31 +7,91 @@
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<header class="top">
-  <nav>
-    <a class="brand" href="/">行为级测试沙盒</a>
-    <a href="/checkup">体检</a>
-    <a href="/help">使用手册</a>
-    <a href="/">场景</a>
-    <a href="/runs">运行记录</a>
-    <a href="/regression">回归集</a>
-    <a href="/memory">记忆</a>
-    <a href="/audit">审计日志</a>
-    <a href="/metrics">指标</a>
-    <a href="/cost">成本</a>
-  </nav>
-  {% if active %}
-  <span class="running" title="{{ active.scenario_id }} 正在运行">
-    <span class="dot"></span>正在跑 {{ active.scenario_id }}
-  </span>
-  {% endif %}
-</header>
-<main>
-{% block body %}{% endblock %}
-</main>
-<footer>
-  黑盒边界拦截 · 自研库为唯一真相源 · 出口默认拒绝
-  （ADR <code>docs/decisions/</code>）
-</footer>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="/"><span class="brand-mark">沙</span>行为级测试沙盒</a>
+
+    {% set nav = [
+      ('测试', [
+        ('/', '场景', 'grid'),
+        ('/runs', '运行记录', 'clock'),
+      ]),
+      ('分析', [
+        ('/metrics', '指标', 'chart'),
+        ('/regression', '回归集', 'rotate'),
+        ('/checkup', '体检', 'pulse'),
+        ('/cost', '成本', 'dollar'),
+      ]),
+      ('观测', [
+        ('/memory', '记忆', 'database'),
+        ('/audit', '审计日志', 'shield'),
+      ]),
+    ] %}
+    {% set ico = {
+      'grid': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>',
+      'clock': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+      'chart': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>',
+      'rotate': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
+      'pulse': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
+      'dollar': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+      'database': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
+      'shield': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+      'book': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+    } %}
+    {% set path = request.url.path if request is defined else '/' %}
+    {% for group, items in nav %}
+    <nav class="nav-group">
+      <div class="nav-label">{{ group }}</div>
+      {% for href, label, key in items %}
+      <a class="nav-item {{ 'on' if path == href or (href != '/' and path.startswith(href)) else '' }}"
+         href="{{ href }}"><span class="nav-ico">{{ ico[key] | safe }}</span>{{ label }}</a>
+      {% endfor %}
+    </nav>
+    {% endfor %}
+
+    <nav class="nav-group">
+      <div class="nav-label">其他</div>
+      <a class="nav-item {{ 'on' if path.startswith('/help') else '' }}" href="/help"><span class="nav-ico">{{ ico['book'] | safe }}</span>使用手册</a>
+    </nav>
+
+    <div class="side-foot">
+      黑盒边界拦截 · 自研库为唯一真相源<br>出口默认拒绝 · ADR <code>docs/decisions/</code>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="crumb">
+        <span>行为级测试沙盒</span>
+        {% set matched = namespace(sep=False) %}
+        {% for group, items in nav %}
+          {% for href, label, key in items %}
+            {% if path == href or (href != '/' and path.startswith(href)) %}
+              {% set matched.sep = True %}<span class="sep">/</span><span>{{ label }}</span>
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+        {% if not matched.sep and path.startswith('/help') %}<span class="sep">/</span><span>使用手册</span>{% endif %}
+      </div>
+      <span class="spacer"></span>
+      {% if active %}
+      <span class="running" title="{{ active.scenario_id }} 正在运行">
+        <span class="dot"></span>正在跑 <code>{{ active.scenario_id }}</code>
+      </span>
+      {% endif %}
+    </header>
+
+    <main class="content">
+    {% block body %}{% endblock %}
+    </main>
+
+    <footer class="foot">
+      行为级测试沙盒 · 黑盒边界拦截 · 自研库为唯一真相源 · 出口默认拒绝
+      （ADR <code>docs/decisions/</code>）
+    </footer>
+  </div>
+
+</div>
 </body>
 </html>

@@ -4,11 +4,7 @@
 
 <h1>记忆视图</h1>
 
-<p class="lede">
-  这里显示的不是"Agent 记住了什么"——那在 Agent 进程内，边界拦不到。
-  显示的是<strong>我们的操纵让它的视野从哪里开始</strong>：回滚到哪个快照，
-  决定了它<em>本可以知道</em>哪些历史。跨会话归因就靠这个，不需要猜。
-</p>
+<p class="lede">每次运行里，Agent 的记忆视野从哪开始（回滚到哪个快照），决定它<em>本可以知道</em>哪些历史。</p>
 
 {% if sequences %}
 <table class="grid">
@@ -53,13 +49,9 @@
   {% endfor %}
   </tbody>
 </table>
-<p class="note">
-  <strong>视野缺口</strong>不是缺陷，是实验设置。有缺口说明这个序列里有会话从旧快照
-  恢复了记忆——落在缺口那段里的历史调用，Agent <em>不可能知道</em>，重复的责任在
-  恢复机制而不在 Agent。归因规则见 <code>Session.memory_horizon_ordinal</code>。
-</p>
+<p class="note"><strong>视野缺口</strong>不是缺陷：有缺口说明会话从旧快照恢复了记忆——缺口里的历史 Agent <em>不可能知道</em>，重复的责任在恢复机制。</p>
 {% else %}
-<p class="dim">还没有带记忆快照的运行。</p>
+<div class="empty"><div class="empty-ico">🧠</div>还没有带记忆快照的运行。</div>
 {% endif %}
 
 {% endblock %}

@@ -21,11 +21,7 @@
 
 <div class="panel">
   <p><strong>{{ report.headline }}</strong></p>
-  <p class="note">
-    这一趟依次跑了 {{ report.items | length }} 支场景，是
-    {{ job.started_at | localdt('%m-%d %H:%M') }} 起的。
-    每一项的完整过程各自留在运行记录里，下面每一条都能点进去。
-  </p>
+  <p class="note">{{ report.items | length }} 支场景，{{ job.started_at | localdt('%m-%d %H:%M') }} 起。每条可点进运行记录。</p>
 </div>
 
 {% if unmatched %}
@@ -50,10 +46,7 @@
 
 {% if report.incomplete or report.instrument_problems %}
 <h2>先看这一页本身</h2>
-<p class="plain">
-  这一节说的不是被测对象，是这份体检。前面几项没得出结论，或者检查过程本身
-  出了岔子——两者都会让下面那几节的覆盖面比看上去窄。
-</p>
+<p class="plain">这一节说的是体检本身，不是被测对象：有项没跑成，下面那几节就少一格。</p>
 {% endif %}
 
 {% if report.incomplete %}
@@ -156,10 +149,7 @@
 
 <h2>抓到的</h2>
 {% if report.findings %}
-<p class="plain">
-  这几项，被测对象把毛病犯了，而且被抓住了。每一行下面是这条检查在说什么、
-  以及它是凭什么判的。
-</p>
+<p class="plain">毛病犯了，而且被抓住。</p>
 {% for o in report.findings %}
 <div class="panel bad">
   <h3>{{ o.item.question }} {{ m.item_pill(o.kind) }}</h3>
@@ -179,10 +169,7 @@
 
 {% if report.notes %}
 <h2>值得看一眼</h2>
-<p class="plain">
-  这几项不算错，但有值得看一眼的地方。它不会让这次运行算"不通过"——
-  只是提醒你这里有个东西。
-</p>
+<p class="plain">不算错，但提醒你这里有个东西。</p>
 {% for o in report.notes %}
 <div class="panel warn">
   <h3>{{ o.item.question }} {{ m.item_pill(o.kind) }}</h3>
@@ -197,10 +184,7 @@
 
 <h2>这次没事的</h2>
 {% if report.clear %}
-<p class="plain">
-  这几项做完了，没发现问题。注意它说的是"这几支剧本里没演出来"——
-  不保险的部分见下面那一节。
-</p>
+<p class="plain">做完了，没发现问题——注意是"这几支剧本里没演出来"。</p>
 <table class="grid tight">
   <thead><tr><th>要查的毛病</th><th>结果</th><th>说明</th></tr></thead>
   <tbody>
@@ -221,12 +205,7 @@
 {% endif %}
 
 <h2>这次判不了的</h2>
-<p class="plain">
-  这几格这次没有判过。判不了的意思是：这一次没有足够的信息能判——它不等于
-  「没问题」，也不等于「正常」。列在这里正是为了不让你把它当成一个好消息。
-  一格里很多项都出现同一个名字，多半是这支场景本来就没演那件事
-  （比如场景里没有无人值守的会话，那"半夜越权"这一格自然没得判）。
-</p>
+<p class="plain">判不了的意思是：这次没有足够信息能判——不等于「没问题」，也不等于「正常」。一格里很多项同个名字，多半是这支场景本来就没演那件事。</p>
 {% if report.unknown %}
 <table class="grid tight">
   <thead>

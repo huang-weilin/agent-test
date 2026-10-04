@@ -1,0 +1,12 @@
+# 被测 Agent 的依赖，与框架本体完全隔离。
+#
+# 刻意用独立的 venv（agents/react_demo/.venv），不装进框架的 .venv：
+#   - 被测 Agent 的依赖树里会有框架不应该有的东西（也反过来）
+#   - 版本冲突时有地方躲：LangGraph 升个版不该影响沙箱本体能不能跑
+#   - 最要紧的一条：这个 venv 里**没有** sandbox 包，所以 Agent 在物理上
+#     不可能 import 到沙箱内部实现。"它不可能作弊"这件事要由环境保证，
+#     而不是靠代码评审。
+langchain>=1.0
+langchain-openai>=1.0
+langgraph>=1.0
+httpx>=0.28

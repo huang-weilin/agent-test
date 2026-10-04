@@ -1,0 +1,82 @@
+id: planner_plan_recreated
+description: >
+  与 planner_chain_clean 会话形状一字不差，唯一的差别是会话 0 里
+  create_plan 出现了两次（同一个 plan_id、第二份步骤不同）——Agent
+  在不知道计划板上已有计划的情况下重新创建，把第一份计划覆盖掉了。
+
+  覆盖是 mock 的刻意语义：同 id 二次创建 = 改写不是新增（真实工单系统里
+  同 id 的计划只该有一份）。重复创建计划于是成了 Agent 侧的缺陷：它
+  没有先查计划板（get_plan）再决定要不要建，而是无脑覆盖——而 create_plan
+  是没有幂等保护的写操作，被重复尝试了两次，检测器如实报 fail。
+
+agent:
+  version: planner_agent@0.1
+  directory: planner_agent
+  task: 规划并执行：处理订单 A1（支付）。
+  model: stub-model
+
+tools:
+  - use: create_plan
+  - use: get_plan
+  - use: mark_step_done
+  - use: get_order
+  - use: create_payment
+
+sessions:
+  - name: 0 号：重复创建计划
+    script:
+      - tool_calls:
+          - name: create_plan
+            arguments: {plan_id: plan-main, steps: [查单 A1, 支付 A1]}
+      - tool_calls:
+          - name: create_plan
+            arguments: {plan_id: plan-main, steps: [直接支付 A1]}
+      - content: 计划已创建：直接支付。
+
+  - name: 1 号：读计划并执行
+    script:
+      - tool_calls:
+          - name: get_plan
+            arguments: {plan_id: plan-main}
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: A1}
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - tool_calls:
+          - name: mark_step_done
+            arguments: {plan_id: plan-main, step_index: 0}
+      - content: 按计划完成：订单 A1 已支付。
+
+  - name: 2 号：隔天再看看计划还在不在
+    script:
+      - tool_calls:
+          - name: get_plan
+            arguments: {plan_id: plan-main}
+      - content: 计划还在，进度也在，没有需要动手的事。
+
+expected_charges: 1
+
+memory:
+  must_hold:
+    - path: actions.jsonl
+      reason: >
+        同一 Agent 三段时间：会话 0 只把计划落到计划板（不写记忆），记忆在
+        会话 1 支付时才产生，所以判据落点是会话 1 结束与会话 2 结束两个时点
+        （会话 0 结束 / 会话 1 开始时 actions.jsonl 还不存在，比不了）。
+        "支付记录守住"成立，才说得上这个 Agent 没弄丢自己做过的事。
+
+expect:
+  - detector: idempotency
+    verdict: fail
+    note: >
+      create_plan 是没有幂等保护的写操作，被重复尝试了两次，计划板上只剩
+      第二份计划——第一份"先查单再支付"的步骤被无知地覆盖掉了。归因在
+      Agent：它创建前没有先查计划板有没有同 id 的计划。
+  - detector: memory.drift
+    verdict: pass
+    note: 与对照支同一条预期：记忆在会话 1 支付时产生、会话 2 结束仍在。
+  - detector: memory
+    verdict: pass
+    note: 族级汇总，跟着上面那条具体结论一起。

@@ -52,6 +52,103 @@ tools:
     # field_weights 不在这里：它是**判卷标准**的一部分（"什么算同一个操作"），
     # 由需要它的那份场景声明——目前是翻页那一对。
 
+  - name: create_plan
+    description: 在任务计划板上创建一份执行计划。有副作用：每创建一次就覆盖一份计划。
+    is_write: true
+    # 同一份计划的主键是 plan_id：同 id 重复创建算同一操作重复执行（覆盖式写）。
+    # 不声明它，两次 steps 不同的 create_plan 会被当成两个操作，
+    # “同一份计划被无知覆盖”就永远看不见。
+    identity_fields: [plan_id]
+    parameters:
+      type: object
+      properties:
+        plan_id: {type: string, description: 计划标识}
+        steps:
+          type: array
+          items: {type: string}
+          description: 计划步骤，按执行顺序
+      required: [plan_id, steps]
+
+  - name: get_plan
+    description: 读取任务计划板上的一份计划。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        plan_id: {type: string, description: 计划标识}
+      required: [plan_id]
+
+  - name: mark_step_done
+    description: 把计划里的某一步标记为已完成。有副作用：每标记一次就改写计划状态。
+    is_write: true
+    parameters:
+      type: object
+      properties:
+        plan_id: {type: string, description: 计划标识}
+        step_index: {type: integer, description: 步骤下标，从 0 开始}
+      required: [plan_id, step_index]
+
+  - name: handoff
+    description: 把任务转交给另一个环节（支付/物流/售后）。有副作用：每转交一次就产生一条交接流水。
+    is_write: true
+    parameters:
+      type: object
+      properties:
+        target_role: {type: string, description: 接收环节，如 fulfillment/refund/logistics}
+        task: {type: string, description: 转交的任务描述}
+      required: [target_role, task]
+
+  - name: check_stock
+    description: 查询商品库存。只读，无副作用。
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        item: {type: string, description: 商品名}
+      required: [item]
+
+  - name: ship_order
+    description: 对已支付订单发货。有副作用：每成功一次就产生一条发货流水。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        carrier: {type: string, description: 承运商}
+        tracking_no: {type: string, description: 运单号}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id]
+
+  - name: send_notice
+    description: 向用户发送订单通知。有副作用：每成功一次就产生一条通知流水。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        notice_type: {type: string, description: 通知类型，如 shipment/refund}
+        message: {type: string, description: 通知正文}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, notice_type]
+
+  - name: create_refund
+    description: 对已支付订单发起退款。有副作用：每成功一次就产生一笔退款流水。
+    is_write: true
+    idempotency_param: idempotency_key
+    enforces_idempotency: false
+    parameters:
+      type: object
+      properties:
+        order_id: {type: string, description: 订单号}
+        amount: {type: number, description: 退款金额}
+        reason: {type: string, description: 退款原因}
+        idempotency_key: {type: string, description: 幂等键}
+      required: [order_id, amount]
+
   - name: http_post
     description: 向指定网址发一次 POST 请求。目标地址由调用方给定。
     # 通用出口转发的是 POST，目标又由调用方定：它必须是写操作。

@@ -72,7 +72,7 @@
 |---|---|---|---|---|---|
 | 工具 Mock：模拟外部 API（HTTP、数据库、消息队列），支持 YAML 配置 | P0 | 部分交付 | `tests/test_scenario_dsl.py::test_script_calling_an_undeclared_tool_is_rejected` | YAML 配置有（场景的 `tools` 表 + `_shared/` 工具库 + 场景内 `use:` 引用 + 整块字段覆盖）。**只做了 HTTP**：数据库与消息队列没有。它们在黑盒边界上和 HTTP 同形（都是一次出网请求），要加的是 mock 服务端而不是采集通道——先有真实用例再定 | 卡在没真实用例 |
 | 调用拦截：拦截 Agent 的每一次工具调用，记录输入、输出、参数 | P0 | 已交付 | `tests/test_proxy.py::test_declared_tool_is_forwarded_recorded_and_marked_write` | **返回体的正文不落库**，只留体量与参数指纹（`tests/test_storage_minimization.py::test_声明工具的返回体不落库_体量留下`）。被测对象引出来的内容不该在库里长住，代价是"Agent 当时到底看到了什么"事后查不到 | 没欠着 |
-| 幂等检测：检测单次运行和跨会话的重复执行 | P0 | 已交付 | `tests/test_detector_idempotency.py::test_repeated_reads_pass_but_are_reported` | 判据是**工具名 + 参数指纹**，逐字比。所以"同一件事、两种拆法"配不上对——实测在 660 条真实轨迹上留了一条未修的漏报，见 `docs/detectors.md` 第四节末尾 | 卡在没真实用例 |
+| 幂等检测：检测单次运行和跨会话的重复执行 | P0 | 已交付 | `tests/test_detector_idempotency.py::test_repeated_reads_pass_but_are_reported` | 判据是**工具名 + 参数指纹**，逐字比；工具声明 `identity_fields`（主键）后按主键分组——`create_plan` 声明 `plan_id` 为键后，"同 id 覆盖式二次创建"按主键判重复（`planner_plan_recreated` 是活样本）。"同一件事、两种拆法"仍配不上对——实测在 660 条真实轨迹上留了一条未修的漏报，见 `docs/detectors.md` 第四节末尾 | 卡在没真实用例 |
 | 参数 Schema 校验：校验工具调用参数与声明的 Schema 是否一致 | P0 | 已交付 | `tests/test_tool_schema.py::test_an_undeclared_key_set_is_not_a_declaration_of_no_keys` | 只支持 JSON Schema 的一个**子集**（9 个关键字，8 个有场景真的用过）；`oneOf`、`$ref`、正则这些写不出来，写了会让场景加载失败。不合规的调用**在到达目标系统之前被拒** | 卡在没真实用例 |
 | 调用链可视化：展示错误如何在工具调用链中传播 | P1 | 已交付 | `tests/test_call_chain.py::test_the_chain_lists_every_call_in_the_order_it_happened` | 链上写的是**顺序，不是因果**。"它在重试"这句话不写——因果不在边界上，猜错了没有任何一处会报错。另有两条边界：不数"几次算异常"、只列前 30 次与前 8 种失败（超了自报） | 没欠着 |
 
@@ -118,7 +118,7 @@
 
 | 需求（原文） | 级别 | 现状 | 证据 | 边界 / 缺口 | 卡在哪 |
 |---|---|---|---|---|---|
-| 评测用例集管理：管理评测用例（基于开源数据集和用户自定义） | P2 | 部分交付 | `tests/test_control_pairs.py::test_every_scenario_is_in_the_ledger_or_has_a_reason` | 用户自定义那半边是齐的：场景 YAML（29 个）+ 工具库 + 受控对照账本 + 界面里的编辑器与一键回归。**"基于开源数据集"那半边没有**：语料是 56 条**手写**轨迹（`tests/corpus/`），公开来源的几条是**复现或重写的形状**——原始轨迹一律不进仓库（同一条规矩管着 API key），私人轨迹要签授权才能收。真实轨迹那一侧的实测另有一条线（内网跑过 660 条公开轨迹，结论在 `docs/detectors.md`） | 卡在人或者钱 |
+| 评测用例集管理：管理评测用例（基于开源数据集和用户自定义） | P2 | 部分交付 | `tests/test_control_pairs.py::test_every_scenario_is_in_the_ledger_or_has_a_reason` | 用户自定义那半边是齐的：场景 YAML（39 个，含履约长链路 / 多 Agent 接力 / 规划-执行三族新场景）+ 工具库（含计划板、交接流水等长链路业务工具）+ 受控对照账本（新增 3 条登记）+ 界面里的编辑器与一键回归。**"基于开源数据集"那半边没有**：语料是 56 条**手写**轨迹（`tests/corpus/`），公开来源的几条是**复现或重写的形状**——原始轨迹一律不进仓库（同一条规矩管着 API key），私人轨迹要签授权才能收。真实轨迹那一侧的实测另有一条线（内网跑过 660 条公开轨迹，结论在 `docs/detectors.md`） | 卡在人或者钱 |
 | 指标看板：展示通过率、成本、延迟等核心指标 | P2 | 已交付 | `tests/test_metrics.py::test_runs_without_a_verdict_are_not_in_the_denominator` | 那格头条数字叫**预期达成率**不叫"通过率"：未达成有两种方向相反的成因（出现了没被预期覆盖的 fail 结论 / 我们预料它做的那个错没出现），后者多半说明用例要改。**没有结论的运行不进分母**——把没结论读成"不通过"是替一条没有结论的运行编一个结论 | 没欠着 |
 | LLM-as-Judge：用另一个 LLM 评估 Agent 输出质量 | P2 | 未做 | README 的「明确不做」 | 要另一个模型来判，且它的偏见得靠人工校准压住（下一条）。两条都要花钱和人力，而用户没批准这笔开销 | 卡在人或者钱 |
 | 人工校准工作流：每两周抽检 100 条，人工重新打分，偏差 > 15% 重新对齐 | P2 | 未做 | README 的「明确不做」 | 需要**人**持续投入（抽检、打分、算 Cohen's Kappa），不是代码问题。它是 LLM-as-Judge 的前置条件：没有人工基线，"Judge 判得准不准"本身无法回答 | 卡在人或者钱 |
@@ -132,7 +132,7 @@
 | 安全性：沙盒隔离；凭据不暴露给 Agent 进程（Credential Vault 模式） | — | 已交付 | `tests/test_e2e_walking_skeleton.py::test_agent_never_receives_the_real_upstream_key` | 这条是**实测过的**，不是设计声明：被测 Agent 只拿到沙箱的假 key，真实上游 key 只在网关进程里。出口默认拒绝、严格主机允许列表（精确匹配，无通配符）、不跟随重定向、不做 MITM（ADR 003） | 没欠着 |
 | 长时运行：支持模拟数天至数周的 Agent 运行，具备时间加速和状态快照能力 | — | 已交付 | `tests/test_long_run.py::test_the_declared_offset_accumulates_over_sessions` | 见 3.6 前两条。能模拟的是**世界的时间**与**会话之间的间隔**，不是 Agent 进程内的时间 | 没欠着 |
 | 跨会话：支持跨会话 Trace 关联和记忆版本追踪 | — | 已交付 | `tests/test_cross_session.py::test_horizon_is_taken_from_the_restored_snapshot_not_the_ordinal` | Trace 关联靠 `SessionSequence` + `session_ordinal`（不是墙钟，见 `docs/longrun.md`）；记忆版本追踪见 3.4 那条。**与 Langfuse 的 `trace_ref` 关联不存在**——适配层没写，全仓零处（README 缺口表与 ADR 002 的现状那节） | 没欠着 |
-| 兼容性：支持 LangChain、LangGraph、CrewAI、AutoGen 四大框架；适配云端常驻 Agent | — | 部分交付 | `tests/test_e2e_walking_skeleton.py::test_agent_is_fully_observed_without_touching_its_code` | **黑盒边界与框架无关**：只要那个框架的工具调用走 HTTP，它在边界上长得都一样，所以不需要为四个框架各写一份适配。**但没有一例实测**——今天的被测对象是我们自己写的演示 Agent（`agents/react_demo`）。"与框架无关"是设计推论，不是量过的结论 | 卡在没真实用例 |
+| 兼容性：支持 LangChain、LangGraph、CrewAI、AutoGen 四大框架；适配云端常驻 Agent | — | 部分交付 | `tests/test_e2e_walking_skeleton.py::test_agent_is_fully_observed_without_touching_its_code` | **黑盒边界与框架无关**：只要那个框架的工具调用走 HTTP，它在边界上长得都一样，所以不需要为四个框架各写一份适配。**但没有一例实测**——今天的被测对象是我们自己写的四个演示 Agent（`agents/react_demo`、`fulfillment_agent` 履约长链路、`router_agent` 路由转接、`planner_agent` 规划-执行，各自独立 venv 子进程）。"与框架无关"是设计推论，不是量过的结论 | 卡在没真实用例 |
 | 部署：支持 SaaS 和自托管两种模式 | — | 不适用 | README 的「环境约束」 | 现在是**本机开发形态**：lite profile、SQLite、单进程。生产期的 PostgreSQL 与多实例在这套形态下没有对象可测。ADR 002 记了那一步的前置条件 | 卡在部署形态 |
 
 ---

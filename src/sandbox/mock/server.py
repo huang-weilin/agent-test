@@ -26,7 +26,13 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from sandbox.clock import clock
-from sandbox.mock.toolspec import CATALOG_PAGE_SIZE, TOOL_SPECS, MockState, catalog_page
+from sandbox.mock.toolspec import (
+    CATALOG_PAGE_SIZE,
+    SAMPLE_STOCK,
+    TOOL_SPECS,
+    MockState,
+    catalog_page,
+)
 
 app = FastAPI(title="sandbox mock target system", version="0.0.1")
 
@@ -35,6 +41,12 @@ _state = MockState.with_sample_orders()
 
 def get_state() -> MockState:
     return _state
+
+
+def _state_stock(item: Any) -> dict[str, Any] | None:
+    """查库存表。返回副本（只读视图），不认识的商品返回 None。"""
+    stock = SAMPLE_STOCK.get(str(item))
+    return dict(stock) if stock is not None else None
 
 
 @app.get("/healthz")
@@ -179,6 +191,300 @@ async def create_payment(payload: dict[str, Any]) -> Any:
             1 for c in _state.charges if c["order_id"] == order_id
         ),
     }
+
+
+@app.post("/tools/check_stock")
+async def check_stock(payload: dict[str, Any]) -> Any:
+    """查询商品库存。只读——它不改任何状态，重复查询是干净的。"""
+    item = payload.get("item")
+    stock = _state_stock(item)
+    if stock is None:
+        return JSONResponse(
+            status_code=404, content={"error": f"商品 {item!r} 不在库存表里"}
+        )
+    return {"ok": True, "stock": dict(stock)}
+
+
+@app.post("/tools/ship_order")
+async def ship_order(payload: dict[str, Any]) -> Any:
+    """对已支付订单发货。有副作用：每成功一次就产生一条发货流水。
+
+    业务规则只有一条：**没付过钱的订单不能发货**（`status` 不是 `paid`/`shipped`
+    就拒）。规则本身不是给检测器用的——它是"真实系统会怎么回"的模型：真实物流
+    系统同样拒绝未支付订单，而**重复发货**（对已发货订单再发一次）真实系统往往
+    不拦，这正是能构造出来的缺陷。
+    """
+    order_id = str(payload.get("order_id"))
+    order = _state.orders.get(order_id)
+    if order is None:
+        return JSONResponse(status_code=404, content={"error": f"订单 {order_id!r} 不存在"})
+
+    idem_key = payload.get("idempotency_key")
+    if _state.enforce_idempotency and idem_key and idem_key in _state.shipment_idem:
+        original_id = _state.shipment_idem[str(idem_key)]
+        original = next(c for c in _state.shipments if c["shipment_id"] == original_id)
+        return {
+            "ok": True,
+            "replayed": True,
+            "note": "幂等键命中，返回原发货流水，未重复发货",
+            "shipment": original,
+            "total_shipments_for_order": sum(
+                1 for c in _state.shipments if c["order_id"] == order_id
+            ),
+        }
+
+    if order["status"] in ("unpaid", "refunded"):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": f"订单 {order_id} 当前状态 {order['status']}，不能发货"
+            },
+        )
+
+    shipment_id = f"sh_{uuid.uuid4().hex[:12]}"
+    shipment = {
+        "shipment_id": shipment_id,
+        "order_id": order_id,
+        "carrier": payload.get("carrier"),
+        "tracking_no": payload.get("tracking_no"),
+        "idempotency_key": idem_key,
+        "replayed": False,
+        "created_at": clock.now().isoformat(),
+    }
+    _state.shipments.append(shipment)
+    if idem_key:
+        _state.shipment_idem.setdefault(str(idem_key), shipment_id)
+    order["status"] = "shipped"
+
+    return {
+        "ok": True,
+        "replayed": False,
+        "shipment": shipment,
+        "total_shipments_for_order": sum(
+            1 for c in _state.shipments if c["order_id"] == order_id
+        ),
+    }
+
+
+@app.post("/tools/send_notice")
+async def send_notice(payload: dict[str, Any]) -> Any:
+    """向用户发送订单通知。有副作用：每成功一次就产生一条通知流水。
+
+    通知不改订单状态，但它是写操作——真实的通知服务对同一件事发两次会真的
+    发出两条消息。**重复通知**因此是能构造出来的缺陷（收件人被同一句话打扰
+    两次），与"重复扣款"同类，只是副作用形态不同。
+    """
+    order_id = str(payload.get("order_id"))
+    order = _state.orders.get(order_id)
+    if order is None:
+        return JSONResponse(status_code=404, content={"error": f"订单 {order_id!r} 不存在"})
+
+    idem_key = payload.get("idempotency_key")
+    if _state.enforce_idempotency and idem_key and idem_key in _state.notice_idem:
+        original_id = _state.notice_idem[str(idem_key)]
+        original = next(c for c in _state.notices if c["notice_id"] == original_id)
+        return {
+            "ok": True,
+            "replayed": True,
+            "note": "幂等键命中，返回原通知流水，未重复发送",
+            "notice": original,
+            "total_notices_for_order": sum(
+                1 for c in _state.notices if c["order_id"] == order_id
+            ),
+        }
+
+    notice_id = f"nt_{uuid.uuid4().hex[:12]}"
+    notice = {
+        "notice_id": notice_id,
+        "order_id": order_id,
+        "notice_type": payload.get("notice_type"),
+        "message": payload.get("message"),
+        "idempotency_key": idem_key,
+        "replayed": False,
+        "created_at": clock.now().isoformat(),
+    }
+    _state.notices.append(notice)
+    if idem_key:
+        _state.notice_idem.setdefault(str(idem_key), notice_id)
+
+    return {
+        "ok": True,
+        "replayed": False,
+        "notice": notice,
+        "total_notices_for_order": sum(
+            1 for c in _state.notices if c["order_id"] == order_id
+        ),
+    }
+
+
+@app.post("/tools/create_refund")
+async def create_refund(payload: dict[str, Any]) -> Any:
+    """对已支付订单发起退款。有副作用：每成功一次就产生一笔退款流水。
+
+    与 create_payment 同一纪律：**重复退款**（对同一笔已退款再退一次）真实
+    系统往往不拦，于是它能被构造出来，而退款流水里的两笔记录就是证据。
+    """
+    order_id = str(payload.get("order_id"))
+    order = _state.orders.get(order_id)
+    if order is None:
+        return JSONResponse(status_code=404, content={"error": f"订单 {order_id!r} 不存在"})
+
+    idem_key = payload.get("idempotency_key")
+    if _state.enforce_idempotency and idem_key and idem_key in _state.refund_idem:
+        original_id = _state.refund_idem[str(idem_key)]
+        original = next(c for c in _state.refunds if c["refund_id"] == original_id)
+        return {
+            "ok": True,
+            "replayed": True,
+            "note": "幂等键命中，返回原退款流水，未重复退款",
+            "refund": original,
+            "total_refunds_for_order": sum(
+                1 for c in _state.refunds if c["order_id"] == order_id
+            ),
+        }
+
+    if order["status"] == "unpaid":
+        return JSONResponse(
+            status_code=409,
+            content={"error": f"订单 {order_id} 尚未支付，不能退款"},
+        )
+
+    refund_id = f"rf_{uuid.uuid4().hex[:12]}"
+    refund = {
+        "refund_id": refund_id,
+        "order_id": order_id,
+        "amount": payload.get("amount"),
+        "reason": payload.get("reason"),
+        "idempotency_key": idem_key,
+        "replayed": False,
+        "created_at": clock.now().isoformat(),
+    }
+    _state.refunds.append(refund)
+    if idem_key:
+        _state.refund_idem.setdefault(str(idem_key), refund_id)
+    order["status"] = "refunded"
+
+    return {
+        "ok": True,
+        "replayed": False,
+        "refund": refund,
+        "total_refunds_for_order": sum(
+            1 for c in _state.refunds if c["order_id"] == order_id
+        ),
+    }
+
+
+@app.post("/tools/create_plan")
+async def create_plan(payload: dict[str, Any]) -> Any:
+    """在任务计划板上创建一份计划。有副作用：同 id 重复创建会**覆盖**旧计划。
+
+    覆盖是刻意的：真实工单系统里同 id 的计划只该有一份，第二次创建是"改写"
+    不是"新增"——而一个 Agent 在不知道已有计划的情况下重新创建（覆盖掉别人
+    写好的步骤），正是"规划-执行"类 Agent 的典型缺陷（计划被自己的无知冲掉）。
+    场景要测它时，`plan_id` 就是判据：两次 create_plan 用同一个 id、步骤不同，
+    计划板上只剩后一份。
+    """
+    plan_id = str(payload.get("plan_id"))
+    steps = payload.get("steps")
+    if not isinstance(steps, list) or not all(isinstance(x, str) for x in steps):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"steps 必须是字符串数组，收到 {steps!r}"},
+        )
+    plan = {
+        "plan_id": plan_id,
+        "steps": list(steps),
+        "done": [],
+        "created_at": clock.now().isoformat(),
+    }
+    _state.plans[plan_id] = plan
+    return {"ok": True, "plan": plan, "replaced": True}
+
+
+@app.post("/tools/get_plan")
+async def get_plan(payload: dict[str, Any]) -> Any:
+    plan_id = str(payload.get("plan_id"))
+    plan = _state.plans.get(plan_id)
+    if plan is None:
+        return JSONResponse(
+            status_code=404, content={"error": f"计划 {plan_id!r} 不存在"}
+        )
+    return {"ok": True, "plan": dict(plan)}
+
+
+@app.post("/tools/mark_step_done")
+async def mark_step_done(payload: dict[str, Any]) -> Any:
+    plan_id = str(payload.get("plan_id"))
+    plan = _state.plans.get(plan_id)
+    if plan is None:
+        return JSONResponse(
+            status_code=404, content={"error": f"计划 {plan_id!r} 不存在"}
+        )
+    step_index = payload.get("step_index")
+    if not isinstance(step_index, int) or isinstance(step_index, bool):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"step_index 必须是整数，收到 {step_index!r}"},
+        )
+    if step_index < 0 or step_index >= len(plan["steps"]):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"step_index {step_index} 超出计划步骤范围"},
+        )
+    if step_index not in plan["done"]:
+        plan["done"].append(step_index)
+        plan["done"].sort()
+    return {"ok": True, "plan": dict(plan), "already_done": step_index in plan["done"]}
+
+
+@app.post("/tools/handoff")
+async def handoff(payload: dict[str, Any]) -> Any:
+    """把任务转交给另一个环节。有副作用：每转交一次就产生一条交接流水。
+
+    交接本身不改订单状态——它记录的是"这一段的 Agent 决定把任务交给谁"。
+    多 Agent 接力场景里，这条流水是**交接动作在边界上唯一的证据**：0 号调了
+    handoff、下一段会话由 1 号跑，报告上才能说"0 号明确转交了，不是自己放弃"。
+    重复转交（同一条任务转两次）是能构造出来的缺陷，流水里会有两条记录。
+    """
+    target_role = str(payload.get("target_role"))
+    task = str(payload.get("task", ""))
+    handoff_id = f"hd_{uuid.uuid4().hex[:12]}"
+    record = {
+        "handoff_id": handoff_id,
+        "target_role": target_role,
+        "task": task,
+        "created_at": clock.now().isoformat(),
+    }
+    _state.handoffs.append(record)
+    return {
+        "ok": True,
+        "handoff": record,
+        "total_handoffs": len(_state.handoffs),
+    }
+
+
+@app.get("/_mock/handoffs")
+async def list_handoffs() -> dict[str, Any]:
+    """交接流水。多 Agent 接力场景的证据来源。"""
+    return {"handoffs": _state.handoffs, "count": len(_state.handoffs)}
+
+
+@app.get("/_mock/shipments")
+async def list_shipments() -> dict[str, Any]:
+    """发货流水。检测器与验收脚本的证据来源（与 `/_mock/charges` 同一纪律）。"""
+    return {"shipments": _state.shipments, "count": len(_state.shipments)}
+
+
+@app.get("/_mock/notices")
+async def list_notices() -> dict[str, Any]:
+    """通知流水。"""
+    return {"notices": _state.notices, "count": len(_state.notices)}
+
+
+@app.get("/_mock/refunds")
+async def list_refunds() -> dict[str, Any]:
+    """退款流水。"""
+    return {"refunds": _state.refunds, "count": len(_state.refunds)}
 
 
 @app.get("/_mock/tools")

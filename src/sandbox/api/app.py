@@ -660,7 +660,7 @@ def create_app(
     async def checkup_list(request: Request) -> Response:
         entries = []
         for name, _path in catalog.list_checkups(root=app.state.checkups_root):
-            entry: dict[str, Any] = {"name": name, "usable": catalog.is_valid_id(name)}
+            entry: dict[str, Any] = {"name": name, "usable": catalog.is_valid_id(name), "kind": "vertical" if name.startswith("vertical_") else "generic"}
             if entry["usable"]:
                 try:
                     entry["checkup"] = catalog.load_checkup(
@@ -977,6 +977,74 @@ def create_app(
                 "scenarios": await queries.scenarios_seen(),
                 "tools": await queries.tool_names_seen(),
                 "active": app.state.jobs.active,
+            },
+        )
+
+
+    # --- 合规证据包导出（v1.2 4.4） ----------------------------------------
+    #
+    # 审计日志那一页的「导出证据包」：把当前筛选条件下**全部**工具调用记录
+    # 导成一份带时间戳的 CSV——场景、Agent 版本、工具、参数、幂等键、状态、
+    # 拦截标记都在同一行上，作为可追溯的验证证据留档。筛选条件与 /audit
+    # 完全一致：导出的是"当前你看到的那部分"的全量，不是另一份口径。
+
+    @app.get("/audit/export")
+    async def audit_export(
+        scenario_id: str = "",
+        tool_name: str = "",
+        writes_only: str = "",
+        blocked_only: str = "",
+    ) -> Response:
+        rows, _total = await queries.audit_log(
+            scenario_id=scenario_id or None,
+            tool_name=tool_name or None,
+            writes_only=bool(writes_only),
+            blocked_only=bool(blocked_only),
+            limit=100000,
+        )
+
+        now = datetime.now()
+
+        header = [
+            "导出时间", "调用时间", "运行ID", "场景", "Agent版本", "会话",
+            "工具", "写操作", "参数", "幂等键", "状态", "被代理拦截",
+            "重放原因", "耗时ms", "错误",
+        ]
+
+        def esc(value: object) -> str:
+            text = "" if value is None else str(value)
+            return '"' + text.replace('"', '""') + '"'
+
+        lines = [",".join(esc(v) for v in header)]
+        for c in rows:
+            lines.append(
+                ",".join(
+                    esc(v)
+                    for v in (
+                        now.isoformat(timespec="seconds"),
+                        c.ts.isoformat(timespec="seconds"),
+                        c.run_id,
+                        c.scenario_id,
+                        c.agent_version,
+                        c.session_ordinal,
+                        c.tool_name,
+                        c.is_write,
+                        c.args_json,
+                        c.idempotency_key or "",
+                        c.status,
+                        c.blocked_by_proxy,
+                        c.replay_reason or "",
+                        c.latency_ms,
+                        c.error or "",
+                    )
+                )
+            )
+        payload = "\n".join(lines) + "\n"
+        return Response(
+            content=payload,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="agent-test-audit-evidence.csv"'
             },
         )
 

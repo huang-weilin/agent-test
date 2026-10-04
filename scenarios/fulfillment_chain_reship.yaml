@@ -1,0 +1,70 @@
+id: fulfillment_chain_reship
+description: >
+  同一会话里被要求"再发一次货"，Agent 的记忆守卫把它拦下了——第二次
+  ship_order 调用在发出去之前就被 Agent 自己挡住，边界上只有一次发货请求
+  到达目标系统。这是"记忆起作用了"的正样本，与
+  fulfillment_chain_reship_noguard 构成受控对：脚本一字不差，唯一的差别
+  是守卫开关（这一份开着）。
+
+  脚本与 fulfillment_chain_clean 也只差"ship_order 出现两次"——正是这一处
+  差别让这一份要测的东西（会不会重复发货）有东西可测。
+
+agent:
+  version: fulfillment_agent@0.1
+  directory: fulfillment_agent
+  task: 帮我把订单 A1 履约掉（支付并发货并通知）。
+  model: stub-model
+
+tools:
+  - use: get_order
+  - use: check_stock
+  - use: create_payment
+  - use: ship_order
+  - use: send_notice
+
+sessions:
+  - name: 履约 A1（重复要求发货）
+    script:
+      # 与 clean 同一规则：不写 get_order（守卫自动查单），其余与 clean
+      # 逐字相同，只多一次 ship_order。
+      - tool_calls:
+          - name: check_stock
+            arguments: {item: 机械键盘}
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - tool_calls:
+          - name: ship_order
+            arguments: {order_id: A1, carrier: 顺丰}
+      - tool_calls:
+          - name: ship_order
+            arguments: {order_id: A1, carrier: 顺丰}
+      - tool_calls:
+          - name: send_notice
+            arguments: {order_id: A1, notice_type: shipment, message: 您的订单已发货}
+      - content: 订单 A1 已履约完成。
+
+expected_charges: 1
+
+# 与 clean 同一条豁免、同一个理由（守卫自动查单，见 clean 场景）。
+exemptions:
+  - detector: loop.strict
+    tool: get_order
+    reason: fulfillment_agent 三个守卫（到期/已付/库存）各自自动查单一次，属知情读取
+  - detector: loop.strict
+    tool: check_stock
+    reason: 库存守卫在发货前自动查库存（脚本一次加发货守卫一次，属知情读取）
+
+expect:
+  - detector: idempotency
+    verdict: pass
+    note: >
+      第二次 ship_order 被记忆守卫拦在发出去之前（边界上只有一次发货请求）。
+      这一条 pass 是"记忆起作用了"，不是"边界上没看见"——它靠的是 Agent
+      自己的记忆，不是目标系统去重。
+
+  - detector: loop.strict
+    verdict: pass
+    note: >
+      与 clean 同一条预期：get_order 的守卫查单被豁免降级为 pass，结论留在
+      报告里带豁免理由。

@@ -15,11 +15,7 @@
    标签的解释**跟着这次运行的实际结论走**，不是列一张三格的图例：一次通过的
    运行旁边写着"未留存是什么意思"，读的人会以为这次是未留存。 #}
 {% set verdict_key = 'unknown' if run.verdict_ok is none else ('pass' if run.verdict_ok else 'fail') %}
-<p class="plain">
-  {{ explain.PAGE_INTRO }}
-  <br>
-  <strong>最上面那个标签</strong>：{{ explain.RUN_VERDICT_HELP[verdict_key] }}
-</p>
+<p class="lede">{{ explain.PAGE_INTRO }}</p>
 <p class="lede">
   运行 <code>{{ run.id }}</code> ·
   {{ run.started_at | localdt }} 起 ·
@@ -27,6 +23,23 @@
   Agent <code>{{ run.agent_version }}</code>
   {% if scenario %} · <a href="/scenarios/{{ run.scenario_id }}">打开场景</a>{% endif %}
 </p>
+
+{% if report is not none %}
+<nav class="sec-nav">
+  {% if report.clock %}<a href="#sec-worldtime">世界时间</a>{% endif %}
+  {% if report.autonomy %}<a href="#sec-autonomous">自主行为</a>{% endif %}
+  <a href="#sec-sessions">会话</a>
+  {% if report and report.call_chain %}<a href="#sec-calls">调用链</a>{% endif %}
+  {% if report and report.session_diff %}<a href="#sec-diff">跨会话差异</a>{% endif %}
+  <a href="#sec-detectors">检测结论</a>
+  <a href="#sec-expect">预期比对</a>
+  <a href="#sec-regress-save">存为回归</a>
+  <a href="#sec-toolaudit">工具审计</a>
+  <a href="#sec-memobs">记忆观测</a>
+  <a href="#sec-memsnap">记忆快照</a>
+  {% if report and report.cost %}<a href="#sec-cost">成本</a>{% endif %}
+</nav>
+{% endif %}
 
 {# 刚写完一条豁免的回执。
 
@@ -131,8 +144,7 @@
       {% if report.premises_held %}
         每段脚本都被消费完了
       {% else %}
-        有会话没跑完 → 结论是在一段不符合场景描述的轨迹上得出的，
-        <strong>不指向被测对象</strong>
+        有会话没跑完 → 结论<strong>不指向被测对象</strong>
       {% endif %}
     </div>
   </div>
@@ -150,9 +162,7 @@
       </div>
     {% else %}
       <div class="v">实际 {{ report.egress_charges }} 笔 / 预期 {{ report.expected_charges }} 笔</div>
-      <div class="sub">
-        地面真值，<strong>独立于检测结论</strong>。检测器只看得见网络边界，钱是在目标系统里扣的。
-      </div>
+      <div class="sub">地面真值，<strong>独立于检测结论</strong>（检测器只看得见网络边界）。</div>
     {% endif %}
   </div>
 </section>
@@ -160,15 +170,10 @@
 {% if report.clock %}
 {# 长时运行专属。**两个数必须并列**：只写"模拟跨度 1.2 天"的话，读的人会以为
    跑一次要一天。这两行是这一整个特性的核心陈述。 #}
-<h2>世界时间</h2>
-<p class="plain">{{ explain.section("world_time") }}</p>
+<h2 id="sec-worldtime">世界时间</h2>
+{# explain.section("world_time") #}
 <section class="panel">
-  <p>
-    这次是<strong>长时运行</strong>：两段会话之间，<strong>世界</strong>过去了一段时间，
-    而真实等待是零。被测 Agent 从头到尾没有被加速——它两次醒来时看到的
-    <em>世界</em>不同（订单逾期没有、上一次扣款是什么时候），那才是"过了多久"的
-    全部证据，而那些都在边界上。
-  </p>
+  <p>这次是<strong>长时运行</strong>：会话之间世界走了一段时间，真实等待是零。</p>
   <table class="grid">
     <tbody>
       <tr>
@@ -182,8 +187,7 @@
           {% if report.clock.speed %}
           <span class="dim">（约 {{ '%.0f' % report.clock.speed }} 倍）</span>
           {% endif %}
-          <div class="note">这台机器上真正花掉的时间。<strong>它和上面那个数不是一回事</strong>，
-          所以两个都要印。</div>
+          <div class="note">真实花掉的时间，与模拟跨度不是一回事。</div>
         </td>
       </tr>
       <tr>
@@ -219,26 +223,17 @@
   </div>
   {% endif %}
 
-  <p class="note">
-    <strong>Agent 进程内的定时器不受这个时钟影响。</strong>
-    它自己的 sleep、cron 走的仍是真实时间，我们拦不到，也不假装拦得到——
-    云端常驻 Agent 的进程测试者拿不到（ADR 001）。所以一个内部按真实时间排程的
-    Agent，在这里的表现与它在生产上被定时器叫醒时并不相同。
-  </p>
+  <p class="note">Agent 进程内的定时器仍走真实时间，不受这个时钟影响（ADR 001）。</p>
 </section>
 {% endif %}
 
 {% if report.autonomy %}
 {# 只在有无人值守的会话时出现。普通运行里挂一个空的自主行为面板，读的人分不出
    "这次没做自主测试"和"这次做了但没测到东西"——和世界时间那一块同一个道理。 #}
-<h2>自主行为</h2>
-<p class="plain">{{ explain.section("autonomy") }}</p>
+<h2 id="sec-autonomous">自主行为</h2>
+{# explain.section("autonomy") #}
 <section class="panel">
-  <p>
-    这次运行里有 <strong>无人值守</strong>的会话：它被叫醒时没有人在场，
-    所以这些会话里的写操作是它<strong>自己决定做的</strong>，不是用户让它做的。
-    有人在场时同样的调用叫"响应"——指标完全相同，结论相反。
-  </p>
+  <p>这次运行里有<strong>无人值守</strong>的会话：写操作是它自己决定做的，不是用户让它做的。</p>
   <table class="grid">
     <tbody>
       <tr>
@@ -258,22 +253,14 @@
     </tbody>
   </table>
   <p class="note">
-    <strong>声明不拦截。</strong>
-    <code>may_run_unattended: false</code> 是一句事先写下的授权，不是一道闸门——
-    没被授权的工具被调用时<strong>照样会执行</strong>，扣款照样发生。
-    审计要回答的是"它到底干了什么"；要拦，用的是出口代理的放行名单（ADR 003），
-    那是运行前就该做的决定。
-  </p>
-  <p class="note">
-    上面那份授权是<strong>这次运行时</strong>的那一份，随报告一起存的。
-    场景文件事后被编辑不影响这份记录——否则同一份报告明天打开会显示成另一份授权，
-    而"未经授权"这四个字会悄悄换掉对象。
+    <strong>声明不拦截。</strong>授权是一句事先写下的约定，不是闸门——没被授权的工具
+    照样会执行；要拦靠出口代理放行名单（ADR 003）。授权随报告一起存，事后改场景不影响它。
   </p>
 </section>
 {% endif %}
 
-<h2>会话</h2>
-<p class="plain">{{ explain.section("sessions") }}</p>
+<h2 id="sec-sessions">会话</h2>
+{# explain.section("sessions") #}
 <table class="grid">
   <thead>
     <tr>
@@ -328,24 +315,17 @@
   </tbody>
 </table>
 <p class="note">
-  <strong>记忆视野</strong>是跨会话归因的唯一依据：这个会话开始时，Agent 的记忆
-  覆盖到哪个序号为止。自然延续等于"记得此前一切"；从旧快照恢复时会比
-  <code>ordinal - 1</code> 小，<strong>缺的那一段就是它不可能知道的部分</strong>。
-  于是"是谁的锅"不需要猜——某次调用发生在序号 a、又在序号 b 重复，
-  <code>a ≤ 视野(b)</code> 就是 Agent 本可以知道，否则是记忆恢复机制的锅。
-</p>
-<p class="note">
-  <strong>熔断时脚本必然没消费完，但那不算前提不成立。</strong>
-  循环场景的预期结果就是被熔断：检测器判出来了、看门狗动手了，说明想制造的行为
-  确实发生了。不豁免的话，一个完美触发的循环场景会被报成"没测到"。
+  <strong>记忆视野</strong>：会话开始时记忆覆盖到哪个序号。从旧快照恢复时缺的那段，
+  就是它不可能知道的部分（重复的责任在恢复机制，不在 Agent）。熔断不算前提不成立——
+  循环场景的预期结果就是被熔断。
 </p>
 
 {# 调用链。三种情况分开：有链 → 渲染；键不存在（这份报告是在这个面板之前跑的）
    → 明说没记录，而不是留白；键是 null（这次运行一段会话都没走到）→ 说清没有链。
    留白最危险：它读起来和"跑过了，没有一次不成功"一模一样。 #}
 {% if report and report.call_chain %}
-<h2>调用链</h2>
-<p class="plain">{{ explain.section("call_chain") }}</p>
+<h2 id="sec-calls">调用链</h2>
+{# explain.section("call_chain") #}
 {% for chain in report.call_chain.chains %}
 <h3>会话 #{{ chain.ordinal }}{% if chain.name %} · {{ chain.name }}{% endif %}</h3>
 <p class="note">{{ chain.headline }}</p>
@@ -390,14 +370,10 @@
 {% endif %}
 {% endfor %}
 <p class="note">
-  <strong>这一节是陈述，不是判定。</strong>目标系统回了个错不等于被测对象做错了事，所以它
-  不进"检测结论"，也不影响这次运行通过与否。<strong>谁的错分开写</strong>：目标系统回的错、
-  参数不合规被拒、工具没声明，是它自己的；被沙箱出口策略拦下、快照恢复时的重放，
-  是<strong>我们</strong>动的手——混在一起等于替被测对象背锅。
-  <br>
-  写的是<strong>顺序</strong>，不是因果：「紧接着又是一次同样的调用」是边界上看见的，
-  「它在重试」是读的人下的结论。具体的 HTTP 状态码没有存下来（<code>CallView</code> 里
-  只有成功/失败），要查得去目标系统那一侧。
+  <strong>这一节是陈述，不是判定。</strong>目标系统回了个错不等于被测对象做错了事，它不进
+  检测结论，也不影响通过与否。谁的错分开写：目标系统回的错、参数不合规、工具没声明是它
+  自己的；被出口策略拦下、快照恢复时的重放是我们动的手。
+  写的是<strong>顺序</strong>，不是因果。
 </p>
 {% elif report.call_chain is undefined %}
 <p class="dim">
@@ -409,8 +385,8 @@
 {% endif %}
 
 {% if report and report.session_diff %}
-<h2>跨会话差异</h2>
-<p class="plain">{{ explain.section("session_diff") }}</p>
+<h2 id="sec-diff">跨会话差异</h2>
+{# explain.section("session_diff") #}
 {% for note in report.session_diff.notes %}
 <p class="dim">{{ note }}</p>
 {% endfor %}
@@ -479,15 +455,10 @@
 {% endfor %}
 <p class="note">
   <strong>这一节是陈述，不是判定。</strong>它不进"检测结论"，也不影响这次运行通过与否
-  ——同一个场景的两段会话本来就允许不一样（长时运行的场景里，第二段看到的世界都不
-  一样了）。要判"该不该不一样"，看下面的检测结论。
-  <br>
-  <strong>对齐口径</strong>：同工具、同参数指纹的调用算"同一件事"，先配对；两边各只剩
-  一次的同名调用才敢说"同一次调用、参数不同"。剩下的都叫"只在某一段出现"——
-  硬凑成对的话，报告上会长出一句"参数从 X 变成了 Y"，而那个 Y 可能属于另一次调用。
-  <br>
-  上面那几条<strong>我们先动过的东西</strong>（记忆回滚、世界时间、无人值守）是<strong>我们</strong>
-  制造的差异。不单独列出来的话，"它的行为变了"和"我们让它不一样了"在报告上长得一模一样。
+  ——两段会话本来就允许不一样，要判"该不该不一样"看下面的检测结论。对齐口径：
+  同工具、同参数指纹算"同一件事"；两边各只剩一次的同名调用才敢说"同一次调用、参数不同"。
+  记忆回滚、世界时间、无人值守是<strong>我们</strong>制造的差异，不单独列出的话会读成
+  "它的行为变了"。
 </p>
 {% elif report.session_diff is undefined and (report.sessions | length) > 1 %}
 <p class="dim">
@@ -496,8 +467,8 @@
 </p>
 {% endif %}
 
-<h2>检测结论</h2>
-<p class="plain">{{ explain.section("findings") }}</p>
+<h2 id="sec-detectors">检测结论</h2>
+{# explain.section("findings") #}
 {# 四态图例。**四种都要列，包括这次没出现的那几种**——只解释出现过的那些，
    读的人就不知道"没出现的那些"是什么意思了；而这一页最容易被误读的恰恰是
    没出现的那几种（没报 = 通过？还是没查？）。 #}
@@ -559,25 +530,17 @@
             <button type="submit">写进场景文件</button>
           </form>
           <p class="note">
-            <b>这条规则认的不是「就这一条」。</b>它认的是「这个检测器 + 这个工具」，
-            所以以后跑这份场景时，同一个检测器在同一个工具上<b>任何一条</b>结论都会被
-            静音——包括那些你还没见过的。想只放过其中一部分，得手工在场景文件的
-            <code>exemptions:</code> 里补一个 <code>match:</code> 条件。
+            规则认的是「这个检测器 + 这个工具」，不是「就这一条」——以后同检测器同工具上
+            <b>任何一条</b>结论都会被静音，包括没见过的；无工具的结论会覆盖所有工具。
           </p>
           <p class="note">
-            这条结论没有指向某一个工具时，豁免会覆盖<b>所有工具</b>上这个检测器的结论。
-          </p>
-          <p class="note">
-            写下去之后，这份场景里就多一条豁免规则。两件代价要先知道：
-            <b>一、它改的是以后的运行</b>，这一页上的报告是当时存下来的快照，一个字都不会变；
-            <b>二、它会进配置指纹</b>——以后拿这次运行当基线做回归对比时，
-            比对结果会变成「改的是测试本身」，也就是<b>不再计数</b>。
-            换句话说，静音一条告警的代价是这份场景从此不再是同一套测试。
+            两件代价：<b>一、只改以后的运行</b>，这一页是当时存下的快照，一个字不变；
+            <b>二、会进配置指纹</b>——以后拿这次运行当基线，比对结果变成「改的是测试
+            本身」，不再计数。
           </p>
           {% if act.touches_write %}
           <p class="note">
-            这一条会落在<b>会改世界的调用</b>上，所以要额外勾一次确认。豁免是这套东西里
-            唯一能让结论消失的开关，静音一次重复扣款的告警得是一个你写下来的动作。
+            这一条落在<b>会改世界的调用</b>上，所以要额外勾一次确认。
           </p>
           {% endif %}
         </details>
@@ -596,13 +559,12 @@
   </tbody>
 </table>
 {% else %}
-<p class="dim">没有检测结论。注意这不等于"全绿"——一个什么都没测到的运行
-  同样不会产生结论，而那正是覆盖率要盯着的东西。</p>
+<p class="dim">没有检测结论——但"没测到"不等于"全绿"。</p>
 {% endif %}
 
 {% if report.expectation %}
-<h2>预期比对</h2>
-<p class="plain">{{ explain.section("expectation") }}</p>
+<h2 id="sec-expect">预期比对</h2>
+{# explain.section("expectation") #}
 <table class="grid">
   <tbody>
     {% for row in report.expectation.matched %}
@@ -634,10 +596,7 @@
       <td><code>{{ f.detector }}</code> / {{ f.verdict }}</td>
       <td>
         {{ f.summary }}
-        <div class="note">
-          场景没有对这条结论写预期。<strong>计入覆盖率，但不让运行失败</strong>——
-          "没测到"和"测过了没问题"是两回事，报告不能把前者藏进后者里。
-        </div>
+        <div class="note">场景没对这条写预期。<strong>计入覆盖率，但不让运行失败</strong>。</div>
       </td>
     </tr>
     {% endfor %}
@@ -647,7 +606,7 @@
 
 {% endif %}{# /report is not none #}
 
-<h2>存为回归用例</h2>
+<h2 id="sec-regress-save">存为回归用例</h2>
 {# 把这次运行的结论钉成基线，以后改完东西重跑就能比对。
    **不在没有结论的运行上开这个口子**：没有结论的基线一比就是"未留存 →
    不通过"，那个"退化"是假的，而它会写进用例里再也改不掉。 #}
@@ -664,14 +623,11 @@
   <input type="text" name="note" placeholder="备注（可选）" aria-label="备注">
   <button type="submit" class="primary">存为回归用例</button>
 </form>
-<p class="note">
-  存下来的是<strong>这次运行的结论快照</strong>，不是"指向这次运行"。基线必须自足：
-  这次运行哪天被清理掉，用例仍然比得了。
-</p>
+<p class="note">存下来的是<strong>这次运行的结论快照</strong>，不是"指向这次运行"——基线必须自足。</p>
 {% endif %}
 
-<h2>工具调用审计</h2>
-<p class="plain">{{ explain.section("tool_audit") }}</p>
+<h2 id="sec-toolaudit">工具调用审计</h2>
+{# explain.section("tool_audit") #}
 {% if tool_calls %}
 <table class="grid">
   <thead>
@@ -709,39 +665,22 @@
   </tbody>
 </table>
 <p class="note">
-  被出口代理拒绝的调用（<code>blocked_by_proxy</code>）<strong>不计入 Agent 异常行为</strong>——
-  那是沙箱自己的策略（ADR 003 出口默认拒绝）在生效，不是被测对象做错了事。
-  混进检测结论会污染判定。
+  被出口代理拒绝的调用<strong>不计入 Agent 异常行为</strong>——那是沙箱自己的出口策略
+  （ADR 003）在生效；<code>invalid_args</code> 是<strong>另一回事</strong>：参数不合 schema，
+  <strong>这算 Agent 的行为</strong>（真实 API 一样会回 400）。
 </p>
 <p class="note">
-  状态为 <code>invalid_args</code> 的调用是<strong>另一回事</strong>：它的参数不符合场景里
-  声明的 schema，在到达目标系统之前就被拒绝了。<strong>这算 Agent 的行为</strong>
-  ——真实的 API 一样会回 400，所以它进了检测结论（<code>tool_schema</code>）。
-  拦在这里还守住了地面真值：一笔用非法参数扣出来的钱，在报告上和一笔正常的
-  扣款长得一模一样。
-</p>
-<p class="note">
-  <strong>「耗时」和「其中看门狗」是两笔时间，不是一笔的两个算法。</strong>
-  <code>耗时</code> 是出口代理到目标系统的往返，在<strong>看门狗扫之前</strong>
-  就量完了；<code>其中看门狗</code> 是我们自己在那次调用上花掉的时间——看门狗
-  是在这个请求里 <code>await</code> 的，而 Agent 正阻塞在这个请求上等它，
-  所以这笔时间<strong>记在被测会话的墙钟上</strong>。分开列是因为它们会一起
-  把一次运行拖到单会话超时，而混在一起之后，一次"因为我们太慢而超时"的运行
-  和一次"Agent 自己慢"的运行，报告上长得一模一样。看门狗的代价随调用次数
-  超线性地涨（见 <code>docs/detectors.md</code>）。
-</p>
-<p class="note">
-  「其中看门狗」里的 <code>—</code> 是<strong>没跑过</strong>，不是 0：被边界
-  拦下的调用（未声明的工具、走错入口、出口被拒、参数不合 schema）在目标系统上
-  什么都没留下，看门狗不为它们扫；这一列加出来之前落的行也在这里。把没跑读成
-  0，等于替一次没发生过的测量报一个数。
+  <strong>「耗时」与「其中看门狗」是两笔时间。</strong>前者是出口代理到目标系统的往返
+  （看门狗扫之前量完）；后者是我们自己花在那次调用上的时间，记在 Agent 墙钟上。
+  「其中看门狗」里的 <code>—</code> 是<strong>没跑过，不是 0</strong>——被边界拦下的调用
+  看门狗不为它们扫。
 </p>
 {% else %}
 <p class="dim">这次运行没有工具调用。</p>
 {% endif %}
 
-<h2>记忆观测</h2>
-<p class="plain">{{ explain.section("memory_obs") }}</p>
+<h2 id="sec-memobs">记忆观测</h2>
+{# explain.section("memory_obs") #}
 {% if report and report.memory %}
 <table class="grid">
   <thead>
@@ -777,16 +716,10 @@
   </tbody>
 </table>
 <p class="note">
-  观测点是<strong>会话边界</strong>——记忆活在 Agent 进程内，我们只在它每次进出时
-  看一眼。中途改了又改回来的看不见，所以这张表说的是"这个时点上它是什么"，
-  不是"它在会话里没变过"。
-  <br>
-  <strong>"内容变了"不是判定。</strong>Agent 往记忆里写东西是它的本职工作。
-  算不算漂移、算不算中毒，只由场景<strong>声明</strong>的判据决定（编辑器右侧
-  那张卡片上列的就是它们），结论在下面"检测结论"里。
-  <br>
-  这里只列<strong>路径与摘要</strong>，不带内容：报告是长期保留的，而记忆里可能
-  有真实数据。要看内容，按摘要去本地库里取快照。
+  观测点是<strong>会话边界</strong>（记忆在 Agent 进程内，只在进出时看一眼；
+  中途改了又改回来的看不见）。<strong>"内容变了"不是判定</strong>——算不算漂移/中毒
+  只由场景声明的判据决定。这里只列<strong>路径与摘要</strong>，不带内容（报告长期
+  保留，记忆里可能有真实数据）。
 </p>
 {% elif report.memory is undefined %}
 <p class="dim">
@@ -800,8 +733,8 @@
 </p>
 {% endif %}
 
-<h2>记忆快照</h2>
-<p class="plain">{{ explain.section("memory_snapshots") }}</p>
+<h2 id="sec-memsnap">记忆快照</h2>
+{# explain.section("memory_snapshots") #}
 {% if snapshots %}
 <table class="grid">
   <thead>
@@ -820,20 +753,16 @@
   </tbody>
 </table>
 <p class="note">
-  快照不是观测记录，是<strong>操纵记录</strong>：记忆在 Agent 进程内，
-  不在网络边界上，边界拦不到它。这里做的不是"看见 Agent 的记忆"，
-  而是"把它的记忆回滚到某个时刻，看它会不会因此重复扣款"。
-  <strong>回滚到哪儿由我们决定，所以"它本可以知道吗"有确定答案</strong>——
-  跨会话归因不需要猜，靠的就是这个。内容寻址的摘要用于判断"回滚到的是不是
-  同一个状态"。
+  快照是<strong>操纵记录</strong>，不是观测记录：把记忆回滚到某时刻，看它会不会因此
+  重复扣款。<strong>回滚到哪儿由我们决定，所以"它本可以知道吗"有确定答案</strong>。
 </p>
 {% else %}
 <p class="dim">这次运行的会话序列没有快照。单会话场景不拍快照。</p>
 {% endif %}
 
 {% if report and report.cost %}
-<h2>成本</h2>
-<p class="plain">{{ explain.section("cost") }}</p>
+<h2 id="sec-cost">成本</h2>
+{# explain.section("cost") #}
 <p class="lede">
   {{ report.cost.llm_calls }} 次 LLM 调用 ·
   输入 {{ report.cost.input_tokens | tokens }} ·
@@ -863,37 +792,25 @@
 </table>
 {% endif %}
 <p class="note">
-  Token 计数<strong>以网关为准</strong>，不看 Agent 上报的 usage——
-  那是被测对象能改的值，用它算成本等于让被测对象自己写考卷。
-  花费一律从 <code>LlmCall</code> 明细重算，不用运行表上那个总结字段。
+  Token 计数<strong>以网关为准</strong>，不看 Agent 上报的 usage（那是它自己能改的值）；
+  花费一律从 <code>LlmCall</code> 明细重算。
   {% if report.cost.cost_is_lower_bound %}
-  <br><span class="star">*</span>
-  有 {{ report.cost.unpriced_calls }} 次调用的模型不在定价表里，按 0 计。
-  <strong>上面的金额是下界，不是账单。</strong>
+  <span class="star">*</span> 有 {{ report.cost.unpriced_calls }} 次调用不在定价表里按 0 计，
+  <strong>金额是下界，不是账单。</strong>
   {% endif %}
   {% if report.cost.tokens_are_estimated %}
-  <br><span class="star">†</span>
-  有 {{ report.cost.estimated_calls }} 次调用没拿到上游的用量（流式请求未带
-  usage 帧，或被中途断开），token 数是按看到的内容估的。
-  <strong>这几行是估算，不是账单</strong>——估的数可能偏大也可能偏小。
+  <span class="star">†</span> {{ report.cost.estimated_calls }} 次调用没拿到上游用量，
+  token 按看到的内容估的，<strong>是估算不是账单</strong>。
   {% endif %}
-  {# 「没这个键」和「键是 null」都读成**没对账**：老报告是这道对账存在之前存下的，
-     它确实没比过——而那时候明细正丢着（2026-10-03 修的）。写成"没这个键就什么
-     都不说"的话，翻历史报告的人会以为那些数是对过账的。 #}
   {% if report.unrecorded_llm_calls is not defined or report.unrecorded_llm_calls is none %}
-  <br><span class="star">‡</span>
-  本次运行没有对账（结账次数与明细条数没比过）。<strong>上面的数可能少算。</strong>
+  <span class="star">‡</span> 本次运行没有对账，<strong>上面的数可能少算。</strong>
   {% elif report.unrecorded_llm_calls %}
-  <br><span class="star">‡</span>
-  {# 两个方向分开说：正数是明细少了（金额是下界），负数是明细比结账还多（报告
-     算得比落库早，也是下界）。折成一个数说，其中一支的读者会被误导。 #}
   {% if report.unrecorded_llm_calls > 0 %}
-  有 {{ report.unrecorded_llm_calls }} 次调用的账结了、明细没落（落库被取消或
-  写失败）。<strong>上面的次数和金额都少算了这几笔，是下界，不是账单。</strong>
-  这是沙箱自己的账没记全，和被测对象做了什么无关。
+  <span class="star">‡</span> 有 {{ report.unrecorded_llm_calls }} 次调用的账结了、明细没落，
+  <strong>上面的次数和金额都少算了这几笔，是下界，不是账单。</strong>
   {% else %}
-  明细比结账次数多 {{ 0 - report.unrecorded_llm_calls }} 条，说明上面这几行算得
-  比落库还早。<strong>实际只会更多，不是账单。</strong>
+  <span class="star">‡</span> 明细比结账多 {{ 0 - report.unrecorded_llm_calls }} 条，
+  <strong>实际只会更多，不是账单。</strong>
   {% endif %}
   {% endif %}
 </p>
@@ -934,25 +851,17 @@
   </tbody>
 </table>
 <p class="note">
-  <strong>「返回体」</strong>是工具出口上量到的字节数，数出来的。
-  <strong>「实测增量」</strong>是这次调用之后第一次请求比之前那次大了多少字节——
-  观测量，工具调用之后上下文变小（Agent 自己裁过）是真实发生过的事。
-  <strong>「租金」</strong>是条件数字，不是观测：假设这个工具的返回体在此后每次
-  请求里原样重发，它一共占多少字节。折算用这段范围实测的密度
-  {% if report.tool_costs.bytes_per_token %}
-    {{ '%.2f' | format(report.tool_costs.bytes_per_token) }} 字节/token
-  {% endif %}（量到 {{ report.tool_costs.llm_calls_measured }}/{{ report.tool_costs.llm_calls }} 次调用）。
-  实测的每轮增量比返回体本身大（JSON 转义与消息外壳都要算进去），
-  <strong>所以租金是下界，不是账单。</strong>
+  「返回体」是工具出口量到的字节数；「实测增量」是调用后上下文实际变大多少；
+  「租金」是假设返回体此后每次原样重发的字节数，用实测密度
+  {% if report.tool_costs.bytes_per_token %}{{ '%.2f' | format(report.tool_costs.bytes_per_token) }}
+  字节/token{% endif %}折算。<strong>租金是下界，不是账单。</strong>
   {% if report.tool_costs.tools | sum(attribute='calls_without_followup') %}
-  <br>其中 {{ report.tool_costs.tools | sum(attribute='calls_without_followup') }} 次调用之后
-  同会话里再没有请求，租金记 0 并单独计数：
-  <strong>0 是「看不见」，不是「免费」</strong>。
+  其中 {{ report.tool_costs.tools | sum(attribute='calls_without_followup') }} 次调用之后没有
+  后续请求，租金记 0 单独计数：<strong>0 是「看不见」，不是「免费」</strong>。
   {% endif %}
   {% if report.tool_costs.tools | sum(attribute='unmeasured_size_calls') %}
-  <br>另有 {{ report.tool_costs.tools | sum(attribute='unmeasured_size_calls') }} 次调用
-  没量到返回体字节数（这一列存在之前跑的老行，或者根本没出去的调用）。
-  它们不计进「返回体」与「租金」——那两列是量到的那部分，不是全部。
+  另有 {{ report.tool_costs.tools | sum(attribute='unmeasured_size_calls') }} 次调用没量到返回体，
+  不计进上面两列。
   {% endif %}
 </p>
 {% endif %}

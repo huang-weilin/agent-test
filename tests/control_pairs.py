@@ -342,6 +342,57 @@ PAIRS: tuple[Controlled, ...] = (
             "script[n].agent",
         ),
     ),
+    Controlled(
+        scenarios=(
+            "fulfillment_chain_clean",
+            "fulfillment_chain_reship",
+            "fulfillment_chain_reship_noguard",
+        ),
+        claim=(
+            "同一份履约脚本的三个变体：正常发货一次 / 被要求发两次（守卫开，拦下）/ "
+            "被要求发两次（守卫关，真重复）。变量只有两处——脚本里多一次 ship_order、"
+            "以及记忆与已付两道守卫的开关（发货后订单状态是 shipped 不是 paid，"
+            "只关记忆守卫会被已付守卫兜底拦下，两道都关才发得出去）。"
+        ),
+        differs_in=(
+            "agent.env",
+            "agent.env.DEMO_AGENT_MEMORY_GUARD",
+            "agent.env.DEMO_AGENT_SHIP_GUARD",
+            "script[n].script[n].content",
+            "script[n].script[n].tool_calls[n].name",
+            "script[n].script[n].tool_calls[n].arguments.order_id",
+            "script[n].script[n].tool_calls[n].arguments.carrier",
+            "script[n].script[n].tool_calls[n].arguments.notice_type",
+            "script[n].script[n].tool_calls[n].arguments.message",
+        ),
+    ),
+    Controlled(
+        scenarios=("handoff_chain_clean", "handoff_chain_reship"),
+        claim=(
+            "多 Agent 接力：唯一的变量是 0 号（router）把同一条任务转交了一次还是两次"
+            "——交接流水 1 条 vs 2 条，幂等 fail 只出现在转交侧，1 号那侧一字不差。"
+        ),
+        differs_in=(
+            "script[n].script[n].content",
+            "script[n].script[n].tool_calls[n].name",
+            "script[n].script[n].tool_calls[n].arguments.target_role",
+            "script[n].script[n].tool_calls[n].arguments.task",
+        ),
+    ),
+    Controlled(
+        scenarios=("planner_chain_clean", "planner_plan_recreated"),
+        claim=(
+            "规划-执行：唯一的变量是会话 0 创建了几次计划（一次 vs 覆盖式两次，"
+            "计划板上只剩第二份）——以及随之的步骤下标与汇报文本（第二份计划只有一步）。"
+        ),
+        differs_in=(
+            "script[n].script[n].content",
+            "script[n].script[n].tool_calls[n].name",
+            "script[n].script[n].tool_calls[n].arguments.plan_id",
+            "script[n].script[n].tool_calls[n].arguments.steps[n]",
+            "script[n].script[n].tool_calls[n].arguments.step_index",
+        ),
+    ),
 )
 
 #: 没进任何对照的场景，以及为什么。**每一份场景都要么在账本里、要么在这里**——

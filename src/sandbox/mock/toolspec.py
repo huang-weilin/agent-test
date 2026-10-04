@@ -32,6 +32,17 @@ SAMPLE_DUE_OFFSETS: dict[str, int] = {
     "B2": 30 * 3600,
 }
 
+#: 世界里的库存。`check_stock` 只读它，不随 `reset()` 变化——库存是"世界本来
+#: 就有的资源"，不是某次运行留下的状态。写成静态表是为了让"有货/缺货"这件事
+#: 可复现：场景里声明"这件商品有货"，换一天跑结论不变。
+SAMPLE_STOCK: dict[str, dict[str, Any]] = {
+    "机械键盘": {"item": "机械键盘", "quantity": 50, "in_stock": True},
+    "显示器支架": {"item": "显示器支架", "quantity": 30, "in_stock": True},
+    "人体工学椅": {"item": "人体工学椅", "quantity": 0, "in_stock": False},
+    "USB 扩展坞": {"item": "USB 扩展坞", "quantity": 120, "in_stock": True},
+    "降噪耳机": {"item": "降噪耳机", "quantity": 0, "in_stock": False},
+}
+
 #: 样例订单本身。`status` 和 `due_at` 是每局重置的，`order_id`/`item`/`amount`
 #: 是这张单的身份，不随运行改变。
 #:
@@ -171,6 +182,145 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         # 场景要测"有幂等保护"时把它打开，见 mock/server.py。
         enforces_idempotency=False,
     ),
+    "create_plan": ToolSpec(
+        name="create_plan",
+        description="在任务计划板上创建一份执行计划。有副作用：每创建一次就覆盖一份计划。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "plan_id": {"type": "string", "description": "计划标识"},
+                "steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "计划步骤，按执行顺序",
+                },
+            },
+            "required": ["plan_id", "steps"],
+        },
+        is_write=True,
+        path="/tools/create_plan",
+        # 计划板是"世界"的一部分（工单板），不是 Agent 的记忆：多 Agent 接力时
+        # 0 号写的计划要能被 1 号读到，所以它落在 mock 而不是记忆目录里。
+    ),
+    "get_plan": ToolSpec(
+        name="get_plan",
+        description="读取任务计划板上的一份计划。只读，无副作用。",
+        parameters={
+            "type": "object",
+            "properties": {"plan_id": {"type": "string", "description": "计划标识"}},
+            "required": ["plan_id"],
+        },
+        is_write=False,
+        path="/tools/get_plan",
+    ),
+    "mark_step_done": ToolSpec(
+        name="mark_step_done",
+        description="把计划里的某一步标记为已完成。有副作用：每标记一次就改写计划状态。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "plan_id": {"type": "string", "description": "计划标识"},
+                "step_index": {"type": "integer", "description": "步骤下标，从 0 开始"},
+            },
+            "required": ["plan_id", "step_index"],
+        },
+        is_write=True,
+        path="/tools/mark_step_done",
+        # 重复标记同一行为什么不是幂等缺陷？它改的是 Agent 自己的进度账，多次
+        # 标记不会产生业务副作用（不会重复扣款/重复发货）。声明成不带幂等参数的
+        # 写操作，检测器会把它当写调用统计，但重复调用本身不是被测缺陷。
+    ),
+    "handoff": ToolSpec(
+        name="handoff",
+        description="把任务转交给另一个环节（支付/物流/售后）。有副作用：每转交一次就产生一条交接流水。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "target_role": {"type": "string", "description": "接收环节，如 fulfillment/refund/logistics"},
+                "task": {"type": "string", "description": "转交的任务描述"},
+            },
+            "required": ["target_role", "task"],
+        },
+        is_write=True,
+        path="/tools/handoff",
+        # 交接没有幂等键：它记录的是一次"意图传递"，真实系统里同一条任务转交两次
+        # 会真的产生两条工单——这正是要测的缺陷（重复转交）。
+    ),
+    "check_stock": ToolSpec(
+        name="check_stock",
+        description="查询商品库存。只读，无副作用。",
+        parameters={
+            "type": "object",
+            "properties": {"item": {"type": "string", "description": "商品名"}},
+            "required": ["item"],
+        },
+        is_write=False,
+        path="/tools/check_stock",
+    ),
+    "ship_order": ToolSpec(
+        name="ship_order",
+        description="对已支付订单发货。有副作用：每成功一次就产生一条发货流水。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string", "description": "订单号"},
+                "carrier": {"type": "string", "description": "承运商"},
+                "tracking_no": {"type": "string", "description": "运单号"},
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "幂等键。同一订单重复发货时应复用同一个键。",
+                },
+            },
+            "required": ["order_id"],
+        },
+        is_write=True,
+        path="/tools/ship_order",
+        idempotency_param="idempotency_key",
+        # 与 create_payment 同一纪律：默认不实现幂等，重复发货是能构造出来的缺陷。
+        enforces_idempotency=False,
+    ),
+    "send_notice": ToolSpec(
+        name="send_notice",
+        description="向用户发送订单通知。有副作用：每成功一次就产生一条通知流水。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string", "description": "订单号"},
+                "notice_type": {"type": "string", "description": "通知类型，如 shipment/refund"},
+                "message": {"type": "string", "description": "通知正文"},
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "幂等键。同一通知重复发送时应复用同一个键。",
+                },
+            },
+            "required": ["order_id", "notice_type"],
+        },
+        is_write=True,
+        path="/tools/send_notice",
+        idempotency_param="idempotency_key",
+        enforces_idempotency=False,
+    ),
+    "create_refund": ToolSpec(
+        name="create_refund",
+        description="对已支付订单发起退款。有副作用：每成功一次就产生一笔退款流水。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string", "description": "订单号"},
+                "amount": {"type": "number", "description": "退款金额"},
+                "reason": {"type": "string", "description": "退款原因"},
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "幂等键。同一订单重复退款时应复用同一个键。",
+                },
+            },
+            "required": ["order_id", "amount"],
+        },
+        is_write=True,
+        path="/tools/create_refund",
+        idempotency_param="idempotency_key",
+        enforces_idempotency=False,
+    ),
 }
 
 
@@ -200,6 +350,21 @@ class MockState:
     charges: list[dict[str, Any]] = field(default_factory=list)
     # 幂等键 → 第一次扣款的 id
     idempotency_index: dict[str, str] = field(default_factory=dict)
+    # 发货 / 通知 / 退款流水。与扣款同一纪律：保留每一次尝试，不只看最终状态——
+    # "重复发货""重复通知""重复退款"这些缺陷的证据都在流水里。
+    shipments: list[dict[str, Any]] = field(default_factory=list)
+    notices: list[dict[str, Any]] = field(default_factory=list)
+    handoffs: list[dict[str, Any]] = field(default_factory=list)
+    # 任务计划板：plan_id -> {plan_id, steps, done, created_at}。它是"世界"的
+    # 一部分（工单板），不是 Agent 的记忆——多 Agent 接力时跨会话可见。
+    plans: dict[str, dict[str, Any]] = field(default_factory=dict)
+    refunds: list[dict[str, Any]] = field(default_factory=list)
+    # 每种写工具的幂等索引各自独立：键是工具自己收的，跨工具共用一张表的话，
+    # 两个工具收到同一个键会互相去重——那是把"工具 A 幂等、工具 B 幂等"
+    # 混成"这笔业务幂等"，而真实系统每个端点各有一份去重表。
+    shipment_idem: dict[str, str] = field(default_factory=dict)
+    notice_idem: dict[str, str] = field(default_factory=dict)
+    refund_idem: dict[str, str] = field(default_factory=dict)
     # 由场景打开：mock 侧是否按幂等键去重
     enforce_idempotency: bool = False
     # 订单上的自由文本备注：order_id → 那句话。由场景声明（见 Scenario.world）。
@@ -227,6 +392,14 @@ class MockState:
         anchor = now if now is not None else clock.now()
         self.charges.clear()
         self.idempotency_index.clear()
+        self.shipments.clear()
+        self.notices.clear()
+        self.refunds.clear()
+        self.handoffs.clear()
+        self.plans.clear()
+        self.shipment_idem.clear()
+        self.notice_idem.clear()
+        self.refund_idem.clear()
         # 备注也回到空。它是**世界**的一部分，而 reset 的语义是"世界回到开局"。
         self.order_notes.clear()
         for order_id, order in self.orders.items():

@@ -26,11 +26,13 @@
         {# 执行状态与结论是**两件事**。一次被熔断杀掉的运行（loop 场景）
            在左边显示 killed，在右边显示通过——那不是矛盾，是预期结果。
            压成一列就再也分不出"没跑起来"和"跑起来了但没通过"。 #}
-        <span class="dim">{{ r.status }}</span>
+        {% set st_cls = {'completed': 'unknown', 'failed': 'fail', 'killed': 'warn'}.get(r.status, 'unknown') %}
+        {% set st_lab = {'completed': '完成', 'failed': '执行失败', 'killed': '被熔断'}.get(r.status, r.status) %}
+        <span class="badge {{ st_cls }}">{{ st_lab }}</span>
       </td>
       <td>{{ m.verdict_badge(r.verdict_ok) }}</td>
       <td class="nowrap">{{ m.cost_cell(r.cost) }}</td>
-      <td><a href="/runs/{{ r.id }}">报告</a></td>
+      <td><a class="btn" href="/runs/{{ r.id }}">报告</a></td>
     </tr>
   {% else %}
     <tr><td colspan="8" class="dim">还没有运行记录。</td></tr>
@@ -39,11 +41,6 @@
 </table>
 {{ m.lower_bound_note(runs | map(attribute='cost') | list) }}
 
-<p class="note">
-  「执行状态」说的是跑完了没有（<code>completed</code> / <code>failed</code> /
-  <code>killed</code>），「结论」说的是通过没有。两者会分开：被熔断杀掉的那次
-  循环场景运行，执行状态是 <code>killed</code>，而结论是<strong>通过</strong>——进程是被
-  我们亲手杀的，那正是场景想制造的结果。
-</p>
+<p class="note">「执行状态」是跑完了没有，「结论」是通过没有。被熔断杀掉的循环场景：状态 <code>killed</code>、结论<strong>通过</strong>——那是场景想制造的结果。</p>
 
 {% endblock %}
