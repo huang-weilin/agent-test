@@ -90,6 +90,27 @@
   <p>{{ step.action }}</p>
 </section>
 
+
+<details class="howto">
+  <summary>第一次看报告？先读这里</summary>
+  <ol>
+    <li><strong>最上面那句结论</strong>：这次测试通过了没、下一步该做什么。</li>
+    <li><strong>检测结论</strong>：红色的条目就是被抓到的问题，点「细节」能看机器抓到的证据。</li>
+    <li><strong>预期比对</strong>：机器原本打算怎么判、实际判出了什么，一张表对得上。</li>
+    <li>更细的原始记录（调用链、工具审计、记忆）在下面，看不懂可以先不看。</li>
+  </ol>
+</details>
+
+{% set fail_count = report.findings | selectattr('verdict', 'equalto', 'fail') | list | length %}
+<section class="report-overview">
+  <div class="ov"><span class="k">检测结论</span><span class="v">{{ report.findings | length }} 条 · {{ fail_count }} 条有问题</span></div>
+  <div class="ov"><span class="k">工具调用</span><span class="v">{{ tool_calls | length }} 次</span></div>
+  <div class="ov"><span class="k">会话</span><span class="v">{{ report.sessions | length }} 段</span></div>
+  {% if report.cost %}
+  <div class="ov"><span class="k">成本</span><span class="v">${{ report.cost.cost_usd | money }}</span></div>
+  {% endif %}
+</section>
+
 {% if report.error %}
 <div class="panel bad">
   <strong>执行失败，这次测试没跑成。</strong>

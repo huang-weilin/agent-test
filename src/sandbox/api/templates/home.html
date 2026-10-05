@@ -3,6 +3,7 @@
 {% block title %}场景{% endblock %}
 {% block body %}
 
+{% if mode != 'simple' %}
 <section class="hero">
   <h1>给 AI Agent 出考题，<br>看看它靠不靠谱</h1>
   <p class="sub">
@@ -22,6 +23,7 @@
     <span class="chip">一共花了多少钱</span>
   </div>
 </section>
+{% endif %}
 
 {% if active %}
 <div class="panel warn">
@@ -31,6 +33,48 @@
 </div>
 {% endif %}
 
+{% if mode == 'simple' %}
+<section class="status-strip">
+  <div class="panel status-card">
+    <div class="k">最近一次测试</div>
+    {% set latest = runs[0] if runs else none %}
+    {% if latest %}
+      <div class="v">
+        <code>{{ latest.scenario_id }}</code>
+        {{ m.verdict_badge(latest.verdict_ok) }}
+      </div>
+      <div class="sub">
+        {{ latest.started_at | localdt }} · {{ m.cost_cell(latest.cost) }}
+        <a class="btn small" href="/runs/{{ latest.id }}">看报告</a>
+      </div>
+    {% else %}
+      <div class="v">还没跑过测试</div>
+      <div class="sub">先建一个：说一句想验证的事，机器帮你变成测试。</div>
+    {% endif %}
+  </div>
+</section>
+
+<section class="quick-cards">
+  <a class="quick-card" href="/scenarios/plain">
+    <strong>用大白话建测试</strong>
+    <span>说一句想验证的事——比如「同一笔钱会不会被付两次」——机器帮你变成测试，跑完出报告。</span>
+    <span class="btn small">开始 →</span>
+  </a>
+  <a class="quick-card" href="/checkup">
+    <strong>不知道测什么？一键体检</strong>
+    <span>按行业挑一包体检，一键开跑、一页纸出结论，告诉你问题在哪。</span>
+    <span class="btn small">去体检 →</span>
+  </a>
+  <a class="quick-card" href="/regression">
+    <strong>回归集与报告</strong>
+    <span>改过提示词或工具之后，重跑一遍历史场景，看有没有变差。</span>
+    <span class="btn small">看回归集 →</span>
+  </a>
+</section>
+<p class="note">想要更多控制？也可以走<a href="/scenarios/new">一步步的向导</a>（同样不用写代码）。</p>
+{% endif %}
+
+{% if mode != 'simple' %}
 <h2>从你的行业开始</h2>
 <div class="panel">
   <p class="plain">不知道要测什么？按行业挑一包体检，一键开跑、一页纸出结论。</p>
@@ -50,6 +94,7 @@
     {% endfor %}
   </div>
 </div>
+{% endif %}
 
 <h2 id="tests">已有测试</h2>
 <p class="lede">点「运行」跑的是磁盘上的那一份。跑完的报告会告诉你：哪些方面过了、哪些方面被抓到了问题。</p>
@@ -93,6 +138,7 @@
   </tbody>
 </table>
 
+{% if mode != 'simple' %}
 <div class="panel">
   <div class="row">
     <div>
@@ -109,6 +155,7 @@
     </div>
   </div>
 </div>
+{% endif %}
 
 <h2>最近运行</h2>
 <table class="grid">
@@ -125,7 +172,7 @@
       <td><a class="btn" href="/runs/{{ r.id }}">报告</a></td>
     </tr>
   {% else %}
-    <tr><td colspan="5" class="dim">还没跑过。</td></tr>
+    <tr><td colspan="5"><div class="empty" style="margin:0">还没跑过。<a href="/checkup">点这里开第一场体检</a>，或去<a href="/scenarios/plain">用大白话建一个测试</a>。</div></td></tr>
   {% endfor %}
   </tbody>
 </table>

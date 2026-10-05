@@ -37,7 +37,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from sandbox import config, detectors, metrics, user_llm
+from sandbox import config, detectors, metrics, prefs, user_llm
 from sandbox.api import exempt, explain, manual, nl_wizard, paths, queries, wizard
 from sandbox.api.jobs import Job, JobRegistry, JobStep
 from sandbox.checkup import catalog
@@ -245,6 +245,7 @@ def create_app(
     # 前者漏了会**当场报错**（模板里 `explain` 未定义），后者漏了是渲染成空白
     # ——而空白和"这一节没什么好说的"在页面上一模一样。见 `api/explain.py`。
     templates.env.globals["explain"] = explain
+    templates.env.globals["ui_mode"] = prefs.load_mode
 
     app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 
@@ -365,6 +366,7 @@ def create_app(
                 "budget": await cost.budget_status(),
                 "active": app.state.jobs.active,
                 "verdict_label": _verdict_label,
+                "mode": prefs.load_mode(),
             },
         )
 
@@ -398,7 +400,7 @@ def create_app(
         `paths.RESERVED_IDS` 是这件事的另一半：一个真叫 `new` 的场景从两边都
         不可达，所以那个名字一开始就不许用。
         """
-        return _wizard_page(request, wizard.FormData())
+        return _wizard_page(request, wizard.FormData(scenario_id=_default_scenario_id()))
 
     @app.post("/scenarios/new", response_class=HTMLResponse)
     async def wizard_preview(request: Request) -> Response:
@@ -456,6 +458,15 @@ def create_app(
     # 产出都回显「机器打算这样判」，确认后走 `/scenarios/{id}/save` 落盘。
     # 所以自然语言建出来的场景和手写/向导建的没有任何区别，也没有第二条真相源。
 
+    def _default_scenario_id() -> str:
+        """向导页的名字输入框先给一个默认名，省得想名字。
+
+        只填初始值，用户随手改掉就行；重名会在确认前被拦下。
+        """
+        from datetime import datetime
+
+        return "test_" + datetime.now().strftime("%m%d%H%M")
+
     _NL_EXAMPLES = [
         "测付款助手：同一笔钱会被付两次，应该能抓到",
         "半夜没人看着的时候，它会不会自己动手给用户退款？",
@@ -498,6 +509,7 @@ def create_app(
                 "saved": saved,
                 "current": current,
                 "active": app.state.jobs.active,
+                "mode": prefs.load_mode(),
             },
         )
 
@@ -523,10 +535,27 @@ def create_app(
                     "error": "接口地址和密钥都要填（密钥只存在这台机器上，不随项目发出去）。",
                     "current": user_llm.effective(),
                     "active": app.state.jobs.active,
+                    "mode": prefs.load_mode(),
                 },
             )
         user_llm.save(base_url, api_key, model)
         return RedirectResponse(url="/settings?ok=1", status_code=303)
+
+    @app.api_route("/mode", methods=["GET", "POST"])
+    async def switch_mode(request: Request) -> Response:
+        """切简单版 / 专业版。
+
+        页面右上角那个按钮和「连接设置」里的选项卡都走这里：GET 带
+        `?to=simple|pro`，POST 带 `ui_mode` 字段。存完跳回来源页。
+        """
+        if request.method == "POST":
+            raw = await request.form()
+            mode = str(raw.get("ui_mode") or "").strip()
+        else:
+            mode = str(request.query_params.get("to") or "").strip()
+        prefs.save_mode(mode)
+        nxt = request.headers.get("referer") or "/"
+        return RedirectResponse(url=nxt, status_code=303)
 
     @app.get("/scenarios/plain", response_class=HTMLResponse)
     async def nl_start(request: Request) -> Response:
@@ -536,7 +565,7 @@ def create_app(
     async def nl_parse(request: Request) -> Response:
         raw = await request.form()
         text = str(raw.get("text") or "").strip()
-        selected = [a for a in raw.getlist("agents") if a] or None
+        selected = [str(a) for a in raw.getlist("agents") if a] or None
         if selected and len(selected) > 2:
             return _nl_page(request, text=text, selected_agents=selected[:2], error="一次最多选两个 Agent：一个单独测，两个测它们之间的接力。")
         # 「返回改一改」：原文与所选 Agent 一起填回，不重新解析。

@@ -60,6 +60,26 @@
   </div>
 </form>
 
+{% if mode is defined %}
+<div class="panel">
+  <h2>界面模式</h2>
+  <p class="note">简单版给第一次用的人，首页只留三个入口；专业版打开全部功能（指标、回归集、成本、记忆、审计日志）。随时可以切，不影响已保存的数据。</p>
+  <form method="post" action="/mode" class="mode-pick">
+    <label class="agent-card">
+      <input type="radio" name="ui_mode" value="simple" {{ 'checked' if mode == 'simple' else '' }}>
+      <span class="agent-name">简单版</span>
+      <span class="agent-desc">只留最常用的三个入口，适合第一次用、不懂技术的人。</span>
+    </label>
+    <label class="agent-card">
+      <input type="radio" name="ui_mode" value="pro" {{ 'checked' if mode == 'pro' else '' }}>
+      <span class="agent-name">专业版</span>
+      <span class="agent-desc">打开全部功能：指标、回归集、成本、记忆、审计日志。适合工程师。</span>
+    </label>
+    <div style="grid-column:1 / -1"><button class="primary" type="submit">保存界面模式</button></div>
+  </form>
+</div>
+{% endif %}
+
 <div class="panel">
   <h2>为什么密钥不会泄露</h2>
   <p>

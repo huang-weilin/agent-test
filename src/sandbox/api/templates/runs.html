@@ -35,7 +35,7 @@
       <td><a class="btn" href="/runs/{{ r.id }}">报告</a></td>
     </tr>
   {% else %}
-    <tr><td colspan="8" class="dim">还没有运行记录。</td></tr>
+    <tr><td colspan="8"><div class="empty" style="margin:0">还没有运行记录。<a href="/checkup">点这里开第一场体检</a>，或去<a href="/scenarios/plain">用大白话建一个测试</a>。</div></td></tr>
   {% endfor %}
   </tbody>
 </table>

@@ -8,6 +8,7 @@
 </head>
 <body>
 <div class="layout">
+{% set mode = ui_mode() if ui_mode is defined else 'simple' %}
 
   <aside class="sidebar">
     <a class="brand" href="/"><span class="brand-mark">沙</span>Agent 测试沙盒</a>
@@ -78,6 +79,11 @@
         {% if not matched.sep and path.startswith('/help') %}<span class="sep">/</span><span>使用手册</span>{% endif %}
       </div>
       <span class="spacer"></span>
+      {% if mode == 'simple' %}
+      <a class="mode-switch" href="/mode?to=pro" title="打开全部功能：指标、回归集、成本、记忆、审计日志">切换到专业版</a>
+      {% else %}
+      <a class="mode-switch" href="/mode?to=simple" title="简化界面，只留最常用的入口">切换到简单版</a>
+      {% endif %}
       {% if active %}
       <span class="running" title="{{ active.scenario_id }} 正在运行">
         <span class="dot"></span>正在跑 <code>{{ active.scenario_id }}</code>

@@ -712,3 +712,47 @@ table.grid td > code, table.grid th > code { background: var(--bg-soft); }
 }
 .agent-name { font-weight: 600; }
 .agent-desc { font-size: 13px; color: var(--muted, #64748b); line-height: 1.45; }
+
+/* 模式切换（顶栏右侧按钮） */
+.mode-switch {
+  font-size: 0.82rem; color: var(--brand, #2563eb);
+  background: rgba(37, 99, 235, 0.08); border: 1px solid rgba(37, 99, 235, 0.3);
+  border-radius: 999px; padding: 0.2rem 0.7rem;
+  white-space: nowrap; text-decoration: none;
+}
+.mode-switch:hover { background: rgba(37, 99, 235, 0.14); }
+
+/* 简单版首页：状态卡 */
+.status-strip { margin: 0 0 1.1rem; }
+.status-card .k { font-size: 0.82rem; color: var(--dim); margin-bottom: 0.3rem; }
+.status-card .v { font-size: 1.1rem; display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.status-card .sub { margin-top: 0.45rem; display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+
+/* 简单版首页：三功能卡 */
+.quick-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.9rem; margin: 0 0 1.4rem; }
+.quick-card {
+  display: flex; flex-direction: column; gap: 0.5rem;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel); padding: 1.1rem 1.2rem;
+  text-decoration: none; color: inherit;
+}
+.quick-card:hover { border-color: var(--brand, #2563eb); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06); }
+.quick-card strong { font-size: 1.02rem; }
+.quick-card span { color: var(--muted, #667); font-size: 0.9rem; line-height: 1.6; }
+.quick-card .btn { align-self: flex-start; margin-top: 0.3rem; }
+
+/* 报告页：总览条 */
+.report-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.8rem; margin: 0 0 1.2rem; }
+.report-overview .ov { border: 1px solid var(--line); border-radius: 10px; padding: 0.7rem 0.9rem; background: var(--panel); }
+.report-overview .k { display: block; font-size: 0.78rem; color: var(--dim); margin-bottom: 0.25rem; }
+.report-overview .v { font-weight: 600; }
+
+/* 报告页：怎么看这份报告 */
+details.howto { margin: 0 0 1.2rem; border: 1px dashed var(--line); border-radius: 10px; padding: 0.6rem 0.9rem; background: var(--panel); }
+details.howto summary { cursor: pointer; font-weight: 600; color: var(--brand-ink, #1e3a8a); }
+details.howto ol { margin: 0.5rem 0 0.2rem; padding-left: 1.3rem; line-height: 1.8; color: var(--muted, #667); }
+
+/* 设置页：界面模式选项卡 */
+.mode-pick { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.8rem; }
+.mode-pick .agent-card { cursor: pointer; }
+.mode-pick .agent-card input { margin-top: 0.2rem; }
