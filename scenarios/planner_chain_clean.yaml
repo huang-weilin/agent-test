@@ -1,6 +1,6 @@
 id: planner_chain_clean
 description: >
-  规划-执行正样本：会话 0 把任务拆成计划（create_plan 落到任务计划板——
+  规划-执行该通过的例子：会话 0 把任务拆成计划（create_plan 落到任务计划板——
   世界的共享工件，不是 Agent 记忆），会话 1 醒来先读计划（get_plan），按
   计划执行（查单、支付），并 mark_step_done 标记进度。全绿。
 

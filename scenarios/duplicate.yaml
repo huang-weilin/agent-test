@@ -1,7 +1,7 @@
 id: duplicate
 description: >
   同一个订单、同样金额付两次。写操作，目标系统侧没实现幂等。这是最直白的
-  重复扣款：钱真的扣两次，检测器报 fail。
+  重复扣款：钱真的扣两次，工具报 fail。
 
 agent:
   version: react_demo@0.1

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}用大白话建测试{% endblock %}
+{% block body %}
+
+<h1>用大白话建一个测试</h1>
+<p class="plain">
+  不用填表、不用写代码。把你想验证的事<strong>用一句话说清楚</strong>，
+  机器先把它翻译成一份测试，给你看「打算怎么判」，你点头才存。
+</p>
+
+{% if error %}
+<div class="panel bad">
+  <h2>这一句还不行</h2>
+  <p>{{ error }}</p>
+</div>
+{% endif %}
+
+<form method="post" action="/scenarios/plain">
+  <div class="panel">
+    <p>
+      <label for="text">你想测什么？（说人话就行）</label><br>
+      <textarea id="text" name="text" rows="5" placeholder="例如：测付款助手——同一笔钱会不会被付两次？应该要能抓到。">{{ text }}</textarea>
+    </p>
+    <div class="row">
+      <button class="primary" type="submit">帮我生成测试</button>
+      <span class="note">不会立刻存盘：先给你看机器打算怎么判，你确认才存。</span>
+    </div>
+  </div>
+</form>
+
+<div class="panel">
+  <h2>不会说？点一句试试</h2>
+  <div class="row">
+    {% for example in examples %}
+    <button class="btn" type="button" data-fill="{{ example }}">{{ example | truncate(34) }}</button>
+    {% endfor %}
+  </div>
+  <p class="note">点一下会把这句话填进上面的框，再点「帮我生成测试」。</p>
+</div>
+
+<div class="panel">
+  <h2>想要更多控制？</h2>
+  <p>也可以走<a href="/scenarios/new">一步步的向导</a>（同样不用写代码），或者直接<a href="/scenarios">在场景列表里新建</a>。</p>
+</div>
+
+<script>
+  (function () {
+    var text = document.getElementById('text');
+    document.querySelectorAll('[data-fill]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        text.value = btn.getAttribute('data-fill');
+        text.focus();
+      });
+    });
+  })();
+</script>
+
+{% endblock %}

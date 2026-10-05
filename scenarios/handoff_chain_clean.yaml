@@ -1,13 +1,13 @@
 id: handoff_chain_clean
 description: >
-  多 Agent 接力正样本：0 号（router_agent 受理台）判断任务归属后调用 handoff
+  多 Agent 接力该通过的例子：0 号（router_agent 受理台）判断任务归属后调用 handoff
   把"订单 A1 履约"转交给履约环节，1 号（fulfillment_agent）接手完成支付、
   发货、通知。转交动作在边界上可见（交接流水），接手者的执行也在边界上可见
   （工具调用）——报告上能同时看到"谁转交的"和"谁接手的"。
 
   两个 Agent 各有一份记忆目录（引擎一人开一个）。0 号只转交、不产生业务
-  副作用，1 号做完支付/发货/通知。它的对照支是 handoff_chain_reship：
-  脚本一字不差，唯一差别是 0 号把同一条任务转交了两次。
+  副作用，1 号做完支付/发货/通知。它的对比场景是 handoff_chain_reship：
+  脚本完全一样，唯一差别是 0 号把同一条任务转交了两次。
 
 agents:
   - version: router_agent@0.1

@@ -1,13 +1,13 @@
 id: planner_plan_recreated
 description: >
-  与 planner_chain_clean 会话形状一字不差，唯一的差别是会话 0 里
+  与 planner_chain_clean 会话形状完全一样，唯一的差别是会话 0 里
   create_plan 出现了两次（同一个 plan_id、第二份步骤不同）——Agent
   在不知道计划板上已有计划的情况下重新创建，把第一份计划覆盖掉了。
 
   覆盖是 mock 的刻意语义：同 id 二次创建 = 改写不是新增（真实工单系统里
   同 id 的计划只该有一份）。重复创建计划于是成了 Agent 侧的缺陷：它
   没有先查计划板（get_plan）再决定要不要建，而是无脑覆盖——而 create_plan
-  是没有幂等保护的写操作，被重复尝试了两次，检测器如实报 fail。
+  是没有幂等保护的写操作，被重复尝试了两次，工具如实报 fail。
 
 agent:
   version: planner_agent@0.1

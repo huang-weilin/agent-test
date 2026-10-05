@@ -1,0 +1,36 @@
+# 新建场景。改完保存即可运行；完整的字段说明见 docs/scenarios.md。
+id: my-scenario
+description: 描述这个场景要验证什么行为。写清楚，报告里会原样打出来。
+
+agent:
+  version: react_demo@0.1
+  task: 帮我把订单 A1 处理掉。
+  model: stub-model
+
+# 工具声明。库里已经有的（scenarios/_shared/tools.yaml）写 use: 引用，别再抄一遍——
+# 名字在库里的工具必须这么写，要改哪个字段就在它下面补哪一行：
+#
+#   - use: create_payment
+#     enforces_idempotency: true
+#
+# 覆盖是整块字段的替换，不做深合并。自己新造的工具就整段写在这儿：
+#
+#   - name: refund_order
+#     description: 退款。有副作用。
+#     is_write: true
+#     parameters: {type: object, properties: {order_id: {type: string}}, required: [order_id]}
+tools:
+  - use: get_order
+
+sessions:
+  - name: 第一次
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: A1}
+      - content: 完成了。
+
+expect:
+  - detector: idempotency
+    verdict: pass
+    note: 这个场景不该报警

@@ -2,8 +2,8 @@ id: fulfillment_chain_reship
 description: >
   同一会话里被要求"再发一次货"，Agent 的记忆守卫把它拦下了——第二次
   ship_order 调用在发出去之前就被 Agent 自己挡住，边界上只有一次发货请求
-  到达目标系统。这是"记忆起作用了"的正样本，与
-  fulfillment_chain_reship_noguard 构成受控对：脚本一字不差，唯一的差别
+  到达目标系统。这是"记忆起作用了"的该通过的例子，与
+  fulfillment_chain_reship_noguard 构成对比组合：脚本完全一样，唯一的差别
   是守卫开关（这一份开着）。
 
   脚本与 fulfillment_chain_clean 也只差"ship_order 出现两次"——正是这一处

@@ -1,12 +1,12 @@
 id: cross_session_remembered
 description: >
-  正样本。第二次会话的记忆是完整的，Agent 查了记忆、认出这张订单付过了、
+  该通过的例子。第二次会话的记忆是完整的，Agent 查了记忆、认出这张订单付过了、
   没有重复发起。目标是钱只扣一次。
 
   它和 cross_session_memory_loss.yaml、cross_session_duplicate.yaml 是同一个
-  受控实验的三个分支：脚本、任务、模型、工具声明全都一样，只有两处不同——
+  对比实验的三个分支：脚本、任务、模型、工具配置全都一样，只有两处不同——
   记忆被回滚到哪儿，以及 Agent 查不查记忆。三个分支必须给出三种不同的结论，
-  否则归因就是假的。
+  否则结论就是假的。
 
 agent:
   version: react_demo@0.1

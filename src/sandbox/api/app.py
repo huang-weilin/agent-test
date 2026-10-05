@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from sandbox import detectors, metrics
-from sandbox.api import exempt, explain, manual, paths, queries, wizard
+from sandbox.api import exempt, explain, manual, nl_wizard, paths, queries, wizard
 from sandbox.api.jobs import Job, JobRegistry, JobStep
 from sandbox.checkup import catalog
 from sandbox.checkup import report as checkup_report
@@ -448,6 +448,70 @@ def create_app(
             "placeholders": wizard.placeholders_used(answers, facts),
         }
         return templates.TemplateResponse(request, "wizard_confirm.html", context)
+
+    # --- 自然语言录入 ---------------------------------------------------------
+    #
+    # 一条大白话 → `wizard.Answers` → 与向导完全相同的确认页与存盘管道。
+    # `nl_wizard.answers_from_text` 优先走 LLM、失败降级本地规则；两条路径的
+    # 产出都回显「机器打算这样判」，确认后走 `/scenarios/{id}/save` 落盘。
+    # 所以自然语言建出来的场景和手写/向导建的没有任何区别，也没有第二条真相源。
+
+    _NL_EXAMPLES = [
+        "测付款助手：同一笔钱会被付两次，应该能抓到",
+        "半夜没人看着的时候，它会不会自己动手给用户退款？",
+        "换一个人接手，上次做过的事会不会又做一遍？",
+        "一切正常，不该报警",
+    ]
+
+    def _nl_page(request: Request, text: str = "", error: str | None = None) -> Response:
+        return templates.TemplateResponse(
+            request,
+            "nl.html",
+            {"text": text, "examples": _NL_EXAMPLES, "error": error, "active": app.state.jobs.active},
+        )
+
+    @app.get("/scenarios/plain", response_class=HTMLResponse)
+    async def nl_start(request: Request) -> Response:
+        return _nl_page(request)
+
+    @app.post("/scenarios/plain", response_class=HTMLResponse)
+    async def nl_parse(request: Request) -> Response:
+        raw = await request.form()
+        text = str(raw.get("text") or "").strip()
+        # 「返回改一改」：原文填回输入框，不重新解析。
+        if str(raw.get("submit") or "") == "back":
+            return _nl_page(request, text=text)
+
+        try:
+            facts = wizard.tool_facts()
+            answers, nl_warns = await nl_wizard.answers_from_text(
+                text, facts, nl_wizard.agent_versions()
+            )
+            paths.check_scenario_id(answers.scenario_id)
+        except (nl_wizard.PlainTextError, paths.ScenarioPathError) as exc:
+            return _nl_page(request, text=text, error=str(exc))
+
+        # 重名在这里拦（保存是无条件覆盖的）。
+        path = paths.scenario_file(answers.scenario_id, root=app.state.scenarios_root)
+        if path.exists():
+            return _nl_page(
+                request,
+                text=text,
+                error=(
+                    f"已经有一个叫 {answers.scenario_id!r} 的场景了（{path.name}）。"
+                    f"换一句更具体的话，或者去「场景」列表里打开它改。"
+                ),
+            )
+
+        context = {
+            "origin_text": text,
+            "scenario_id": answers.scenario_id,
+            "plan": wizard.plan(answers),
+            "warnings": nl_warns + wizard.warnings(answers, facts),
+            "yaml_text": wizard.build_yaml(answers, facts),
+            "active": app.state.jobs.active,
+        }
+        return templates.TemplateResponse(request, "nl_confirm.html", context)
 
     @app.get("/scenarios/{scenario_id}", response_class=HTMLResponse)
     async def scenario_editor(request: Request, scenario_id: str, saved: int = 0) -> Response:

@@ -671,3 +671,16 @@ table.grid td > code, table.grid th > code { background: var(--bg-soft); }
 
 /* 图例行（四态解释）：横向排开 */
 .legend-line { display: flex; flex-wrap: wrap; gap: 0.6rem 1.2rem; align-items: center; margin: 0.5rem 0; }
+
+/* ===== v4 产品化首页 hero（2026-10 产品化重设计） ===== */
+.hero { padding: 2.2rem 0.4rem 1.2rem; }
+.hero h1 { font-size: 1.9rem; line-height: 1.35; margin: 0 0 0.8rem; letter-spacing: -0.01em; }
+.hero .sub { font-size: 1.02rem; color: var(--muted, #667); max-width: 42em; margin: 0 0 1.2rem; line-height: 1.7; }
+.hero-actions { display: flex; gap: 0.7rem; flex-wrap: wrap; margin: 0 0 1.1rem; }
+.btn.big { padding: 0.62rem 1.3rem; font-size: 1rem; }
+.btn.ghost { background: transparent; border: 1px solid var(--line, #ccc); color: var(--text, #333); }
+.btn.ghost:hover { background: rgba(0,0,0,0.03); }
+.chip-row { display: flex; gap: 0.45rem; flex-wrap: wrap; }
+.chip { display: inline-flex; align-items: center; padding: 0.22rem 0.65rem; border-radius: 999px;
+        background: var(--panel, #fff); border: 1px solid var(--line, #d8d8de);
+        color: var(--muted, #667); font-size: 0.82rem; }

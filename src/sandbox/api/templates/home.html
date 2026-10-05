@@ -3,8 +3,25 @@
 {% block title %}场景{% endblock %}
 {% block body %}
 
-<h1>场景</h1>
-<p class="lede">用例是数据，不是代码。点「运行」跑的是<strong>磁盘上的那份</strong>。</p>
+<section class="hero">
+  <h1>给 AI Agent 出考题，<br>看看它靠不靠谱</h1>
+  <p class="sub">
+    不用写代码。用一句大白话描述你想验证的事——比如「同一笔钱会不会被付两次」——
+    机器帮你生成测试、跑给你看，最后出一份报告说清楚问题在哪。
+  </p>
+  <div class="hero-actions">
+    <a class="btn primary big" href="/scenarios/plain">用大白话建测试</a>
+    <a class="btn big" href="/checkup">不知道测什么？一键体检</a>
+    <a class="btn ghost big" href="#tests">看已有测试</a>
+  </div>
+  <div class="chip-row">
+    <span class="chip">会不会重复扣款</span>
+    <span class="chip">会不会原地打转</span>
+    <span class="chip">记不记得住事</span>
+    <span class="chip">没人看着时乱不乱来</span>
+    <span class="chip">一共花了多少钱</span>
+  </div>
+</section>
 
 {% if active %}
 <div class="panel warn">
@@ -34,9 +51,12 @@
   </div>
 </div>
 
+<h2 id="tests">已有测试</h2>
+<p class="lede">点「运行」跑的是磁盘上的那一份。跑完的报告会告诉你：哪些方面过了、哪些方面被抓到了问题。</p>
+
 <table class="grid">
   <thead>
-    <tr><th>场景</th><th>说明</th><th>会话</th><th>预期</th><th></th></tr>
+    <tr><th>测试</th><th>它是干嘛的</th><th>会话</th><th>预期</th><th></th></tr>
   </thead>
   <tbody>
   {% for s in scenarios %}
@@ -73,25 +93,27 @@
   </tbody>
 </table>
 
-<h2>新建测试</h2>
-
 <div class="panel">
-  <strong><a href="/scenarios/new">跟着问题走</a></strong>
-  <p class="note">问几句大白话，存盘前先把「机器打算怎么判」逐条给你看。不写 YAML 也能建。</p>
+  <div class="row">
+    <div>
+      <strong>想再精细一点？</strong>
+      <p class="note">跟着问题一步步选（不用写代码），机器在存盘前把「打算怎么判」逐条给你看。<br>
+      老手也可以直接给名字建骨架、自己改 YAML。</p>
+    </div>
+    <div class="actions">
+      <a class="btn" href="/scenarios/new">跟着问题走</a>
+      <form class="inline" method="post" action="/scenarios">
+        <input name="new_id" placeholder="起个名字（小写字母、数字、-、_）" required>
+        <button class="primary" type="submit">用骨架新建</button>
+      </form>
+    </div>
+  </div>
 </div>
-
-<p class="note">
-  要自己写就还走老路：给一个名字，拿一份带注释的骨架去改。
-</p>
-<form class="inline" method="post" action="/scenarios">
-  <input name="new_id" placeholder="场景标识（小写字母、数字、-、_）" required>
-  <button class="primary" type="submit">用骨架新建</button>
-</form>
 
 <h2>最近运行</h2>
 <table class="grid">
   <thead>
-    <tr><th>时间</th><th>场景</th><th>结论</th><th>花费</th><th></th></tr>
+    <tr><th>时间</th><th>测试</th><th>结论</th><th>花费</th><th></th></tr>
   </thead>
   <tbody>
   {% for r in runs %}

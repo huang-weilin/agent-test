@@ -2,8 +2,8 @@ id: stream_clean
 description: >
   和 clean.yaml 是同一个世界、同一段脚本、同一个 Agent，唯一的变量是
   `DEMO_AGENT_STREAM`：这个场景里 Agent 用流式请求打网关（`stream: true`），
-  对照组用非流式。要证的是「换一种传输方式不改行为」——结论该一字不差，
-  而账要从上游的 usage 来，不能是网关估的。受控对照的判据在
+  对比场景用非流式。要证的是「换一种传输方式不改行为」——结论该完全一样，
+  而账要从上游的 usage 来，不能是网关估的。对比场景的判定标准在
   `tests/control_pairs.py` 的账本里，不在这段话里。
 
 agent:

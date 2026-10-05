@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}行为级测试沙盒{% endblock %}</title>
+<title>{% block title %}Agent 测试沙盒{% endblock %}</title>
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 <div class="layout">
 
   <aside class="sidebar">
-    <a class="brand" href="/"><span class="brand-mark">沙</span>行为级测试沙盒</a>
+    <a class="brand" href="/"><span class="brand-mark">沙</span>Agent 测试沙盒</a>
 
     {% set nav = [
       ('测试', [
@@ -56,14 +56,14 @@
     </nav>
 
     <div class="side-foot">
-      黑盒边界拦截 · 自研库为唯一真相源<br>出口默认拒绝 · ADR <code>docs/decisions/</code>
+      给 AI Agent 出考题 · 跑完看报告<br>全部在本机运行 · 数据不出沙箱
     </div>
   </aside>
 
   <div class="main">
     <header class="topbar">
       <div class="crumb">
-        <span>行为级测试沙盒</span>
+        <span>Agent 测试沙盒</span>
         {% set matched = namespace(sep=False) %}
         {% for group, items in nav %}
           {% for href, label, key in items %}
@@ -87,8 +87,8 @@
     </main>
 
     <footer class="foot">
-      行为级测试沙盒 · 黑盒边界拦截 · 自研库为唯一真相源 · 出口默认拒绝
-      （ADR <code>docs/decisions/</code>）
+      Agent 测试沙盒 · 给 AI Agent 出考题，跑完看报告
+      全部在本机运行 · 数据不出沙箱
     </footer>
   </div>
 

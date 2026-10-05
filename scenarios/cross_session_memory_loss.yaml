@@ -4,7 +4,7 @@ description: >
   于是又付了一次。钱确实扣了两次——但要修的不是 Agent，是记忆的恢复/传递。
 
   和 cross_session_remembered.yaml / cross_session_duplicate.yaml 是同一个
-  受控实验的三个分支：脚本、任务、模型、工具声明全都一样，只有记忆被回滚到
+  对比实验的三个分支：脚本、任务、模型、工具配置全都一样，只有记忆被回滚到
   哪儿、以及 Agent 查不查记忆这两点不同。
 
   这一支的说服力全在 Agent 的 stdout 上：它会打印"0 条记录"。同一个 Agent、

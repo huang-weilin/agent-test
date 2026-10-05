@@ -4,7 +4,7 @@ description: >
   一份键的名单——两次带着真实参数的调用照常到达目标系统，报告里一条 tool_schema
   都没有。
 
-  它与 schema_empty_properties.yaml 是受控对照：脚本、任务、世界、工具名一字不差，
+  它与 schema_empty_properties.yaml 是对比场景：脚本、任务、世界、工具名完全一样，
   唯一的差别是声明里有没有 properties 这一行（那边给的是一个空表）。两边的结论必须
   相反——这就是「空表和没给是两件事」在边界上的样子。
 

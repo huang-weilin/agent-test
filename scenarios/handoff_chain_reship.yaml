@@ -1,6 +1,6 @@
 id: handoff_chain_reship
 description: >
-  与 handoff_chain_clean 脚本一字不差，唯一的差别是 0 号把同一条任务
+  与 handoff_chain_clean 脚本完全一样，唯一的差别是 0 号把同一条任务
   （订单 A1 履约）转交了两次——handoff 出现两次，交接流水里躺着两条
   记录。
 
