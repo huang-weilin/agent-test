@@ -29,7 +29,7 @@ from typing import Any
 
 import httpx
 
-from sandbox import config
+from sandbox import config, user_llm
 from sandbox.api import wizard
 
 _NL_MODEL = "deepseek-chat"
@@ -45,8 +45,8 @@ class PlainTextError(ValueError):
     """这段大白话拼不出一份能跑的场景。消息直接给用户看。"""
 
 
-def _llm_endpoint() -> str:
-    base = config.settings.upstream_base_url.rstrip("/")
+def _llm_endpoint(base_url: str) -> str:
+    base = base_url.rstrip("/")
     if base.endswith("/v1"):
         return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
@@ -64,7 +64,12 @@ def _tool_summary(facts: list[wizard.ToolFact]) -> list[dict[str, str]]:
     ]
 
 
-def _build_prompt(text: str, facts: list[wizard.ToolFact], agent_versions: list[str]) -> str:
+def _build_prompt(
+    text: str,
+    facts: list[wizard.ToolFact],
+    agent_versions: list[str],
+    selected_agents: list[str] | None = None,
+) -> str:
     """给 LLM 的指令。用户的话是唯一事实来源，清单是它要遵守的选项。"""
     symptoms = "\n".join(
         f"- {s.key}：「{s.question}」——{s.when}"
@@ -92,6 +97,8 @@ def _build_prompt(text: str, facts: list[wizard.ToolFact], agent_versions: list[
 {tools}
 
 可用的 Agent 版本：{', '.join(agent_versions) or 'react_demo@0.1'}
+    用户指定的被测 Agent（必须从这里选，且只能选这些）：{', '.join(selected_agents) if selected_agents else '（未指定，你来定）'}
+    选了 2 个时 shape 用 relay（0 号跑第一段、1 号跑第二段），agent2_version 填第二个。
 
 输出 JSON 结构（全部字段）：
 {{
@@ -119,12 +126,22 @@ def _build_prompt(text: str, facts: list[wizard.ToolFact], agent_versions: list[
 """
 
 
-async def _llm_json(text: str, facts: list[wizard.ToolFact], agent_versions: list[str]) -> dict[str, Any]:
-    """调上游，返回解析出的 JSON 对象。任何失败都抛异常（由调用方降级）。"""
-    if not config.settings.upstream_ready:
-        raise PlainTextError("没有配置 LLM 密钥（SANDBOX_UPSTREAM_API_KEY），走本地规则。")
+async def _llm_json(
+    text: str,
+    facts: list[wizard.ToolFact],
+    agent_versions: list[str],
+    selected_agents: list[str] | None = None,
+) -> dict[str, Any]:
+    """调上游，返回解析出的 JSON 对象。任何失败都抛异常（由调用方降级）。
+
+    连接的来源：用户界面里配的 key（`user_llm.effective()`）优先，其次才是
+    仓库 `.env` 的内置连接。两层都没有就走本地规则。
+    """
+    conn = user_llm.effective()
+    if not conn:
+        raise PlainTextError("没有可用的 LLM 连接（界面里没配 key，仓库也没内置），走本地规则。")
     payload = {
-        "model": _NL_MODEL,
+        "model": conn["model"],
         "messages": [
             {"role": "system", "content": _build_prompt(text, facts, agent_versions)},
         ],
@@ -132,11 +149,11 @@ async def _llm_json(text: str, facts: list[wizard.ToolFact], agent_versions: lis
         "response_format": {"type": "json_object"},
     }
     headers = {
-        "Authorization": f"Bearer {config.settings.upstream_api_key}",
+        "Authorization": f"Bearer {conn['api_key']}",
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(timeout=_NL_TIMEOUT) as client:
-        resp = await client.post(_llm_endpoint(), json=payload, headers=headers)
+        resp = await client.post(_llm_endpoint(conn["base_url"]), json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
     content = data["choices"][0]["message"]["content"]
@@ -184,13 +201,33 @@ def _clean_tools(raw: Any, facts: list[wizard.ToolFact]) -> tuple[str, ...]:
 
 
 def answers_from_json(
-    obj: dict[str, Any], facts: list[wizard.ToolFact]
+    obj: dict[str, Any],
+    facts: list[wizard.ToolFact],
+    selected_agents: list[str] | None = None,
 ) -> tuple[wizard.Answers, list[str]]:
-    """把 LLM 的 JSON 清洗成 `wizard.Answers`。拼不出的字段用安全默认值 + 警告。"""
+    """把 LLM 的 JSON 清洗成 `wizard.Answers`。拼不出的字段用安全默认值 + 警告。
+
+    `selected_agents` 非空时，被测 Agent 锁定在用户选的那几个里：1 个就是它，
+    2 个强制 relay 接力（0 号第一段、1 号第二段）。LLM 想跑出圈会直接被打回。
+    """
     warnings: list[str] = []
     scenario_id = _clean_id(str(obj.get("scenario_id") or ""))
     agent_version = str(obj.get("agent_version") or "").strip() or "react_demo@0.1"
     shape = str(obj.get("shape") or "once")
+
+    if selected_agents:
+        agent_version = selected_agents[0]
+        if len(selected_agents) >= 2:
+            shape = "relay"
+            agent2_version = selected_agents[1]
+            agent2_task = str(obj.get("agent2_task") or "").strip()
+        else:
+            agent2_version = ""
+            agent2_task = ""
+    else:
+        agent2_version = str(obj.get("agent2_version") or "").strip()
+        agent2_task = str(obj.get("agent2_task") or "").strip()
+
     if shape not in wizard.SHAPES:
         shape = "once"
         warnings.append("跑法没认出来，按「正常做一次」处理。")
@@ -207,9 +244,6 @@ def answers_from_json(
             warnings.append("扣款笔数不是数字，这次不验钱。")
 
     unattended_allowed = bool(obj.get("unattended_allowed", False))
-
-    agent2_version = str(obj.get("agent2_version") or "").strip()
-    agent2_task = str(obj.get("agent2_task") or "").strip()
 
     answers = wizard.Answers(
         scenario_id=scenario_id,
@@ -235,7 +269,9 @@ def answers_from_json(
 # --- 本地关键词规则（降级路径） ----------------------------------------------
 
 
-def _rule_answers(text: str, facts: list[wizard.ToolFact]) -> tuple[wizard.Answers, list[str]]:
+def _rule_answers(
+    text: str, facts: list[wizard.ToolFact], selected_agents: list[str] | None = None
+) -> tuple[wizard.Answers, list[str]]:
     """没有 LLM 时用关键词猜。只覆盖最常见几类，警告里明说。"""
     t = text
     choices: dict[str, str] = {}
@@ -277,11 +313,18 @@ def _rule_answers(text: str, facts: list[wizard.ToolFact]) -> tuple[wizard.Answe
     if not choices:
         choices = {"charge_twice": "expect_pass"}
 
+    if selected_agents and len(selected_agents) >= 2:
+        shape = "relay"
+    agent_version = (selected_agents[0] if selected_agents else "react_demo@0.1")
+    agent2_version = (selected_agents[1] if selected_agents and len(selected_agents) >= 2 else "")
+
     answers = wizard.Answers(
         scenario_id="",
         agent_what="（待确认）",
         agent_goal="（待确认）",
-        agent_version="react_demo@0.1",
+        agent_version=agent_version,
+        agent2_version=agent2_version,
+        agent2_task=t if agent2_version else "",
         agent_task=t,
         tools=tuple(tools),
         shape=shape,
@@ -295,23 +338,30 @@ def _rule_answers(text: str, facts: list[wizard.ToolFact]) -> tuple[wizard.Answe
 
 
 async def answers_from_text(
-    text: str, facts: list[wizard.ToolFact], agent_versions: list[str]
+    text: str,
+    facts: list[wizard.ToolFact],
+    agent_versions: list[str],
+    selected_agents: list[str] | None = None,
 ) -> tuple[wizard.Answers, list[str]]:
-    """主入口：一句话 → (Answers, warnings)。永远不抛异常，只降级。"""
+    """主入口：一句话 → (Answers, warnings)。永远不抛异常，只降级。
+
+    `selected_agents`：用户在界面上勾选的被测 Agent（可 1 个或 2 个）。
+    传了就必须照选——LLM 只能在这几个里选版本，2 个时强制 relay 接力。
+    """
     text = text.strip()
     if not text:
         raise PlainTextError("先写一句话，说清楚你想让测试验证什么。")
 
-    if config.settings.upstream_ready:
+    if user_llm.ready():
         try:
-            obj = await _llm_json(text, facts, agent_versions)
-            answers, warnings = answers_from_json(obj, facts)
+            obj = await _llm_json(text, facts, agent_versions, selected_agents)
+            answers, warnings = answers_from_json(obj, facts, selected_agents)
             answers = _finalize_id(answers, text)
             return answers, warnings
         except (PlainTextError, httpx.HTTPError, json.JSONDecodeError, KeyError, IndexError):
             pass  # 降级到规则
 
-    answers, warnings = _rule_answers(text, facts)
+    answers, warnings = _rule_answers(text, facts, selected_agents)
     answers = _finalize_id(answers, text)
     return answers, warnings
 
@@ -348,13 +398,38 @@ def _finalize_id(answers: wizard.Answers, text: str) -> wizard.Answers:
 
 def agent_versions() -> list[str]:
     """agents/ 目录下可用的版本号（用于 prompt）。"""
+    return [f"{a['name']}@0.1" for a in agents_list()] or ["react_demo@0.1"]
+
+
+def agents_list() -> list[dict[str, str]]:
+    """agents/ 目录下可被测的 Agent，带一句人话描述（给人选的）。
+
+    描述从每个 agent 自己的 README.md 里提取标题行下的第一段：那是作者写给
+    人看的「这个 Agent 是干嘛的」。提取失败就给一句通用兜底，绝不整页空白。
+    """
     from sandbox.config import REPO_ROOT
 
     root = REPO_ROOT / "agents"
-    versions: list[str] = []
-    if root.exists():
-        for d in sorted((p for p in root.iterdir() if p.is_dir()), key=lambda x: x.name):
-            manifest = d / "agent.yaml"
-            if manifest.exists():
-                versions.append(f"{d.name}@0.1")
-    return versions or ["react_demo@0.1"]
+    out: list[dict[str, str]] = []
+    if not root.exists():
+        return out
+    for d in sorted((p for p in root.iterdir() if p.is_dir()), key=lambda x: x.name):
+        desc = ""
+        readme = d / "README.md"
+        if readme.exists():
+            try:
+                lines = readme.read_text(encoding="utf-8").splitlines()
+            except (OSError, ValueError):
+                lines = []
+            # 标题行之后的第一段非空文字（去掉标题本身）
+            for line in lines[1:]:
+                stripped = line.strip().lstrip("#").strip()
+                if stripped:
+                    desc = stripped
+                    break
+        out.append({
+            "name": d.name,
+            "version": f"{d.name}@0.1",
+            "desc": desc or "一个可以拿来测的 Agent（README 没写简介）。",
+        })
+    return out

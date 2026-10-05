@@ -37,7 +37,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from sandbox import detectors, metrics
+from sandbox import config, detectors, metrics, user_llm
 from sandbox.api import exempt, explain, manual, nl_wizard, paths, queries, wizard
 from sandbox.api.jobs import Job, JobRegistry, JobStep
 from sandbox.checkup import catalog
@@ -463,12 +463,70 @@ def create_app(
         "一切正常，不该报警",
     ]
 
-    def _nl_page(request: Request, text: str = "", error: str | None = None) -> Response:
+    def _nl_page(
+        request: Request,
+        text: str = "",
+        error: str | None = None,
+        selected_agents: list[str] | None = None,
+    ) -> Response:
         return templates.TemplateResponse(
             request,
             "nl.html",
-            {"text": text, "examples": _NL_EXAMPLES, "error": error, "active": app.state.jobs.active},
+            {
+                "text": text,
+                "examples": _NL_EXAMPLES,
+                "error": error,
+                "active": app.state.jobs.active,
+                "agents": nl_wizard.agents_list(),
+                "connection_text": user_llm.status_text(),
+                "connection_ready": user_llm.ready(),
+                "selected_agents": selected_agents or [],
+            },
         )
+
+    @app.get("/settings", response_class=HTMLResponse)
+    async def settings_page(request: Request, saved: int = 0) -> Response:
+        conn = user_llm.load()
+        current = user_llm.effective()
+        return templates.TemplateResponse(
+            request,
+            "settings.html",
+            {
+                "base_url": conn["base_url"] if conn else (config.settings.upstream_base_url if config.settings.upstream_api_key else ""),
+                "model": conn["model"] if conn else "deepseek-chat",
+                "has_key": bool(conn or config.settings.upstream_api_key),
+                "saved": saved,
+                "current": current,
+                "active": app.state.jobs.active,
+            },
+        )
+
+    @app.post("/settings", response_class=HTMLResponse)
+    async def settings_save(request: Request) -> Response:
+        raw = await request.form()
+        base_url = str(raw.get("base_url") or "").strip()
+        api_key = str(raw.get("api_key") or "").strip()
+        model = str(raw.get("model") or "").strip()
+        if str(raw.get("submit") or "") == "clear":
+            user_llm.clear()
+            return RedirectResponse(url="/settings?cleared=1", status_code=303)
+        if not base_url or not api_key:
+            conn = user_llm.load()
+            return templates.TemplateResponse(
+                request,
+                "settings.html",
+                {
+                    "base_url": base_url or (conn["base_url"] if conn else ""),
+                    "model": model or (conn["model"] if conn else "deepseek-chat"),
+                    "has_key": bool(conn or config.settings.upstream_api_key),
+                    "saved": 0,
+                    "error": "接口地址和密钥都要填（密钥只存在这台机器上，不随项目发出去）。",
+                    "current": user_llm.effective(),
+                    "active": app.state.jobs.active,
+                },
+            )
+        user_llm.save(base_url, api_key, model)
+        return RedirectResponse(url="/settings?ok=1", status_code=303)
 
     @app.get("/scenarios/plain", response_class=HTMLResponse)
     async def nl_start(request: Request) -> Response:
@@ -478,14 +536,17 @@ def create_app(
     async def nl_parse(request: Request) -> Response:
         raw = await request.form()
         text = str(raw.get("text") or "").strip()
-        # 「返回改一改」：原文填回输入框，不重新解析。
+        selected = [a for a in raw.getlist("agents") if a] or None
+        if selected and len(selected) > 2:
+            return _nl_page(request, text=text, selected_agents=selected[:2], error="一次最多选两个 Agent：一个单独测，两个测它们之间的接力。")
+        # 「返回改一改」：原文与所选 Agent 一起填回，不重新解析。
         if str(raw.get("submit") or "") == "back":
-            return _nl_page(request, text=text)
+            return _nl_page(request, text=text, selected_agents=selected)
 
         try:
             facts = wizard.tool_facts()
             answers, nl_warns = await nl_wizard.answers_from_text(
-                text, facts, nl_wizard.agent_versions()
+                text, facts, nl_wizard.agent_versions(), selected_agents=selected
             )
             paths.check_scenario_id(answers.scenario_id)
         except (nl_wizard.PlainTextError, paths.ScenarioPathError) as exc:
@@ -497,6 +558,7 @@ def create_app(
             return _nl_page(
                 request,
                 text=text,
+                selected_agents=selected,
                 error=(
                     f"已经有一个叫 {answers.scenario_id!r} 的场景了（{path.name}）。"
                     f"换一句更具体的话，或者去「场景」列表里打开它改。"
@@ -510,6 +572,7 @@ def create_app(
             "warnings": nl_warns + wizard.warnings(answers, facts),
             "yaml_text": wizard.build_yaml(answers, facts),
             "active": app.state.jobs.active,
+            "agents": selected or [],
         }
         return templates.TemplateResponse(request, "nl_confirm.html", context)
 

@@ -684,3 +684,31 @@ table.grid td > code, table.grid th > code { background: var(--bg-soft); }
 .chip { display: inline-flex; align-items: center; padding: 0.22rem 0.65rem; border-radius: 999px;
         background: var(--panel, #fff); border: 1px solid var(--line, #d8d8de);
         color: var(--muted, #667); font-size: 0.82rem; }
+
+
+/* 自然语言录入：选 Agent 卡片 */
+.agent-pick {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+.agent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  background: #fff;
+  transition: border-color .15s, box-shadow .15s;
+}
+.agent-card:hover { border-color: var(--brand, #2563eb); }
+.agent-card input { align-self: flex-start; }
+.agent-card:has(input:checked) {
+  border-color: var(--brand, #2563eb);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, .18);
+}
+.agent-name { font-weight: 600; }
+.agent-desc { font-size: 13px; color: var(--muted, #64748b); line-height: 1.45; }

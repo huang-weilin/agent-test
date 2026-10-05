@@ -4,28 +4,56 @@
 
 <h1>用大白话建一个测试</h1>
 <p class="plain">
-  不用填表、不用写代码。把你想验证的事<strong>用一句话说清楚</strong>，
+  三步：连上你的模型 → 选要测的 Agent → 说一句想验证的事。
   机器先把它翻译成一份测试，给你看「打算怎么判」，你点头才存。
 </p>
 
 {% if error %}
 <div class="panel bad">
-  <h2>这一句还不行</h2>
+  <h2>这一步还不行</h2>
   <p>{{ error }}</p>
 </div>
 {% endif %}
 
 <form method="post" action="/scenarios/plain">
+
   <div class="panel">
+    <h2>第 1 步 · 连上解析用的模型</h2>
+    <p>{{ connection_text }}</p>
+    {% if not connection_ready %}
+    <p class="note">去<a href="/settings">连接设置</a>填你的接口地址和密钥。不连也能用：机器会用内置规则先猜一版草稿，确认时看仔细点。</p>
+    {% else %}
+    <p class="note">想换模型？<a href="/settings">连接设置</a>里改。</p>
+    {% endif %}
+  </div>
+
+  <div class="panel">
+    <h2>第 2 步 · 选要测的 Agent</h2>
+    <p class="note">选一个单独测；选两个就测它们之间的接力（第一个跑第一段、第二个接第二段）。</p>
+    <div class="agent-pick">
+      {% for agent in agents %}
+      <label class="agent-card">
+        <input type="checkbox" name="agents" value="{{ agent.version }}"
+               {{ 'checked' if agent.version in selected_agents else '' }}>
+        <span class="agent-name">{{ agent.name }}</span>
+        <span class="agent-desc">{{ agent.desc | truncate(90) }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>第 3 步 · 用大白话描述要验证的事</h2>
     <p>
       <label for="text">你想测什么？（说人话就行）</label><br>
-      <textarea id="text" name="text" rows="5" placeholder="例如：测付款助手——同一笔钱会不会被付两次？应该要能抓到。">{{ text }}</textarea>
+      <textarea id="text" name="text" rows="4" placeholder="例如：同一笔钱会不会被付两次？应该要能抓到。">{{ text }}</textarea>
     </p>
     <div class="row">
       <button class="primary" type="submit">帮我生成测试</button>
       <span class="note">不会立刻存盘：先给你看机器打算怎么判，你确认才存。</span>
     </div>
   </div>
+
 </form>
 
 <div class="panel">

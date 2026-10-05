@@ -38,6 +38,7 @@
       'database': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
       'shield': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
       'book': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+      'key': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>',
     } %}
     {% set path = request.url.path if request is defined else '/' %}
     {% for group, items in nav %}
@@ -52,6 +53,7 @@
 
     <nav class="nav-group">
       <div class="nav-label">其他</div>
+      <a class="nav-item {{ 'on' if path.startswith('/settings') else '' }}" href="/settings"><span class="nav-ico">{{ ico['key'] | safe }}</span>连接设置</a>
       <a class="nav-item {{ 'on' if path.startswith('/help') else '' }}" href="/help"><span class="nav-ico">{{ ico['book'] | safe }}</span>使用手册</a>
     </nav>
 
@@ -72,6 +74,7 @@
             {% endif %}
           {% endfor %}
         {% endfor %}
+        {% if not matched.sep and path.startswith('/settings') %}<span class="sep">/</span><span>连接设置</span>{% endif %}
         {% if not matched.sep and path.startswith('/help') %}<span class="sep">/</span><span>使用手册</span>{% endif %}
       </div>
       <span class="spacer"></span>

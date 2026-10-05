@@ -10,7 +10,16 @@
 </p>
 
 <div class="panel">
-  <h2>一、判卷标准</h2>
+  <h2>一、测谁</h2>
+  {% if agents %}
+  <p>这次被测试的 Agent：{% for a in agents %}<code>{{ a }}</code>{% if not loop.last %} 接力 → {% endif %}{% endfor %}</p>
+  {% else %}
+  <p>这次被测试的 Agent：<code>react_demo@0.1</code>（没勾选，用了默认）。</p>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2>二、判卷标准</h2>
   {% if plan %}
   <table class="grid tight">
     <thead>
@@ -40,7 +49,7 @@
 
 {% if warnings %}
 <div class="panel warn">
-  <h2>二、这几处要注意</h2>
+  <h2>三、这几处要注意</h2>
   <ul>
     {% for text in warnings %}<li>{{ text }}</li>{% endfor %}
   </ul>
@@ -48,7 +57,7 @@
 {% endif %}
 
 <div class="panel">
-  <h2>{{ '三' if warnings else '二' }}、会存成这样一份测试</h2>
+  <h2>{{ '四' if warnings else '三' }}、会存成这样一份测试</h2>
   <p class="note">
     存成 <code>scenarios/{{ scenario_id }}.yaml</code>。存完可以在编辑器里接着改。
   </p>
@@ -67,6 +76,7 @@
   <form class="inline" method="post" action="/scenarios/plain">
     <input type="hidden" name="text" value="{{ origin_text }}">
     <input type="hidden" name="submit" value="back">
+    {% for a in agents %}<input type="hidden" name="agents" value="{{ a }}">{% endfor %}
     <button type="submit">返回改一改</button>
   </form>
 </div>
