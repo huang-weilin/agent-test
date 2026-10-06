@@ -37,8 +37,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from sandbox import config, detectors, metrics, prefs, user_llm
-from sandbox.api import exempt, explain, manual, nl_wizard, paths, queries, wizard
+from sandbox import config, detectors, metrics, user_llm
+from sandbox.api import agents_registry, exempt, explain, manual, nl_wizard, paths, queries, wizard
 from sandbox.api.jobs import Job, JobRegistry, JobStep
 from sandbox.checkup import catalog
 from sandbox.checkup import report as checkup_report
@@ -245,7 +245,6 @@ def create_app(
     # 前者漏了会**当场报错**（模板里 `explain` 未定义），后者漏了是渲染成空白
     # ——而空白和"这一节没什么好说的"在页面上一模一样。见 `api/explain.py`。
     templates.env.globals["explain"] = explain
-    templates.env.globals["ui_mode"] = prefs.load_mode
 
     app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 
@@ -330,6 +329,18 @@ def create_app(
 
     # --- 页面 -------------------------------------------------------------
 
+    def _agents_text(scenario: Any) -> str:
+        """测试任务里跑的是哪些 Agent，展示成一行人话。"""
+        seen: list[str] = []
+        for a in scenario.agents:
+            if a.version not in seen:
+                seen.append(a.version)
+        if not seen:
+            return ""
+        if len(seen) == 1:
+            return "Agent：" + seen[0]
+        return "Agent 接力：" + " → ".join(seen)
+
     @app.get("/", response_class=HTMLResponse)
     async def home(request: Request) -> Response:
         entries = []
@@ -343,6 +354,7 @@ def create_app(
                         "sessions": len(scenario.sessions),
                         "tools": len(scenario.tools),
                         "expects": len(scenario.expect),
+                        "agents_text": _agents_text(scenario),
                         "error": None,
                     }
                 except ScenarioError as exc:
@@ -357,6 +369,12 @@ def create_app(
                 }
             entries.append(entry)
 
+        latest: dict[str, bool | None] = {}
+        for r in await queries.recent_runs(limit=8):
+            latest.setdefault(r.scenario_id, r.verdict_ok)
+        for entry in entries:
+            entry["latest_verdict"] = latest.get(entry["id"])
+
         return templates.TemplateResponse(
             request,
             "home.html",
@@ -366,9 +384,48 @@ def create_app(
                 "budget": await cost.budget_status(),
                 "active": app.state.jobs.active,
                 "verdict_label": _verdict_label,
-                "mode": prefs.load_mode(),
             },
         )
+
+    @app.get("/agents", response_class=HTMLResponse)
+    async def agents_page(request: Request) -> Response:
+        return templates.TemplateResponse(
+            request,
+            "agents.html",
+            {
+                "agents": agents_registry.list_registered(),
+                "error": None,
+                "active": app.state.jobs.active,
+            },
+        )
+
+    @app.post("/agents/import", response_class=HTMLResponse)
+    async def agents_import(request: Request) -> Response:
+        form = await request.form()
+        try:
+            agents_registry.register(
+                name=str(form.get("name") or ""),
+                desc=str(form.get("desc") or ""),
+                source_dir=str(form.get("source_dir") or ""),
+                entry=str(form.get("entry") or "agent.py"),
+                python=str(form.get("python") or ""),
+            )
+        except agents_registry.RegistryError as exc:
+            return templates.TemplateResponse(
+                request,
+                "agents.html",
+                {
+                    "agents": agents_registry.list_registered(),
+                    "error": str(exc),
+                    "active": app.state.jobs.active,
+                },
+            )
+        return RedirectResponse(url="/agents", status_code=303)
+
+    @app.post("/agents/{name}/delete", response_class=HTMLResponse)
+    async def agents_delete(name: str, request: Request) -> Response:
+        agents_registry.unregister(name)
+        return RedirectResponse(url="/agents", status_code=303)
 
     def _wizard_context(data: wizard.FormData, error: str | None = None) -> dict[str, Any]:
         """问卷页和确认页共用的上下文。
@@ -453,7 +510,7 @@ def create_app(
 
     # --- 自然语言录入 ---------------------------------------------------------
     #
-    # 一条大白话 → `wizard.Answers` → 与向导完全相同的确认页与存盘管道。
+    # 一句你想验证的话 → `wizard.Answers` → 与向导完全相同的确认页与存盘管道。
     # `nl_wizard.answers_from_text` 优先走 LLM、失败降级本地规则；两条路径的
     # 产出都回显「机器打算这样判」，确认后走 `/scenarios/{id}/save` 落盘。
     # 所以自然语言建出来的场景和手写/向导建的没有任何区别，也没有第二条真相源。
@@ -503,13 +560,12 @@ def create_app(
             request,
             "settings.html",
             {
-                "base_url": conn["base_url"] if conn else (config.settings.upstream_base_url if config.settings.upstream_api_key else ""),
-                "model": conn["model"] if conn else "deepseek-chat",
+                "base_url": conn["base_url"] if conn else "",
+                "model": conn["model"] if conn else "",
                 "has_key": bool(conn or config.settings.upstream_api_key),
                 "saved": saved,
                 "current": current,
                 "active": app.state.jobs.active,
-                "mode": prefs.load_mode(),
             },
         )
 
@@ -529,33 +585,16 @@ def create_app(
                 "settings.html",
                 {
                     "base_url": base_url or (conn["base_url"] if conn else ""),
-                    "model": model or (conn["model"] if conn else "deepseek-chat"),
+                    "model": model or (conn["model"] if conn else ""),
                     "has_key": bool(conn or config.settings.upstream_api_key),
                     "saved": 0,
                     "error": "接口地址和密钥都要填（密钥只存在这台机器上，不随项目发出去）。",
                     "current": user_llm.effective(),
                     "active": app.state.jobs.active,
-                    "mode": prefs.load_mode(),
                 },
             )
         user_llm.save(base_url, api_key, model)
         return RedirectResponse(url="/settings?ok=1", status_code=303)
-
-    @app.api_route("/mode", methods=["GET", "POST"])
-    async def switch_mode(request: Request) -> Response:
-        """切简单版 / 专业版。
-
-        页面右上角那个按钮和「连接设置」里的选项卡都走这里：GET 带
-        `?to=simple|pro`，POST 带 `ui_mode` 字段。存完跳回来源页。
-        """
-        if request.method == "POST":
-            raw = await request.form()
-            mode = str(raw.get("ui_mode") or "").strip()
-        else:
-            mode = str(request.query_params.get("to") or "").strip()
-        prefs.save_mode(mode)
-        nxt = request.headers.get("referer") or "/"
-        return RedirectResponse(url=nxt, status_code=303)
 
     @app.get("/scenarios/plain", response_class=HTMLResponse)
     async def nl_start(request: Request) -> Response:
@@ -1016,16 +1055,20 @@ def create_app(
     async def metrics_dashboard(
         request: Request, limit: int = DEFAULT_METRICS_LIMIT, scenario: str | None = None
     ) -> Response:
+        limit = _clamp_limit(limit)
         return templates.TemplateResponse(
             request,
             "metrics.html",
             {
                 "report": await metrics.report(
-                    limit=_clamp_limit(limit),
+                    limit=limit,
                     # 空串按"没给"处理：表单/链接拼出来一个 `scenario=` 是常见
                     # 写法，而它当过滤条件用的话会筛出**零条**——页面上写着
                     # "最近 50 次运行（实际取到 0 次）"，用户以为自己没跑过东西。
                     scenario_id=scenario or None,
+                ),
+                "runs": await queries.report_rows(
+                    limit=limit, scenario_id=scenario or None
                 ),
                 "active": app.state.jobs.active,
             },

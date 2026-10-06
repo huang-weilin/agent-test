@@ -1913,29 +1913,6 @@ async def test_run_page_separates_the_two_kinds_of_missing_watchdog(
     )
 
 
-async def test_the_metrics_page_shows_our_own_time_as_its_own_row(
-    client: httpx.AsyncClient, watchdog_rows: dict
-) -> None:
-    """看板上那笔时间必须**单列一行**，而且要点明有多少次调用没跑到看门狗上。
-
-    只看中位数会把"其实一大半调用根本没扫"读成"看门狗很便宜"——分母里少了
-    多少，是这一行能不能读的前提。后半句同样要写：`NULL` 有两种来路（被边界拦下的、
-    这一列加出来之前落的行），把那句省掉，"N 次没跑到"就会被一律读成前者。
-    """
-    page = (await client.get("/metrics")).text
-    table = re.split(r"<h2[^>]*>延迟</h2>", page)[1].split("</table>")[0]
-
-    assert "其中：看门狗" in table
-    assert "137 ms" in table
-    assert "没跑到" in page
-    assert "这一列加出来之前" in page, (
-        "NULL 的两种来路要在页面上分开写——只印一个数，读的人会以为"
-        "每一次都是被边界拦下的"
-    )
-    # 工具调用那一行**不含**看门狗，所以它是另一个数：7 ms / 2 ms 那两条。
-    assert "其中：看门狗" not in re.split(r"<h2[^>]*>延迟</h2>", page)[0]
-
-
 def test_templates_do_not_render_markdown_asterisks() -> None:
     """模板里的强调要写成 `<strong>`，不能写成 Markdown 的 `**`。
 
@@ -2764,36 +2741,17 @@ async def test_metrics_page_counts_the_three_verdict_states_apart(
     assert "3/4" not in page
 
 
-async def test_metrics_page_splits_the_failure_causes(
+async def test_metrics_page_lists_reports_with_problem_counts(
     client: httpx.AsyncClient, metrics_runs: None
 ) -> None:
+    """报告页的核心：概要 + 报告列表，每行能点进一份报告。"""
     page = (await client.get("/metrics")).text
 
-    # 三类原因都在，且各自是它自己那一行。
-    assert "没跑到能判定的地方" in page
-    assert "目标系统侧的扣款对不上" in page
-    assert "前提不成立" in page
-    assert "预期未达成" in page
-    # 一次运行可以同时占好几行——这句话必须写着，否则那几行看起来能相加。
-    assert "一次运行可能同时占好几行" in page
-    # 两类成因分开数（同一条运行两种都占）。
-    assert "预期没命中 1 条" in page
-    assert "出现没预料到的结论" in page
-
-
-async def test_metrics_page_does_not_call_the_rate_an_agent_grade(
-    client: httpx.AsyncClient, metrics_runs: None
-) -> None:
-    """页面必须说出这个数**不是**什么。
-
-    这一页最容易变成的假话是"通过率 33%"——读的人会当成 Agent 的合格率，
-    而预期没命中往往恰恰说明用例要改。措辞是这一页的承重墙，所以它由测试钉住。
-    """
-    page = (await client.get("/metrics")).text
-
-    assert "这个数不叫「Agent 合格率」" in page
-    assert "多半是我们预料它做的那个错没出现" in page
+    assert "报告列表" in page
     assert "预期达成率" in page
+    # 每条运行一行，带结论、问题数、报告入口。
+    assert "看报告" in page
+    assert "/runs/" in page
 
 
 async def test_metrics_page_on_an_empty_database_says_no_samples(
@@ -2805,6 +2763,8 @@ async def test_metrics_page_on_an_empty_database_says_no_samples(
     assert "实际取到 0 次" in page
     # 没有运行的时候不许印 0%——那会被读成"全都不达标"。
     assert "0.0%" not in page
+    # 空库时报告列表给空状态。
+    assert "还没有运行记录" in page
 
 
 async def test_metrics_limit_is_clamped(
@@ -2823,9 +2783,9 @@ async def test_metrics_page_filters_by_scenario(
     client: httpx.AsyncClient, metrics_runs: None
 ) -> None:
     page = (await client.get("/metrics?scenario=clean")).text
-    assert "场景 clean 的最近 50 次运行（实际取到 4 次）" in page
+    assert "测试 clean 的最近 50 次运行（实际取到 4 次）" in page
 
     # 查一个不存在的场景：范围那句话要说清是**筛出来的零条**，不是一个空库。
     missing = (await client.get("/metrics?scenario=nope")).text
-    assert "场景 nope 的最近 50 次运行（实际取到 0 次）" in missing
+    assert "测试 nope 的最近 50 次运行（实际取到 0 次）" in missing
     assert "没有样本" in missing

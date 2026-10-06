@@ -628,7 +628,7 @@ sleep、cron 走的仍是真实时间。写在页面上而不是只写在文档�
 
 ## 测试
 
-`tests/test_api.py`，120 条。用 `httpx.ASGITransport` 而不是 `TestClient`——后者会
+`tests/test_api.py`，118 条。用 `httpx.ASGITransport` 而不是 `TestClient`——后者会
 为每个请求起一个新的事件循环，而这个应用的状态（作业登记表）活在事件循环里，
 用 `TestClient` 测出来的并发行为和真实运行时不是一回事。
 

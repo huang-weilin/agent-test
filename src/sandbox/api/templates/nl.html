@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}用大白话建测试{% endblock %}
+{% block title %}用一句话建测试{% endblock %}
 {% block body %}
 
-<h1>用大白话建一个测试</h1>
+<h1>用一句话建一个测试</h1>
 <p class="plain">
   三步：连上你的模型 → 选要测的 Agent → 说一句想验证的事。
   机器先把它翻译成一份测试，给你看「打算怎么判」，你点头才存。
@@ -43,7 +43,7 @@
   </div>
 
   <div class="panel">
-    <h2>第 3 步 · 用大白话描述要验证的事</h2>
+    <h2>第 3 步 · 用一句话描述要验证的事</h2>
     <p>
       <label for="text">你想测什么？（说人话就行）</label><br>
       <textarea id="text" name="text" rows="4" placeholder="例如：同一笔钱会不会被付两次？应该要能抓到。">{{ text }}</textarea>

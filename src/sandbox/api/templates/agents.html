@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}我的 Agent{% endblock %}
+{% block body %}
+
+<h1>我的 Agent</h1>
+<p class="plain">
+  这里登记你自己写的 Agent。登记之后，它就会出现在「测试任务」和「用一句话建测试」
+  的 Agent 选择里，跟内置的 Agent 一样被测。
+</p>
+
+{% if error %}
+<div class="panel bad">
+  <h2>没登记成功</h2>
+  <p>{{ error }}</p>
+</div>
+{% endif %}
+
+{% if agents %}
+<h2>已登记的 Agent</h2>
+<table class="grid">
+  <thead>
+    <tr><th>名字</th><th>描述</th><th>目录</th><th>入口</th><th>Python</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for a in agents %}
+    <tr>
+      <td><code>{{ a.name }}</code></td>
+      <td>{{ a.desc or '—' }}</td>
+      <td class="dim">{{ a.source_dir }}</td>
+      <td><code>{{ a.entry }}</code></td>
+      <td>{{ a.python or '自动找 venv' }}</td>
+      <td class="actions">
+        <form method="post" action="/agents/{{ a.name }}/delete">
+          <button class="btn" type="submit">删除</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">还没有登记的 Agent。用下面的表单把你自己的 Agent 接进来。</div>
+{% endif %}
+
+<h2>登记一个新 Agent</h2>
+<form method="post" action="/agents/import">
+  <div class="panel">
+    <p>
+      <label for="name">名字（小写字母、数字、-、_）</label><br>
+      <input id="name" name="name" required placeholder="my_agent" style="width:100%">
+    </p>
+    <p>
+      <label for="desc">一句话描述（显示在测试任务和自然语言录入里）</label><br>
+      <input id="desc" name="desc" placeholder="这个 Agent 是干什么的" style="width:100%">
+    </p>
+    <p>
+      <label for="source_dir">Agent 目录（你机器上的绝对路径）</label><br>
+      <input id="source_dir" name="source_dir" required placeholder="D:\my-project\my_agent" style="width:100%">
+    </p>
+    <p>
+      <label for="entry">入口文件（相对于 Agent 目录）</label><br>
+      <input id="entry" name="entry" value="agent.py" style="width:100%">
+    </p>
+    <p>
+      <label for="python">Python 命令（留空 = 自动找目录下的 .venv，找不到就用系统 python）</label><br>
+      <input id="python" name="python" placeholder="python" style="width:100%">
+    </p>
+    <div class="row">
+      <button class="primary" type="submit">登记</button>
+    </div>
+  </div>
+</form>
+
+<h2>你的 Agent 需要怎么接入</h2>
+<div class="panel">
+  <p class="plain">被测时，引擎会在你的进程里注入下面这几个环境变量，入口脚本照它们办事：</p>
+  <table class="grid tight">
+    <thead><tr><th>环境变量</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>SANDBOX_AGENT_TASK</code></td><td>这一段会话里用户说的话（你的任务）</td></tr>
+      <tr><td><code>SANDBOX_GATEWAY_BASE_URL</code></td><td>模型网关地址（OpenAI 兼容格式），配 <code>SANDBOX_AGENT_API_KEY</code> 一起用</td></tr>
+      <tr><td><code>SANDBOX_AGENT_MODEL</code></td><td>模型名</td></tr>
+      <tr><td><code>SANDBOX_TOOL_BASE_URL</code></td><td>工具网关地址（调用被测工具用）</td></tr>
+      <tr><td><code>SANDBOX_AGENT_MEMORY_DIR</code></td><td>记忆目录</td></tr>
+    </tbody>
+  </table>
+  <p class="note">完整的接入说明和示例见<a href="/help">使用手册</a>第 4 节。</p>
+</div>
+
+{% endblock %}

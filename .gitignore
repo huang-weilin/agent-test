@@ -35,7 +35,7 @@ data/
 # 用户界面里配的 LLM 连接（key 只在本机）
 .agent_sandbox_local.json
 
-# 界面偏好（简单版/专业版）—— 本机显示设置，不随项目发出去
+# 界面偏好（本机显示设置，不随项目发出去）
 .agent_sandbox_prefs.json
 
 # Claude Code 本地个人设置（项目级 settings.json 要提交，local 不提交）

@@ -1,17 +1,45 @@
 {% extends "base.html" %}
-{% block title %}连接设置{% endblock %}
+{% block title %}连接设置<script>
+const PROVIDERS = {
+  deepseek: ['https://api.deepseek.com', 'deepseek-chat'],
+  openai: ['https://api.openai.com/v1', 'gpt-4o-mini'],
+  kimi: ['https://api.moonshot.cn/v1', 'moonshot-v1-8k'],
+  glm: ['https://open.bigmodel.cn/api/paas/v4', 'glm-4-flash'],
+  qwen: ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen-turbo'],
+  custom: ['', ''],
+};
+const sel = document.getElementById('provider');
+const url = document.getElementById('base_url');
+const model = document.getElementById('model');
+function guessProvider() {
+  const v = (url.value || '').trim();
+  for (const [k, [u]] of Object.entries(PROVIDERS)) {
+    if (u && v.startsWith(u)) return k;
+  }
+  return '';
+}
+sel.value = guessProvider();
+sel.addEventListener('change', () => {
+  const [u, m] = PROVIDERS[sel.value] || ['', ''];
+  if (u) url.value = u;
+  url.placeholder = u || 'https://…';
+  if (m) model.value = m;
+  model.placeholder = m || '模型名';
+});
+</script>
+{% endblock %}
 {% block body %}
 
 <h1>连接你的模型</h1>
 <p class="plain">
-  这一栏只做一件事：给「把大白话翻译成测试」的解析模型填连接。
+  这一栏只做一件事：配置一个模型，用来理解你说的话。
   密钥<strong>只存在这台机器上</strong>，不随项目发出去，也不会发给被测的 Agent。
 </p>
 
 {% if saved == 1 %}
 <div class="panel ok">
   <h2>已保存</h2>
-  <p>连接已生效，去<a href="/scenarios/plain">用大白话建测试</a>试试。</p>
+  <p>连接已生效，去<a href="/scenarios/plain">用一句话建测试</a>试试。</p>
 </div>
 {% endif %}
 
@@ -37,10 +65,22 @@
 <form method="post" action="/settings">
   <div class="panel">
     <h2>填你的模型连接</h2>
-    <p class="note">支持任何 OpenAI 兼容接口。默认 DeepSeek：接口 <code>https://api.deepseek.com</code>，模型 <code>deepseek-chat</code>。</p>
+    <p class="note">选一个服务商，接口地址和模型名会自动填好；也可以选「自定义接口」自己填。</p>
+    <p>
+      <label for="provider">服务商</label><br>
+      <select id="provider" name="provider" style="width:100%">
+        <option value="">选择服务商</option>
+        <option value="deepseek">DeepSeek</option>
+        <option value="openai">OpenAI</option>
+        <option value="kimi">Moonshot Kimi</option>
+        <option value="glm">智谱 GLM</option>
+        <option value="qwen">通义千问</option>
+        <option value="custom">自定义接口</option>
+      </select>
+    </p>
     <p>
       <label for="base_url">接口地址</label><br>
-      <input id="base_url" name="base_url" value="{{ base_url }}" placeholder="https://api.deepseek.com" style="width:100%">
+      <input id="base_url" name="base_url" value="{{ base_url }}" placeholder="https://…" style="width:100%">
     </p>
     <p>
       <label for="api_key">密钥</label><br>
@@ -49,7 +89,7 @@
     </p>
     <p>
       <label for="model">模型名</label><br>
-      <input id="model" name="model" value="{{ model }}" placeholder="deepseek-chat" style="width:100%">
+      <input id="model" name="model" value="{{ model }}" placeholder="模型名" style="width:100%">
     </p>
     <div class="row">
       <button class="primary" type="submit">保存连接</button>
@@ -60,33 +100,5 @@
   </div>
 </form>
 
-{% if mode is defined %}
-<div class="panel">
-  <h2>界面模式</h2>
-  <p class="note">简单版给第一次用的人，首页只留三个入口；专业版打开全部功能（指标、回归集、成本、记忆、审计日志）。随时可以切，不影响已保存的数据。</p>
-  <form method="post" action="/mode" class="mode-pick">
-    <label class="agent-card">
-      <input type="radio" name="ui_mode" value="simple" {{ 'checked' if mode == 'simple' else '' }}>
-      <span class="agent-name">简单版</span>
-      <span class="agent-desc">只留最常用的三个入口，适合第一次用、不懂技术的人。</span>
-    </label>
-    <label class="agent-card">
-      <input type="radio" name="ui_mode" value="pro" {{ 'checked' if mode == 'pro' else '' }}>
-      <span class="agent-name">专业版</span>
-      <span class="agent-desc">打开全部功能：指标、回归集、成本、记忆、审计日志。适合工程师。</span>
-    </label>
-    <div style="grid-column:1 / -1"><button class="primary" type="submit">保存界面模式</button></div>
-  </form>
-</div>
-{% endif %}
-
-<div class="panel">
-  <h2>为什么密钥不会泄露</h2>
-  <p>
-    被测的 Agent 在沙盒里拿到的<strong>永远是假凭据</strong>——真正验证它靠的是模拟目标
-    和拦截器，不是你的真实 key。你填的这个 key 只在界面进程里用于「翻译大白话」，
-    两条路完全不搭界。
-  </p>
-</div>
 
 {% endblock %}

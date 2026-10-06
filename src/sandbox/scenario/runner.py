@@ -37,6 +37,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import socket
@@ -1009,17 +1010,37 @@ class ScenarioRunner:
         （见 `SessionSpec.task`）。
         """
         agent_dir = self.repo_root / "agents" / agent.directory
-        python = agent_dir / ".venv" / "Scripts" / "python.exe"
-        if not python.exists():
-            # Windows 的 venv 布局。非 Windows 上退回 posix 布局，让这个
-            # 运行器至少能在别处跑起来，而不是只在开发机上能跑。
-            alt = agent_dir / ".venv" / "bin" / "python"
-            python = alt if alt.exists() else python
-        if not python.exists():
-            raise FileNotFoundError(
-                f"Agent 解释器不存在：{python}。请先在 {agent_dir} 下建好 venv 并装依赖"
-                f"（见 agents/{agent.directory}/README.md）。"
-            )
+        base_dir = agent_dir
+        entry = agent.entry
+        python_arg = ""
+        meta = agent_dir / "AGENT.json"
+        if meta.exists():
+            # 用户导入的 Agent：AGENT.json 指向它自己的目录和启动方式。
+            try:
+                obj = json.loads(meta.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                obj = {}
+            src = str(obj.get("source_dir") or "").strip()
+            if src:
+                base_dir = Path(src)
+            entry = str(obj.get("entry") or entry)
+            python_arg = str(obj.get("python") or "").strip()
+        if python_arg:
+            exe = shutil.which(python_arg) or python_arg
+        else:
+            python = base_dir / ".venv" / "Scripts" / "python.exe"
+            if not python.exists():
+                # Windows 的 venv 布局。非 Windows 上退回 posix 布局，让这个
+                # 运行器至少能在别处跑起来，而不是只在开发机上能跑。
+                alt = base_dir / ".venv" / "bin" / "python"
+                python = alt if alt.exists() else python
+            if not python.exists():
+                raise FileNotFoundError(
+                    f"Agent 解释器不存在：{python}。请先在 {agent_dir} 下建好 venv 并装依赖"
+                    f"（见 agents/{agent.directory}/README.md），"
+                    f"或者在「我的 Agent」里登记时填 Python 命令。"
+                )
+            exe = str(python)
 
         env = {
             # 场景自带的环境变量放在前面，让沙箱注入的**覆盖**它。
@@ -1040,8 +1061,8 @@ class ScenarioRunner:
 
         started = time.perf_counter()
         proc = subprocess.Popen(
-            [str(python), agent.entry],
-            cwd=str(agent_dir),
+            [exe, entry],
+            cwd=str(base_dir),
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

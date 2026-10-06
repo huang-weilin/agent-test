@@ -173,7 +173,7 @@ def test_headings_shift_down_one_level() -> None:
     assert outline == [("s0", "一节")], "只有二级标题进目录"
 
 
-def test_the_manual_has_exactly_one_top_heading_and_fourteen_sections() -> None:
+def test_the_manual_has_exactly_one_top_heading_and_ten_sections() -> None:
     """现算：手册里有几个一级/二级标题，页面上就该有几个 h2、几个锚点。
 
     **数标题不能拿正则扫原文**：第 11 节那段 YAML 里有一行 `# 不写 = 不检查`，
@@ -189,7 +189,7 @@ def test_the_manual_has_exactly_one_top_heading_and_fourteen_sections() -> None:
         if kind == "heading"
     ]
     assert levels.count(1) == 1, f"一级标题有 {levels.count(1)} 个"
-    assert levels.count(2) == 14, f"二级标题有 {levels.count(2)} 个"
+    assert levels.count(2) == 10, f"二级标题有 {levels.count(2)} 个"
     assert str(body).count("<h2>") == 1
     assert len(outline) == levels.count(2)
 
@@ -384,7 +384,7 @@ async def test_every_toc_link_points_at_a_real_anchor(ui: httpx.AsyncClient) -> 
     body, outline = manual.page(manual.manual_text())
     page = (await ui.get("/help")).text
     anchors = re.findall(r'<li><a href="#([^"]+)">', page)
-    assert len(anchors) == len(outline) == 14
+    assert len(anchors) == len(outline) == 10
     for anchor in anchors:
         assert f'id="{anchor}"' in page, f"目录里的 {anchor} 没有落点"
 

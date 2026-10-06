@@ -15,7 +15,6 @@
    标签的解释**跟着这次运行的实际结论走**，不是列一张三格的图例：一次通过的
    运行旁边写着"未留存是什么意思"，读的人会以为这次是未留存。 #}
 {% set verdict_key = 'unknown' if run.verdict_ok is none else ('pass' if run.verdict_ok else 'fail') %}
-<p class="lede">{{ explain.PAGE_INTRO }}</p>
 <p class="lede">
   运行 <code>{{ run.id }}</code> ·
   {{ run.started_at | localdt }} 起 ·
@@ -91,15 +90,6 @@
 </section>
 
 
-<details class="howto">
-  <summary>第一次看报告？先读这里</summary>
-  <ol>
-    <li><strong>最上面那句结论</strong>：这次测试通过了没、下一步该做什么。</li>
-    <li><strong>检测结论</strong>：红色的条目就是被抓到的问题，点「细节」能看机器抓到的证据。</li>
-    <li><strong>预期比对</strong>：机器原本打算怎么判、实际判出了什么，一张表对得上。</li>
-    <li>更细的原始记录（调用链、工具审计、记忆）在下面，看不懂可以先不看。</li>
-  </ol>
-</details>
 
 {% set fail_count = report.findings | selectattr('verdict', 'equalto', 'fail') | list | length %}
 <section class="report-overview">
@@ -115,10 +105,6 @@
 <div class="panel bad">
   <strong>执行失败，这次测试没跑成。</strong>
   <pre class="wrap">{{ report.error }}</pre>
-  <p class="note">
-    执行失败和"没通过"是两回事。前者说明结论不指向被测对象——
-    报告里其他的判定都是在一段残缺的轨迹上算出来的。
-  </p>
 </div>
 {% endif %}
 

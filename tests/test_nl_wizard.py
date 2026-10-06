@@ -1,4 +1,4 @@
-"""自然语言录入：一句大白话 → 确认页 → 一份能跑的场景。
+"""自然语言录入：一句想验证的话 → 确认页 → 一份能跑的场景。
 
 与向导测试同源的两种错法要在这里各自钉住：
 
@@ -205,7 +205,7 @@ async def client(
 async def test_nl_page_renders(client: httpx.AsyncClient) -> None:
     r = await client.get("/scenarios/plain")
     assert r.status_code == 200
-    assert "用大白话建一个测试" in r.text
+    assert "用一句话建一个测试" in r.text
     assert "帮我生成测试" in r.text
     assert "data-fill" in r.text
 
@@ -224,7 +224,7 @@ async def test_nl_back_keeps_text(client: httpx.AsyncClient) -> None:
         "/scenarios/plain", data={"text": "同一笔钱会被付两次", "submit": "back"}
     )
     assert r.status_code == 200
-    assert "用大白话建一个测试" in r.text
+    assert "用一句话建一个测试" in r.text
     assert 'name="text"' in r.text
     assert "同一笔钱会被付两次" in r.text
 
@@ -247,13 +247,14 @@ async def home_client(temp_db: str, tmp_path: Path) -> AsyncIterator[httpx.Async
         yield client
 
 
-async def test_home_hero_has_plain_language_entry(home_client: httpx.AsyncClient) -> None:
+async def test_home_has_plain_language_entry(home_client: httpx.AsyncClient) -> None:
+    """首页必须给不懂技术的人一个「用一句话建测试」的入口。"""
     r = await home_client.get("/")
     assert r.status_code == 200
-    assert "给 AI Agent 出考题" in r.text
-    assert "用大白话建测试" in r.text
+    assert "用一句话建测试" in r.text
     assert "/scenarios/plain" in r.text
-    assert "一键体检" in r.text
+    assert "现成测试包" in r.text
+    assert "测试任务" in r.text
 
 
 # --- 五、选 Agent 与连接设置（用户配置层） ----------------------------------

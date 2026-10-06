@@ -415,6 +415,14 @@ def agents_list() -> list[dict[str, str]]:
         return out
     for d in sorted((p for p in root.iterdir() if p.is_dir()), key=lambda x: x.name):
         desc = ""
+        meta = d / "AGENT.json"
+        if meta.exists():
+            # 用户导入的 Agent：描述写在注册里，优先于 README。
+            try:
+                obj = json.loads(meta.read_text(encoding="utf-8"))
+                desc = str(obj.get("desc") or "")
+            except (OSError, ValueError):
+                desc = ""
         readme = d / "README.md"
         if readme.exists():
             try:

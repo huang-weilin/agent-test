@@ -4,13 +4,13 @@
 对发布出去给别人下载的产品来说，「配好就能用」的默认值是不存在的——
 每个用户的模型、密钥都是他自己的。这一层把界面里填的连接存到
 `.agent_sandbox_local.json`（仓库根，已 gitignore），让「配 key → 选 agent →
-大白话建测试」的第一步有个真实的落点。
+一句话建测试」的第一步有个真实的落点。
 
 **生效优先级**：用户界面里配的连接（本文件）> 仓库 `.env` 的
 `SANDBOX_UPSTREAM_*`（开发环境内置）。两层都没有时，自然语言录入降级到
 本地关键词规则，并在页面上明说「这是草稿」。
 
-**安全边界**：这个 key 只用于「把大白话翻译成场景」这一步，跑在界面进程里。
+**安全边界**：这个 key 只用于「把你想测的翻成场景」这一步，跑在界面进程里。
 它**绝不**被注入给被测 Agent 的进程——被测 Agent 在沙盒里拿到的永远是假凭据
 （这是 `gateway` 的 Credential Vault 设计）。翻译和被测是两条路。
 """
@@ -112,4 +112,4 @@ def status_text() -> str:
     model = conn.get("model") or _DEFAULT_MODEL
     base = conn.get("base_url") or ""
     host = base.split("//")[-1].split("/")[0] if "//" in base else base
-    return f"已连上 {model}（{host}）。它只负责把大白话翻成测试，不会碰被测 Agent。"
+    return f"已连上 {model}（{host}）。它只负责把你说的翻成测试，不会碰被测 Agent。"

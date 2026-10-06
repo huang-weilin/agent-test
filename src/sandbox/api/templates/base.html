@@ -8,25 +8,21 @@
 </head>
 <body>
 <div class="layout">
-{% set mode = ui_mode() if ui_mode is defined else 'simple' %}
 
   <aside class="sidebar">
     <a class="brand" href="/"><span class="brand-mark">沙</span>Agent 测试沙盒</a>
 
     {% set nav = [
       ('测试', [
-        ('/', '场景', 'grid'),
+        ('/agents', '我的 Agent', 'robot'),
+        ('/', '测试任务', 'grid'),
         ('/runs', '运行记录', 'clock'),
+        ('/metrics', '报告', 'chart'),
       ]),
       ('分析', [
-        ('/metrics', '指标', 'chart'),
+        ('/checkup', '现成测试包', 'pulse'),
         ('/regression', '回归集', 'rotate'),
-        ('/checkup', '体检', 'pulse'),
         ('/cost', '成本', 'dollar'),
-      ]),
-      ('观测', [
-        ('/memory', '记忆', 'database'),
-        ('/audit', '审计日志', 'shield'),
       ]),
     ] %}
     {% set ico = {
@@ -40,6 +36,7 @@
       'shield': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
       'book': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
       'key': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>',
+      'robot': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><circle cx="12" cy="14" r="3"/><path d="M12 8V4"/><circle cx="9" cy="3" r="1"/><circle cx="15" cy="3" r="1"/><path d="M8 18h8"/></svg>',
     } %}
     {% set path = request.url.path if request is defined else '/' %}
     {% for group, items in nav %}
@@ -79,11 +76,6 @@
         {% if not matched.sep and path.startswith('/help') %}<span class="sep">/</span><span>使用手册</span>{% endif %}
       </div>
       <span class="spacer"></span>
-      {% if mode == 'simple' %}
-      <a class="mode-switch" href="/mode?to=pro" title="打开全部功能：指标、回归集、成本、记忆、审计日志">切换到专业版</a>
-      {% else %}
-      <a class="mode-switch" href="/mode?to=simple" title="简化界面，只留最常用的入口">切换到简单版</a>
-      {% endif %}
       {% if active %}
       <span class="running" title="{{ active.scenario_id }} 正在运行">
         <span class="dot"></span>正在跑 <code>{{ active.scenario_id }}</code>

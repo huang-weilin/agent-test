@@ -1,29 +1,7 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
-{% block title %}场景{% endblock %}
+{% block title %}测试任务{% endblock %}
 {% block body %}
-
-{% if mode != 'simple' %}
-<section class="hero">
-  <h1>给 AI Agent 出考题，<br>看看它靠不靠谱</h1>
-  <p class="sub">
-    不用写代码。用一句大白话描述你想验证的事——比如「同一笔钱会不会被付两次」——
-    机器帮你生成测试、跑给你看，最后出一份报告说清楚问题在哪。
-  </p>
-  <div class="hero-actions">
-    <a class="btn primary big" href="/scenarios/plain">用大白话建测试</a>
-    <a class="btn big" href="/checkup">不知道测什么？一键体检</a>
-    <a class="btn ghost big" href="#tests">看已有测试</a>
-  </div>
-  <div class="chip-row">
-    <span class="chip">会不会重复扣款</span>
-    <span class="chip">会不会原地打转</span>
-    <span class="chip">记不记得住事</span>
-    <span class="chip">没人看着时乱不乱来</span>
-    <span class="chip">一共花了多少钱</span>
-  </div>
-</section>
-{% endif %}
 
 {% if active %}
 <div class="panel warn">
@@ -33,7 +11,6 @@
 </div>
 {% endif %}
 
-{% if mode == 'simple' %}
 <section class="status-strip">
   <div class="panel status-card">
     <div class="k">最近一次测试</div>
@@ -56,52 +33,29 @@
 
 <section class="quick-cards">
   <a class="quick-card" href="/scenarios/plain">
-    <strong>用大白话建测试</strong>
+    <strong>用一句话建测试</strong>
     <span>说一句想验证的事——比如「同一笔钱会不会被付两次」——机器帮你变成测试，跑完出报告。</span>
     <span class="btn small">开始 →</span>
   </a>
   <a class="quick-card" href="/checkup">
-    <strong>不知道测什么？一键体检</strong>
-    <span>按行业挑一包体检，一键开跑、一页纸出结论，告诉你问题在哪。</span>
-    <span class="btn small">去体检 →</span>
+    <strong>不知道测什么？用现成测试包</strong>
+    <span>按行业挑一包测试，一键开跑、一页纸出结论，告诉你问题在哪。</span>
+    <span class="btn small">去看看 →</span>
   </a>
   <a class="quick-card" href="/regression">
-    <strong>回归集与报告</strong>
+    <strong>回归集</strong>
     <span>改过提示词或工具之后，重跑一遍历史场景，看有没有变差。</span>
     <span class="btn small">看回归集 →</span>
   </a>
 </section>
-<p class="note">想要更多控制？也可以走<a href="/scenarios/new">一步步的向导</a>（同样不用写代码）。</p>
-{% endif %}
+<p class="note">想按步骤来？也可以走<a href="/scenarios/new">一步步的向导</a>（同样不用写代码）。</p>
 
-{% if mode != 'simple' %}
-<h2>从你的行业开始</h2>
-<div class="panel">
-  <p class="plain">不知道要测什么？按行业挑一包体检，一键开跑、一页纸出结论。</p>
-  <div class="industry-row">
-    {% set packs = [
-      ('电商履约', '同一单发两次？同一笔钱扣两次？翻页翻不到头？', 'vertical_fulfillment'),
-      ('金融支付', '同一笔钱付两次？上次付过的这次又付？', 'vertical_payments'),
-      ('客服', '把备注里的话当真？该记住的客户事记不住？', 'vertical_support'),
-      ('办公助手', '没人看着时自己动手？想连不该连的地方？', 'vertical_office'),
-    ] %}
-    {% for label, hint, menu in packs %}
-    <a class="industry-card" href="/checkup#{{ menu }}">
-      <strong>{{ label }}</strong>
-      <span>{{ hint }}</span>
-      <span class="btn small">去体检 →</span>
-    </a>
-    {% endfor %}
-  </div>
-</div>
-{% endif %}
-
-<h2 id="tests">已有测试</h2>
-<p class="lede">点「运行」跑的是磁盘上的那一份。跑完的报告会告诉你：哪些方面过了、哪些方面被抓到了问题。</p>
+<h2 id="tests">测试任务</h2>
+<p class="lede">一个测试任务可以是单个 Agent，也可以是一队 Agent 接力（A 跑一段、B 跑下一段）。</p>
 
 <table class="grid">
   <thead>
-    <tr><th>测试</th><th>它是干嘛的</th><th>会话</th><th>预期</th><th></th></tr>
+    <tr><th>测试任务</th><th>它测什么</th><th>最近结果</th><th></th></tr>
   </thead>
   <tbody>
   {% for s in scenarios %}
@@ -112,6 +66,7 @@
         {% else %}
           <code class="dim">{{ s.id }}</code>
         {% endif %}
+        {% if s.agents_text %}<div class="sub dim">{{ s.agents_text }}</div>{% endif %}
       </td>
       <td>
         {% if s.error %}
@@ -120,8 +75,10 @@
           {{ s.description }}
         {% endif %}
       </td>
-      <td>{{ s.sessions if s.sessions is defined else '—' }}</td>
-      <td>{{ s.expects if s.expects is defined else '—' }}</td>
+      <td>
+        {% if s.latest_verdict is none %}<span class="dim">还没有</span>
+        {% else %}{{ m.verdict_badge(s.latest_verdict) }}{% endif %}
+      </td>
       <td class="actions">
         {% if s.usable and not s.error %}
         <form method="post" action="/scenarios/{{ s.id }}/run">
@@ -133,29 +90,10 @@
       </td>
     </tr>
   {% else %}
-    <tr><td colspan="5"><div class="empty" style="margin:0">📋 scenarios/ 下没有 .yaml 文件。</div></td></tr>
+    <tr><td colspan="4"><div class="empty" style="margin:0">还没有测试任务。先建一个：<a href="/scenarios/plain">用一句话建测试</a>，或走<a href="/scenarios/new">一步步的向导</a>。</div></td></tr>
   {% endfor %}
   </tbody>
 </table>
-
-{% if mode != 'simple' %}
-<div class="panel">
-  <div class="row">
-    <div>
-      <strong>想再精细一点？</strong>
-      <p class="note">跟着问题一步步选（不用写代码），机器在存盘前把「打算怎么判」逐条给你看。<br>
-      老手也可以直接给名字建骨架、自己改 YAML。</p>
-    </div>
-    <div class="actions">
-      <a class="btn" href="/scenarios/new">跟着问题走</a>
-      <form class="inline" method="post" action="/scenarios">
-        <input name="new_id" placeholder="起个名字（小写字母、数字、-、_）" required>
-        <button class="primary" type="submit">用骨架新建</button>
-      </form>
-    </div>
-  </div>
-</div>
-{% endif %}
 
 <h2>最近运行</h2>
 <table class="grid">
@@ -172,7 +110,7 @@
       <td><a class="btn" href="/runs/{{ r.id }}">报告</a></td>
     </tr>
   {% else %}
-    <tr><td colspan="5"><div class="empty" style="margin:0">还没跑过。<a href="/checkup">点这里开第一场体检</a>，或去<a href="/scenarios/plain">用大白话建一个测试</a>。</div></td></tr>
+    <tr><td colspan="5"><div class="empty" style="margin:0">还没跑过。建一个测试任务，点「运行」就会出现在这里。</div></td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -188,7 +126,6 @@
     （{{ '%.0f' % (b.ratio * 100) }}%）
   </div>
 {% endfor %}
-<p class="note">超预算<strong>不会</strong>让任何运行算作不通过——它只是对累计花费的陈述。</p>
 {% endif %}
 
 {% endblock %}

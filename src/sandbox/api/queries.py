@@ -71,6 +71,49 @@ async def get_run(run_id: str) -> TestRun | None:
         return await db.get(TestRun, run_id)
 
 
+async def report_rows(*, limit: int = 50, scenario_id: str | None = None) -> list[dict[str, Any]]:
+    """报告列表的行：结论 + 问题数 + 花费。
+
+    `problems` 是这份报告的失败条目数（执行出错 / 前提不成立 / 计费不符 /
+    预期没命中各算一条）。`None` = 那份报告没留存，界面显示成「未留存」。
+    """
+    async with session_scope() as db:
+        stmt = select(TestRun).order_by(TestRun.started_at.desc()).limit(limit)
+        if scenario_id is not None:
+            stmt = stmt.where(TestRun.scenario_id == scenario_id)
+        runs = list((await db.execute(stmt)).scalars())
+        rollups = await cost.for_runs([r.id for r in runs], db=db)
+    rows: list[dict[str, Any]] = []
+    for r in runs:
+        problems: int | None = None
+        if r.report_json:
+            try:
+                rep = json.loads(r.report_json)
+            except ValueError:
+                rep = None
+            if rep is not None:
+                problems = 0
+                if rep.get("error") is not None:
+                    problems += 1
+                if not rep.get("premises_held", True):
+                    problems += 1
+                if not rep.get("charges_ok", True):
+                    problems += 1
+                expectation = rep.get("expectation")
+                if isinstance(expectation, dict):
+                    problems += int(bool(expectation.get("missing")))
+                    problems += int(bool(expectation.get("unexpected")))
+        rows.append({
+            "id": r.id,
+            "scenario_id": r.scenario_id,
+            "verdict_ok": r.verdict_ok,
+            "started_at": r.started_at,
+            "cost": rollups.get(r.id, cost.CostRollup()),
+            "problems": problems,
+        })
+    return rows
+
+
 def parse_report(run: TestRun) -> dict[str, Any] | None:
     """取出运行时存下的结论快照。None = 结论未留存。
 
