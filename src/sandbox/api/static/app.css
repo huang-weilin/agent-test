@@ -17,7 +17,7 @@
 
 :root {
   /* 中性色板（Sentry 式灰阶，冷调） */
-  --bg: #f5f7f9;
+  --bg: #f3f4fb;
   --bg-soft: #eef1f4;
   --panel: #ffffff;
   --ink: #1f2328;
@@ -28,10 +28,10 @@
   --line-strong: #cdd3d9;
 
   /* 品牌主色：克制蓝（非靛紫） */
-  --brand: #2563eb;
-  --brand-ink: #1d4fd7;
-  --brand-soft: #eaf1fe;
-  --brand-line: #bcd0fb;
+  --brand: #6366f1;
+  --brand-ink: #5252dd;
+  --brand-soft: #eef0fe;
+  --brand-line: #c9cdf9;
 
   /* 四态（与徽章/面板/卡片共用） */
   --ok: #1a7f37;
@@ -49,10 +49,10 @@
   --mono: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
   --sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
 
-  --radius: 10px;
-  --radius-sm: 6px;
-  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
-  --shadow-lift: 0 4px 12px rgba(16, 24, 40, 0.10);
+  --radius: 14px;
+  --radius-sm: 9px;
+  --shadow: 0 1px 2px rgba(27, 34, 64, 0.04), 0 2px 10px rgba(27, 34, 64, 0.05);
+  --shadow-lift: 0 6px 18px rgba(99, 102, 241, 0.16);
   --sidebar-w: 216px;
   --topbar-h: 52px;
 }
@@ -114,7 +114,7 @@ a:hover { text-decoration: underline; }
 
 .brand-mark {
   width: 22px; height: 22px; border-radius: 6px;
-  background: linear-gradient(135deg, #2563eb, #0ea5e9);
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
   color: #fff; font-size: 0.78rem; font-weight: 800;
   display: inline-flex; align-items: center; justify-content: center;
   flex: 0 0 22px;
@@ -756,3 +756,38 @@ details.howto ol { margin: 0.5rem 0 0.2rem; padding-left: 1.3rem; line-height: 1
 .mode-pick { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.8rem; }
 .mode-pick .agent-card { cursor: pointer; }
 .mode-pick .agent-card input { margin-top: 0.2rem; }
+
+
+/* ==========================================================================
+   v5：Bootstrap 定制视觉（品牌紫 + 圆角 + 柔和阴影 + KPI 图标）
+   类名与 v1 兼容；观感对齐「Bootstrap 定制」对比稿（#6366f1 品牌紫）
+   ========================================================================== */
+
+.card { transition: box-shadow 140ms ease, transform 140ms ease, border-color 140ms ease; }
+.card:hover { border-color: var(--brand-line); box-shadow: var(--shadow-lift); transform: translateY(-1px); }
+
+/* KPI 卡（横排：文字左 + 图标右） */
+.card.kpi { display: flex; align-items: center; justify-content: space-between; gap: 0.9rem; }
+.card.kpi .kpi-main { min-width: 0; }
+.card.kpi .v { margin: 0.2rem 0 0; }
+
+.stat-icon {
+  width: 44px; height: 44px; border-radius: 12px; flex: 0 0 44px;
+  background: var(--brand-soft); color: var(--brand);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.stat-icon svg { width: 22px; height: 22px; }
+
+/* 按钮圆角与主色 */
+button, .btn { border-radius: var(--radius-sm); }
+button.primary, .btn.primary { background: var(--brand); border-color: var(--brand); }
+button.primary:hover:not(:disabled) { background: var(--brand-ink); border-color: var(--brand-ink); }
+
+/* 表格：圆角 + 表头紫调 */
+table.grid { border-radius: var(--radius); }
+table.grid th { background: #f6f7fd; color: #5b6472; }
+table.grid tbody tr:hover td { background: #f5f6fd; }
+
+/* 导航与标签页激活态 */
+.nav-group a.nav-item.on { background: var(--brand-soft); color: var(--brand-ink); }
+.tabs a.on { color: var(--brand-ink); border-bottom-color: var(--brand); background: var(--brand-soft); }

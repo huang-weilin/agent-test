@@ -23,36 +23,49 @@
 {% endif %}
 
 <section class="cards">
-  <div class="card {{ 'bad' if report.outcomes.failed else '' }}">
-    <div class="k">预期达成率</div>
-    {% if report.outcomes.rate is none %}
-      <div class="v dim">没有样本</div>
-    {% else %}
-      <div class="v">{{ '%.1f' % (report.outcomes.rate * 100) }}%</div>
-      <div class="sub">{{ report.outcomes.passed }} 通过 / {{ report.outcomes.failed }} 不通过</div>
-    {% endif %}
-  </div>
-  <div class="card">
-    <div class="k">没有结论</div>
-    <div class="v">{{ report.outcomes.no_verdict }}</div>
-    <div class="sub">
-      {% if report.outcomes.no_verdict_by_status %}
-        {% for status, n in report.outcomes.no_verdict_by_status -%}
-          <code>{{ status }}</code> {{ n }} 条{% if not loop.last %}、{% endif %}
-        {%- endfor %}
+  <div class="card kpi {{ 'bad' if report.outcomes.failed else '' }}">
+    <div class="kpi-main">
+      <div class="k">预期达成率</div>
+      {% if report.outcomes.rate is none %}
+        <div class="v dim">没有样本</div>
       {% else %}
-        0 条
+        <div class="v">{{ '%.1f' % (report.outcomes.rate * 100) }}%</div>
+        <div class="sub">{{ report.outcomes.passed }} 通过 / {{ report.outcomes.failed }} 不通过</div>
       {% endif %}
     </div>
+    <span class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></span>
   </div>
-  <div class="card">
-    <div class="k">这一批的花费</div>
-    <div class="v">{{ m.cost_cell(report.cost) }}</div>
-    <div class="sub">{{ report.cost.llm_calls }} 次模型调用</div>
+  <div class="card kpi">
+    <div class="kpi-main">
+      <div class="k">没有结论</div>
+      <div class="v">{{ report.outcomes.no_verdict }}</div>
+      <div class="sub">
+        {% if report.outcomes.no_verdict_by_status %}
+          {% for status, n in report.outcomes.no_verdict_by_status -%}
+            <code>{{ status }}</code> {{ n }} 条{% if not loop.last %}、{% endif %}
+          {%- endfor %}
+        {% else %}
+          0 条
+        {% endif %}
+      </div>
+    </div>
+    <span class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
   </div>
-  <div class="card">
-    <div class="k">运行墙钟中位数</div>
-    <div class="v">{{ report.latency.run_wall.p50_ms | ms }}</div>
+  <div class="card kpi">
+    <div class="kpi-main">
+      <div class="k">这一批的花费</div>
+      <div class="v">{{ m.cost_cell(report.cost) }}</div>
+      <div class="sub">{{ report.cost.llm_calls }} 次模型调用</div>
+    </div>
+    <span class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span>
+  </div>
+  <div class="card kpi">
+    <div class="kpi-main">
+      <div class="k">运行墙钟中位数</div>
+      <div class="v">{{ report.latency.run_wall.p50_ms | ms }}</div>
+      <div class="sub">一次运行的耗时中位数</div>
+    </div>
+    <span class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
   </div>
 </section>
 

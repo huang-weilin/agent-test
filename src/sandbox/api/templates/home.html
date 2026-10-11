@@ -11,23 +11,38 @@
 </div>
 {% endif %}
 
-<section class="status-strip">
-  <div class="panel status-card">
-    <div class="k">最近一次测试</div>
-    {% set latest = runs[0] if runs else none %}
-    {% if latest %}
-      <div class="v">
-        <code>{{ latest.scenario_id }}</code>
-        {{ m.verdict_badge(latest.verdict_ok) }}
-      </div>
-      <div class="sub">
-        {{ latest.started_at | localdt }} · {{ m.cost_cell(latest.cost) }}
-        <a class="btn small" href="/runs/{{ latest.id }}">看报告</a>
-      </div>
-    {% else %}
-      <div class="v">还没跑过测试</div>
-      <div class="sub">先建一个：说一句想验证的事，机器帮你变成测试。</div>
-    {% endif %}
+{% set latest = runs[0] if runs else none %}
+{% set month_b = budget | selectattr('period', 'equalto', 'month') | first if budget else none %}
+<section class="cards">
+  <div class="card kpi">
+    <div class="kpi-main">
+      <div class="k">最近一次测试</div>
+      {% if latest %}
+        <div class="v"><code>{{ latest.scenario_id }}</code> {{ m.verdict_badge(latest.verdict_ok) }}</div>
+        <div class="sub">{{ latest.started_at | localdt }} · {{ m.cost_cell(latest.cost) }}
+          <a class="btn small" href="/runs/{{ latest.id }}">看报告</a></div>
+      {% else %}
+        <div class="v">还没跑过测试</div>
+        <div class="sub">先建一个：说一句想验证的事，机器帮你变成测试。</div>
+      {% endif %}
+    </div>
+    <span class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></span>
+  </div>
+  <div class="card kpi">
+    <div class="kpi-main">
+      <div class="k">累计运行</div>
+      <div class="v">{{ runs | length }} 次</div>
+      <div class="sub">每次运行都会追加在这里</div>
+    </div>
+    <span class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg></span>
+  </div>
+  <div class="card kpi">
+    <div class="kpi-main">
+      <div class="k">本月花费</div>
+      <div class="v">{% if month_b %}${{ month_b.spent_usd | money }}{% else %}—{% endif %}</div>
+      <div class="sub">{% if month_b %}预算 ${{ month_b.ceiling_usd | money }}{% else %}还没有成本记录{% endif %}</div>
+    </div>
+    <span class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>
   </div>
 </section>
 
