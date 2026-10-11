@@ -220,6 +220,9 @@ class Answers:
     agent2_version: str = ""
     agent2_task: str = ""
     expected_charges: int | None = None
+    #: 用一句话说清「什么算通过」，跑完让 AI 按这句话判（AI 裁判）。
+    #: 空 = 不请裁判，只用上面勾的症状判。
+    judge_criteria: str = ""
     #: 无人值守时，它自己调写工具**算不算越权**。只在 `overnight` 那一趟有意义。
     #:
     #: 这一项非问不可，而且没有安全的默认值：加载期就要求"有自主会话时写操作必须
@@ -260,6 +263,7 @@ class FormData:
     #: 用户没碰过的那几行会静默变回默认值。
     choices: Mapping[str, str] = field(default_factory=dict)
     expected_charges: str = ""
+    judge_criteria: str = ""
     unattended_allowed: bool = False
 
     @classmethod
@@ -294,6 +298,7 @@ class FormData:
             tools=tuple(tools),
             choices=choices,
             expected_charges=one("expected_charges").strip(),
+            judge_criteria=one("judge_criteria").strip(),
             unattended_allowed=one("unattended_allowed") == "1",
         )
 
@@ -311,6 +316,7 @@ class FormData:
             "agent2_task": self.agent2_task,
             "shape": self.shape,
             "expected_charges": self.expected_charges,
+            "judge_criteria": self.judge_criteria,
             "unattended_allowed": "1" if self.unattended_allowed else "0",
         }
 
@@ -369,6 +375,7 @@ class FormData:
             shape=self.shape,
             choices=self.choices,
             expected_charges=charges,
+            judge_criteria=self.judge_criteria,
             unattended_allowed=self.unattended_allowed,
         )
 
@@ -855,6 +862,14 @@ def build_yaml(answers: Answers, facts: Sequence[ToolFact]) -> str:
         add("# 这次没有勾任何一条要判的毛病——那么这一趟不判任何东西，")
         add("# 报告里那个「通过」只说明跑完了，不说明任何事。")
         add("expect: []")
+
+    if answers.judge_criteria.strip():
+        add("")
+        add("# AI 裁判：按用户这句话判通过/不通过。跑完由配置的模型打分，")
+        add("# 0.5 以上判通过。没配置模型连接时判不了，那一趟不通过。")
+        add("judge:")
+        add(f"  criteria: >")
+        add(f"    {answers.judge_criteria.strip()}")
 
     return "\n".join(lines) + "\n"
 

@@ -24,6 +24,17 @@
 </p>
 
 {% if report is not none %}
+{% if report.judge %}
+<div class="panel {{ 'ok' if report.judge.passed is True else ('bad' if report.judge.passed is False else 'warn') }}">
+  <strong>AI 裁判：
+    {%- if report.judge.passed is True %}通过
+    {%- elif report.judge.passed is False %}不通过
+    {%- else %}没判成{% endif -%}
+    {% if report.judge.score is not none %}（{{ '%.2f' % report.judge.score }} 分）{% endif %}
+  </strong>
+  <p>{{ report.judge.reason }}</p>
+</div>
+{% endif %}
 <nav class="sec-nav">
   {% if report.clock %}<a href="#sec-worldtime">世界时间</a>{% endif %}
   {% if report.autonomy %}<a href="#sec-autonomous">自主行为</a>{% endif %}

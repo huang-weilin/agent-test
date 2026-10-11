@@ -30,6 +30,7 @@
       <td><code>{{ a.entry }}</code></td>
       <td>{{ a.python or '自动找 venv' }}</td>
       <td class="actions">
+        <a class="btn small" href="/scenarios/new?agent={{ a.name }}">用它建测试</a>
         <form method="post" action="/agents/{{ a.name }}/delete">
           <button class="btn" type="submit">删除</button>
         </form>

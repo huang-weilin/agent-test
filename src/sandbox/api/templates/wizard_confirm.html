@@ -44,7 +44,17 @@
     上面那三个字（<code>fail</code> / <code>pass</code>）就是真正写进文件、机器真正
     照做的那个值，不是翻译。左边那句人话只是帮你看懂——两边不一致的话以那三个字为准。
   </p>
-  {% else %}
+  {% endif %}
+
+  {% if form.scalar('judge_criteria') %}
+  <div class="panel">
+    <h2>AI 裁判</h2>
+    <p>按你这句话判通过/不通过（跑完由配置的模型打分，0.5 以上算通过）：</p>
+    <blockquote>{{ form.scalar('judge_criteria') }}</blockquote>
+  </div>
+  {% endif %}
+
+  {% if not plan and not form.scalar('judge_criteria') %}
   <p><strong>这一趟不判任何东西。</strong></p>
   <p class="note">
     一条毛病都没勾，所以没有判卷标准。跑完报告上那个「通过」只说明它跑完了，

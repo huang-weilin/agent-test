@@ -436,6 +436,7 @@ def create_app(
         """
         return {
             "form": data,
+            "agents": nl_wizard.agents_list(),
             "tools": wizard.tool_facts(),
             "symptoms": wizard.SYMPTOMS,
             "choices": wizard.CHOICES,
@@ -457,6 +458,15 @@ def create_app(
         `paths.RESERVED_IDS` 是这件事的另一半：一个真叫 `new` 的场景从两边都
         不可达，所以那个名字一开始就不许用。
         """
+        agent = str(request.query_params.get("agent") or "").strip()
+        if agent:
+            return _wizard_page(
+                request,
+                wizard.FormData(
+                    scenario_id=_default_scenario_id(),
+                    agent_version=f"{agent}@0.1",
+                ),
+            )
         return _wizard_page(request, wizard.FormData(scenario_id=_default_scenario_id()))
 
     @app.post("/scenarios/new", response_class=HTMLResponse)

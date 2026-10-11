@@ -103,6 +103,9 @@ async def report_rows(*, limit: int = 50, scenario_id: str | None = None) -> lis
                 if isinstance(expectation, dict):
                     problems += int(bool(expectation.get("missing")))
                     problems += int(bool(expectation.get("unexpected")))
+                judge = rep.get("judge")
+                if isinstance(judge, dict) and judge.get("passed") is False:
+                    problems += 1
         rows.append({
             "id": r.id,
             "scenario_id": r.scenario_id,

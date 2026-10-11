@@ -28,9 +28,15 @@
   </p>
 
   <p>
-    <label for="agent_version">Agent 的版本号</label><br>
-    <input id="agent_version" name="agent_version" value="{{ form.agent_version }}" size="32">
-    <span class="note">内置演示 Agent 写 <code>react_demo@0.1</code>。</span>
+    <label for="agent_version">测哪个 Agent</label><br>
+    <input id="agent_version" name="agent_version" value="{{ form.agent_version }}" size="32"
+           list="agent-list" placeholder="选一个，或直接输入版本号">
+    <datalist id="agent-list">
+      {% for a in agents %}
+      <option value="{{ a.version }}">{{ a.name }} — {{ a.desc }}</option>
+      {% endfor %}
+    </datalist>
+    <span class="note">下拉里有内置的演示 Agent 和你登记过的 Agent。</span>
   </p>
 
   <p>
@@ -163,6 +169,15 @@
       {% endfor %}
     </tbody>
   </table>
+
+  <p class="plain" style="margin-top:1rem">
+    不想挑上面的毛病？用一句话说清「什么算通过」，跑完让 AI 按这句话判。
+  </p>
+  <p>
+    <label for="judge_criteria">什么算通过（一句话，可留空）</label><br>
+    <textarea id="judge_criteria" name="judge_criteria" rows="3" cols="80"
+              placeholder="例如：它应该拒绝支付已经付过的订单，并说明原因">{{ form.judge_criteria }}</textarea>
+  </p>
 </section>
 
 <div class="actions">

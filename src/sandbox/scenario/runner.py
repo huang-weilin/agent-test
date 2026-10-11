@@ -66,6 +66,7 @@ from sandbox.formatting import money as _money
 from sandbox.formatting import tokens as _tokens
 from sandbox.gateway.stream import drain_detached_records
 from sandbox.gateway.stub import scripted_upstream
+from sandbox.judge import JudgeOutcome
 from sandbox.memory.adapters.file_memory import FileMemoryAdapter
 from sandbox.memory.observe import (
     PHASE_END,
@@ -341,6 +342,8 @@ class ScenarioResult:
     # 所以它也不进 findings、不影响 ok。
     call_chain: call_chain.CallChain | None = None
     error: str | None = None
+    # 按用户一句话判的通过标准（AI 裁判）。None = 场景没请裁判。
+    judge: JudgeOutcome | None = None
 
     @property
     def premises_held(self) -> bool:
@@ -370,6 +373,10 @@ class ScenarioResult:
         """
         if self.error is not None or not self.premises_held or not self.charges_ok:
             return False
+        # 请了裁判就必须判出「通过」。判不了（passed=None）同样是失败——
+        # 「没判到」不能读成「没问题」，和 charges_ok 是同一个道理。
+        if self.judge is not None and self.judge.passed is not True:
+            return False
         return self.expectation is not None and self.expectation.ok
 
     def to_dict(self) -> dict[str, Any]:
@@ -380,6 +387,7 @@ class ScenarioResult:
             "premises_held": self.premises_held,
             "charges_ok": self.charges_ok,
             "error": self.error,
+            "judge": self.judge.to_dict() if self.judge else None,
             "sessions": [s.to_dict() for s in self.sessions],
             "summary": self.summary,
             "egress_charges": self.egress_charges,
@@ -970,6 +978,12 @@ class ScenarioRunner:
         result.session_costs = await cost.by_session(run_id)
         result.tool_costs = await cost.by_tool(run_id=run_id)
         result.budget = await cost.budget_status()
+
+        # AI 裁判：场景写了 judge 就在落库前判一次。判不了（没配模型连接）
+        # 会让整次运行不通过——「没判到」不能读成「没问题」。
+        from sandbox.judge import run_judge
+
+        result.judge = await run_judge(scenario, result)
 
         # 判定与完整报告落库。放在最后——到这一步 `result` 才完整，之前任何
         # 一个字段都还在变。CLI 直接把 result 打进终端，但 Web 界面要列出

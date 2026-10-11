@@ -655,6 +655,19 @@ class WorldDecl(BaseModel):
     egress: EgressDecl | None = None
 
 
+class JudgeDecl(BaseModel):
+    """按用户一句话判通过/不通过（AI 裁判）。
+
+    场景写 `judge:` 时，跑完会用配置的模型按 `criteria` 打分，
+    `score >= threshold` 判通过。不写 = 不请裁判。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    criteria: str
+    threshold: float = 0.5
+
+
 class Scenario(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -717,6 +730,9 @@ class Scenario(BaseModel):
     # 进配置指纹的 `world` 节：改了它等于换了这次测试面对的世界，前后两次
     # 运行不该拿来比"失败少了几个"。
     world: WorldDecl = Field(default_factory=WorldDecl)
+
+    # 按用户一句话判的通过标准（AI 裁判）。None = 不请裁判。
+    judge: JudgeDecl | None = None
 
     # 出现了没被 expect 匹配上的 fail 结论时怎么办。
     # 默认 fail：这是测试工具，"没预料到的失败"必须让人知道。

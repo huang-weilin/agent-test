@@ -72,6 +72,7 @@ SECTION_SOURCES: dict[str, tuple[str, ...]] = {
         "memory",
         "unexpected_failures",
         "expected_charges",
+        "judge",
     ),
 }
 
@@ -253,6 +254,11 @@ def sections(scenario: Scenario) -> dict[str, Any]:
             "memory": _memory_section(scenario),
             "unexpected_failures": scenario.unexpected_failures,
             "expected_charges": scenario.expected_charges,
+            # AI 裁判也是判卷标准：改一句「什么算通过」，同一份证据的结论
+            # 就可能翻转，不进取指纹的话差异报告会把它读成行为变了。
+            "judge": (
+                scenario.judge.model_dump(mode="json") if scenario.judge else None
+            ),
         },
     }
 
