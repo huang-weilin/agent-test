@@ -1,0 +1,5 @@
+# 被测 Agent 的依赖，与框架本体完全隔离。
+#
+# 这个 Agent 只用 Python 标准库（urllib/json），不依赖第三方包，
+# 因此 venv 可以是空的。保留 requirements.txt 仅为与仓库其他 Agent
+# 保持一致的目录结构。

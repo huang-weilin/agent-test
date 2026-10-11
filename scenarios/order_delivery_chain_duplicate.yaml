@@ -1,0 +1,108 @@
+id: order_delivery_chain_duplicate
+description: >
+  与 order_delivery_chain_clean 脚本完全一样，唯一的差别是 0 号把同一笔
+  支付（订单 A1 下单）创建了两次——create_payment 出现两次，目标系统真的
+  扣了两笔款。
+
+  重复下单是接缝上最典型的缺陷：同一个订单被下两次，履约那边如果不去重，
+  就可能执行两遍（发货两批）。这一份里 0 号关掉了记忆守卫
+  （DEMO_AGENT_MEMORY_GUARD=0），第二次 create_payment 没有被自己拦下，
+  所以目标系统侧扣款从 1 笔变成 2 笔——缺陷在 0 号这一侧：create_payment
+  是没有幂等保护的写操作，被重复执行了两次。
+
+agents:
+  - version: order_agent@0.1
+    directory: order_agent
+    task: 用户要买 1 件机械键盘（订单 A1），请受理下单并转交履约环节。
+    model: stub-model
+    env:
+      DEMO_AGENT_MEMORY_GUARD: "0"
+  - version: delivery_agent@0.1
+    directory: delivery_agent
+    task: 你接手继续履约订单 A1：确认已支付后发货并通知用户。
+    model: stub-model
+
+tools:
+  - use: check_stock
+  - use: create_payment
+  - use: handoff
+  - use: get_order
+  - use: ship_order
+  - use: send_notice
+
+sessions:
+  - name: 0 号：下单并转交（重复下单）
+    script:
+      - tool_calls:
+          - name: check_stock
+            arguments: {item: 机械键盘}
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - tool_calls:
+          - name: handoff
+            arguments: {target_role: fulfillment, task: 订单 A1 履约}
+      - content: 已下单并转交履约环节处理。
+
+  - name: 1 号：接手履约
+    agent: 1
+    script:
+      # 与 clean 同一规则：不写 get_order（守卫自动查单）。
+      - tool_calls:
+          - name: ship_order
+            arguments: {order_id: A1, carrier: 顺丰}
+      - tool_calls:
+          - name: send_notice
+            arguments: {order_id: A1, notice_type: shipment, message: 您的订单已发货}
+      - content: 订单 A1 已履约完成。
+
+  - name: 1 号：隔天再来查单（记忆要还在）
+    agent: 1
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: B2}
+      - content: B2 查过了，这里没有我需要动手的事。
+
+expected_charges: 2
+
+# 与 clean 同一条豁免、同一个理由（守卫自动查单/查库存）。幂等 fail 归因
+# 不受豁免影响——豁免只豁免 loop.strict 的判定，idempotency 照常判定
+# create_payment 的重复。
+exemptions:
+  - detector: loop.strict
+    tool: check_stock
+    reason: order_agent 下单前守卫自动查库存一次（脚本一次 + 守卫一次，属知情读取）
+  - detector: loop.strict
+    tool: get_order
+    reason: delivery_agent 发货前守卫自动查单一次 + 会话 2 显式查单一次（属知情读取）
+
+memory:
+  must_hold:
+    - agent: 1
+      path: actions.jsonl
+      reason: >
+        1 号（履约）自己的那份记忆必须原样不动：它发过货、发过通知，
+        此后每一次会话开始时那些记录都该在。这一条守住了，才说得上"1 号这边
+        没有问题"。（多 Agent 场景里 `agent: 1` 是必需的：不指名的话这条判据
+        落在 0 号头上。）
+
+expect:
+  - detector: idempotency
+    verdict: fail
+    note: >
+      create_payment 是没有幂等保护的写操作，被重复执行了两次，目标系统侧
+      真实扣款 2 笔。归因在下单侧：0 号把同一笔支付创建了两次，记忆守卫被
+      关掉后没有任何机制去重。
+  - detector: loop.strict
+    verdict: pass
+    note: 守卫查库存/查单被豁免降级为 pass。
+  - detector: memory.drift
+    verdict: pass
+    note: 1 号那份记忆守住了。这一对里变的只有 0 号的下单次数，记忆本身两边都是好的。
+  - detector: memory
+    verdict: pass
+    note: 族级汇总，跟着上面那条具体结论一起。

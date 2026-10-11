@@ -1,0 +1,93 @@
+id: order_delivery_chain_clean
+description: >
+  多 Agent 接力该通过的例子：0 号（order_agent 售前下单台）查库存、创建支付，
+  调用 handoff 把"订单 A1 履约"转交给履约环节；1 号（delivery_agent 履约执行者）
+  接手确认已支付、发货、通知。转交动作在边界上可见（交接流水），接手者的执行
+  也在边界上可见（工具调用）——报告上能同时看到"谁卖出的"和"谁交付的"。
+
+agents:
+  - version: order_agent@0.1
+    directory: order_agent
+    task: 用户要买 1 件机械键盘（订单 A1），请受理下单并转交履约环节。
+    model: stub-model
+  - version: delivery_agent@0.1
+    directory: delivery_agent
+    task: 你接手继续履约订单 A1：确认已支付后发货并通知用户。
+    model: stub-model
+
+tools:
+  - use: check_stock
+  - use: create_payment
+  - use: handoff
+  - use: get_order
+  - use: ship_order
+  - use: send_notice
+
+sessions:
+  - name: 0 号：下单并转交
+    script:
+      - tool_calls:
+          - name: check_stock
+            arguments: {item: 机械键盘}
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: A1, amount: 599.0}
+      - tool_calls:
+          - name: handoff
+            arguments: {target_role: fulfillment, task: 订单 A1 履约}
+      - content: 已下单并转交履约环节处理。
+
+  - name: 1 号：接手履约
+    agent: 1
+    script:
+      # 同 fulfillment 场景的规则：不写 get_order（守卫自动查单）。
+      - tool_calls:
+          - name: ship_order
+            arguments: {order_id: A1, carrier: 顺丰}
+      - tool_calls:
+          - name: send_notice
+            arguments: {order_id: A1, notice_type: shipment, message: 您的订单已发货}
+      - content: 订单 A1 已履约完成。
+
+  - name: 1 号：隔天再来查单（记忆要还在）
+    agent: 1
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: B2}
+      - content: B2 查过了，这里没有我需要动手的事。
+
+expected_charges: 1
+
+# 0 号下单前守卫自动查库存一次、1 号发货前守卫自动查单一次——各属知情读取。
+exemptions:
+  - detector: loop.strict
+    tool: check_stock
+    reason: order_agent 下单前守卫自动查库存一次（脚本一次 + 守卫一次，属知情读取）
+  - detector: loop.strict
+    tool: get_order
+    reason: delivery_agent 发货前守卫自动查单一次 + 会话 2 显式查单一次（属知情读取）
+
+memory:
+  must_hold:
+    - agent: 1
+      path: actions.jsonl
+      reason: >
+        1 号（履约）自己的那份记忆必须原样不动：它发过货、发过通知，
+        此后每一次会话开始时那些记录都该在。这一条守住了，才说得上"1 号这边
+        没有问题"。判据落点是会话 1 结束与会话 2 结束两个时点——会话 1 开始时
+        1 号还是全新进程，记忆文件不存在，比不了。
+
+expect:
+  - detector: idempotency
+    verdict: pass
+    note: 两个写工具（支付/发货）各一次，handoff 一次，通知一次，都没有重复。
+  - detector: loop
+    verdict: pass
+    note: 每段会话都按脚本一步完成，四项循环检查都该是干净的。
+  - detector: memory.drift
+    verdict: pass
+    note: 1 号那份记忆守住了（第 1 段前后逐字节相同）。
+  - detector: memory
+    verdict: pass
+    note: 族级汇总，跟着上面那条具体结论一起。

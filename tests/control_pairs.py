@@ -380,6 +380,24 @@ PAIRS: tuple[Controlled, ...] = (
         ),
     ),
     Controlled(
+        scenarios=("order_delivery_chain_clean", "order_delivery_chain_duplicate"),
+        claim=(
+            "多 Agent 接力（下单→履约）：唯一的变量是 0 号（order_agent）下了一次单还是两次"
+            "——0 号关掉记忆守卫后重复 create_payment，目标系统扣款 1 笔 vs 2 笔，"
+            "幂等 fail 只出现在下单侧，1 号那侧一字不差。"
+        ),
+        differs_in=(
+            "agent.env",
+            "agent.env.DEMO_AGENT_MEMORY_GUARD",
+            "script[n].script[n].content",
+            "script[n].script[n].tool_calls[n].name",
+            "script[n].script[n].tool_calls[n].arguments.order_id",
+            "script[n].script[n].tool_calls[n].arguments.amount",
+            "script[n].script[n].tool_calls[n].arguments.target_role",
+            "script[n].script[n].tool_calls[n].arguments.task",
+        ),
+    ),
+    Controlled(
         scenarios=("planner_chain_clean", "planner_plan_recreated"),
         claim=(
             "规划-执行：唯一的变量是会话 0 创建了几次计划（一次 vs 覆盖式两次，"
