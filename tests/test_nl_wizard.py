@@ -253,7 +253,7 @@ async def test_home_has_plain_language_entry(home_client: httpx.AsyncClient) -> 
     assert r.status_code == 200
     assert "用一句话建测试" in r.text
     assert "/scenarios/plain" in r.text
-    assert "现成测试包" in r.text
+    assert "现成测试包" not in r.text
     assert "测试任务" in r.text
 
 

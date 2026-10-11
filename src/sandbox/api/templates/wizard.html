@@ -56,20 +56,35 @@
     <textarea id="agent_task" name="agent_task" rows="3" cols="80">{{ form.agent_task }}</textarea>
   </p>
 
-  <p>
-    <label for="agent2_version">第二段谁接手（只有下面选「换成另一个 Agent 接手」时才用得上）</label><br>
-    <input id="agent2_version" name="agent2_version" value="{{ form.agent2_version }}" size="32">
-    <span class="note">
-      留空 = 没有第二个人。串联（A 跑第一段、B 跑第二段）测的是<strong>换人之后记忆不
-      跟着走</strong>——重复扣款真会发生，该修的是<strong>接缝</strong>，不是哪一个人。
-      写一个和上面不同的版本号，比如 <code>react_demo@0.2</code>。
-    </span>
-  </p>
+  <div id="agent2-box">
+    <p>
+      <label for="agent2_version">第二段谁接手（只有下面选「换成另一个 Agent 接手」时才用得上）</label><br>
+      <input id="agent2_version" name="agent2_version" value="{{ form.agent2_version }}" size="32">
+      <span class="note">
+        留空 = 没有第二个人。串联（A 跑第一段、B 跑第二段）测的是<strong>换人之后记忆不
+        跟着走</strong>——重复扣款真会发生，该修的是<strong>接缝</strong>，不是哪一个人。
+        写一个和上面不同的版本号，比如 <code>react_demo@0.2</code>。
+      </span>
+    </p>
 
-  <p>
-    <label for="agent2_task">接手的那一个收到的那句指令</label><br>
-    <textarea id="agent2_task" name="agent2_task" rows="2" cols="80">{{ form.agent2_task }}</textarea>
-  </p>
+    <p>
+      <label for="agent2_task">接手的那一个收到的那句指令</label><br>
+      <textarea id="agent2_task" name="agent2_task" rows="2" cols="80">{{ form.agent2_task }}</textarea>
+    </p>
+  </div>
+
+  <div id="chain-box">
+    <h3>这一队还有谁（0 号已经定了，这里每加一个就多一段接力）</h3>
+    <p class="note">
+      只有「这一趟怎么跑」选 <strong>一队 Agent 接力跑</strong> 才用得上。
+      加几个由你定：A 跑完交给 B，B 跑完交给 C…… 每个接手的人都是
+      <strong>另一个独立的 Agent</strong>，看不到前面几段做过什么——这正是接力要测的。
+    </p>
+    <div id="chain-rows"></div>
+    <button type="button" id="chain-add" class="btn small">再加一个 Agent</button>
+    <input type="hidden" id="chain_agents_json" name="chain_agents_json"
+           value="{{ form.chain_agents_json }}">
+  </div>
 </section>
 
 <section class="panel">
@@ -186,5 +201,89 @@
 </div>
 
 </form>
+
+<script>
+(function () {
+  'use strict';
+  var shapeEl = document.getElementById('shape');
+  var chainBox = document.getElementById('chain-box');
+  var agent2Box = document.getElementById('agent2-box');
+  var rowsEl = document.getElementById('chain-rows');
+  var hiddenEl = document.getElementById('chain_agents_json');
+  var agents = [];
+  try { agents = JSON.parse(hiddenEl.value || '[]'); } catch (e) { agents = []; }
+
+  function sync() {
+    var list = [];
+    var next = [];
+    rowsEl.querySelectorAll('.chain-row').forEach(function (row) {
+      var v = row.querySelector('.chain-version').value.trim();
+      var t = row.querySelector('.chain-task').value.trim();
+      next.push({ version: v, task: t });
+      if (v) { list.push({ version: v, task: t }); }
+    });
+    // agents 始终与当前输入一致：点「再加一个 Agent」会重建整片 DOM，
+    // 不先同步的话，已填的那几行会在重建时被清掉。
+    agents = next;
+    hiddenEl.value = JSON.stringify(list);
+  }
+
+  function render() {
+    rowsEl.innerHTML = '';
+    agents.forEach(function (row, i) {
+      var div = document.createElement('div');
+      div.className = 'chain-row';
+
+      var idx = document.createElement('span');
+      idx.className = 'chain-idx';
+      idx.textContent = '第 ' + (i + 1) + ' 段';
+
+      var v = document.createElement('input');
+      v.setAttribute('list', 'agent-list');
+      v.className = 'chain-version';
+      v.placeholder = '版本号，如 react_demo@0.2';
+      v.value = row.version || '';
+      v.addEventListener('input', sync);
+
+      var t = document.createElement('input');
+      t.className = 'chain-task';
+      t.placeholder = '这句交给它的话';
+      t.value = row.task || '';
+      t.addEventListener('input', sync);
+
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn small chain-del';
+      del.textContent = '删';
+      del.addEventListener('click', function () {
+        agents.splice(i, 1);
+        render();
+      });
+
+      div.appendChild(idx);
+      div.appendChild(v);
+      div.appendChild(t);
+      div.appendChild(del);
+      rowsEl.appendChild(div);
+    });
+    sync();
+  }
+
+  document.getElementById('chain-add').addEventListener('click', function () {
+    agents.push({ version: '', task: '' });
+    render();
+  });
+
+  function syncShape() {
+    var s = shapeEl.value;
+    chainBox.style.display = (s === 'chain') ? '' : 'none';
+    agent2Box.style.display = (s === 'relay') ? '' : 'none';
+  }
+  shapeEl.addEventListener('change', syncShape);
+
+  render();
+  syncShape();
+})();
+</script>
 
 {% endblock %}

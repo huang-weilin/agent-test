@@ -96,6 +96,20 @@
       两个人都没有做错什么，要改的是交接本身。这正是串联测试要测的东西。
     </dd>
     {% endif %}
+    {% if form.shape == 'chain' and answers.chain_agents %}
+    <dt>这一队 {{ 1 + answers.chain_agents|length }} 个 Agent 接力</dt>
+    <dd>
+      <ol class="plain">
+        <li><strong>{{ form.scalar('agent_version') }}</strong> 跑第一段，收到：{{ form.scalar('agent_task') }}</li>
+        {% for version, task in answers.chain_agents %}
+        <li><strong>{{ version }}</strong> 跑第 {{ loop.index + 1 }} 段，收到：{{ task }}</li>
+        {% endfor %}
+      </ol>
+      引擎给每个人各开一份记忆目录，所以后面的段<strong>看不到</strong>前面的段做过什么。
+      脚本让每一段做同一件事，钱会真的按段数扣——而报告会把重复记在<strong>交接</strong>上：
+      每个 Agent 都没有做错什么，要改的是接力本身。这正是链路测试要测的东西。
+    </dd>
+    {% endif %}
     <dt>脚本里的参数是占位值</dt>
     <dd>
       下面这几处是向导按工具声明编出来的，<strong>跑之前请按你的业务改</strong>：

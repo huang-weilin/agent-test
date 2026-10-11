@@ -62,26 +62,6 @@
   {%- endif -%}
 {%- endmacro %}
 
-{% macro item_pill(kind) -%}
-  {#- 体检里一项的档（`checkup/report.py` 的 `ItemKind`）。**标签是照着"这一项能
-      得出什么结论"起的名，不是照着严重程度**——所以「该抓的没抓到」和
-      「报了不该报的」都不是「不通过」：前者是这一页空了一格，后者是这一格可能
-      冤了人，两件事读法不同。 `unknown` 那档（没跑成、执行失败、前提不成立、
-      没留结论、读不出来）统一走灰徽章：它们的共同点是"这一项没有结论"，
-      而灰是页面上唯一一个不说好也不说坏的色。
-
-      色和字的分工：颜色让人一眼扫出哪几项要看，字说清是哪一种。色弱的人
-      只看字也不能读错——所以这里没有一档只靠颜色区分。 -#}
-  {%- set cls = {'caught': 'fail', 'noted': 'warn', 'clear': 'pass',
-                 'missed': 'warn', 'false_alarm': 'fail', 'charges': 'fail'}.get(kind, 'unknown') -%}
-  {%- set label = {'caught': '抓到了', 'noted': '值得看一眼', 'clear': '没事',
-                   'missed': '该抓的没抓到', 'false_alarm': '报了不该报的',
-                   'charges': '扣款对不上', 'not_run': '没跑成',
-                   'failed': '执行失败', 'no_report': '没留结论',
-                   'premises': '前提不成立', 'no_verdict': '没判出结论',
-                   'unreadable': '读不出来'}.get(kind, kind) -%}
-  <span class="badge {{ cls }}">{{ label }}</span>
-{%- endmacro %}
 
 {% macro verdict_pill(verdict) -%}
   {%- set cls = {'pass': 'pass', 'fail': 'fail',

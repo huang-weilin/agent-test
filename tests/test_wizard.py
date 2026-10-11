@@ -896,3 +896,155 @@ async def test_a_broken_tool_library_is_explained_not_a_traceback(
     response = await ui.client.get("/scenarios/new")
     assert response.status_code == 400
     assert "工具库" in response.text
+
+# --- 链路（一队 Agent 接力，人数自定） -------------------------------------
+
+
+def _chain_form(chain_json: str, **overrides: Any) -> wizard.FormData:
+    """一份填了「一队 Agent 接力」的原始表单。"""
+    picked = {symptom.key: "skip" for symptom in wizard.SYMPTOMS}
+    raw: dict[str, Any] = {
+        "scenario_id": "gen-chain",
+        "agent_what": "客服助手",
+        "agent_goal": "别重复扣款",
+        "agent_version": "react_demo@0.1",
+        "agent_task": "帮我把 A1 退了",
+        "tools": ["get_order", "create_payment"],
+        "shape": "chain",
+        "chain_agents_json": chain_json,
+        "choices": picked,
+        "unattended_allowed": "0",
+    }
+    raw.update(overrides)
+    return wizard.FormData.from_form(raw, tools=[str(t) for t in raw["tools"]])
+
+
+def test_chain_form_parses_into_n_agents() -> None:
+    """JSON 名单里有几个，`chain_agents` 就有几个，顺序不动。"""
+    form = _chain_form(
+        '[{"version": "react_demo@0.2", "task": "你接手，继续处理 A1"},'
+        ' {"version": "planner_agent@0.1", "task": "你规划一下"}]'
+    )
+    answers = form.to_answers()
+    assert answers.shape == "chain"
+    assert answers.chain_agents == (
+        ("react_demo@0.2", "你接手，继续处理 A1"),
+        ("planner_agent@0.1", "你规划一下"),
+    )
+
+
+def test_chain_without_any_extra_agent_is_refused() -> None:
+    """选了接力但没加人：报错，不猜。"""
+    form = _chain_form("")
+    with pytest.raises(wizard.WizardError, match="再加一个 Agent"):
+        form.to_answers()
+
+
+def test_chain_with_an_empty_list_is_refused() -> None:
+    """名单是 `[]` 和没填一样：等于一个人都没加。"""
+    form = _chain_form("[]")
+    with pytest.raises(wizard.WizardError, match="空的"):
+        form.to_answers()
+
+
+def test_chain_with_an_agent_missing_version_is_refused() -> None:
+    """名单里有一项没写版本号：报错点名是哪一项。"""
+    form = _chain_form('[{"version": "", "task": "没人跑这一段"}]')
+    with pytest.raises(wizard.WizardError, match="第 1 个没写版本号"):
+        form.to_answers()
+
+
+def test_chain_with_broken_json_is_refused() -> None:
+    """JSON 坏了要报「这是向导的问题」，不是 traceback。"""
+    form = _chain_form("{{{")
+    with pytest.raises(wizard.WizardError, match="解析失败"):
+        form.to_answers()
+
+
+def test_chain_yaml_has_one_session_per_agent() -> None:
+    """`agents:` 有 N 个，`sessions:` 就有 N 段，每段指名 `agent: i`。
+
+    这里真的把生成的 YAML 解析一遍，而不是数字符串——解析过了才说明这份
+    场景能进引擎。
+    """
+    form = _chain_form(
+        '[{"version": "react_demo@0.2", "task": "你接手"},'
+        ' {"version": "planner_agent@0.1", "task": "你规划"}]'
+    )
+    answers = form.to_answers()
+    facts = wizard.tool_facts()
+    scenario = _parse(answers, facts)
+
+    assert [a.version for a in scenario.agents] == [
+        "react_demo@0.1",
+        "react_demo@0.2",
+        "planner_agent@0.1",
+    ]
+    # 会话数与段数一一对应。0 号段不指名（`None` = 0 号），后面的段逐段点名。
+    assert [s.agent for s in scenario.sessions] == [None, 1, 2]
+    assert [s.name for s in scenario.sessions][0] == "0 号跑第一段"
+
+
+def test_chain_yaml_with_three_agents_loads(lib: list[wizard.ToolFact]) -> None:
+    """三种形状参数化之外的单测：3 个 Agent 的链路在引擎加载器里真的能过。"""
+    form = _chain_form(
+        '[{"version": "react_demo@0.2", "task": "你接手"},'
+        ' {"version": "router_agent@0.1", "task": "你转交"},'
+        ' {"version": "planner_agent@0.1", "task": "你收尾"}]'
+    )
+    answers = form.to_answers()
+    scenario = _parse(answers, lib)
+    assert len(scenario.agents) == 4
+    assert len(scenario.sessions) == 4
+
+
+def test_chain_duplicate_versions_are_called_out(lib: list[wizard.ToolFact]) -> None:
+    """同一队里有两个写同一个版本号：「换人」名不副实，要提示。"""
+    answers = wizard.Answers(
+        scenario_id="gen-chain",
+        agent_what="客服助手",
+        agent_goal="别重复扣款",
+        agent_version="react_demo@0.1",
+        agent_task="帮我把 A1 退了",
+        chain_agents=(("react_demo@0.1", "你接手"), ("planner_agent@0.1", "你规划")),
+        tools=("get_order",),
+        shape="chain",
+        choices={symptom.key: "skip" for symptom in wizard.SYMPTOMS},
+    )
+    out = wizard.warnings(answers, lib)
+    assert any("同一个版本号" in text for text in out)
+
+
+def test_chain_with_distinct_versions_stays_quiet(lib: list[wizard.ToolFact]) -> None:
+    """版本号各不相同时，那条「名不副实」的提醒一个字都不许出现。"""
+    answers = wizard.Answers(
+        scenario_id="gen-chain",
+        agent_what="客服助手",
+        agent_goal="别重复扣款",
+        agent_version="react_demo@0.1",
+        agent_task="帮我把 A1 退了",
+        chain_agents=(("react_demo@0.2", "你接手"), ("planner_agent@0.1", "你规划")),
+        tools=("get_order",),
+        shape="chain",
+        choices={symptom.key: "skip" for symptom in wizard.SYMPTOMS},
+    )
+    out = wizard.warnings(answers, lib)
+    assert not any("同一个版本号" in text for text in out)
+
+
+@pytest.mark.asyncio
+async def test_chain_back_roundtrip_keeps_the_list(ui: Ui) -> None:
+    """「返回改一改」要把 JSON 名单原样回显——丢了的话用户加的人全没了。"""
+    form = _chain_form(
+        '[{"version": "react_demo@0.2", "task": "你接手，继续处理 A1"}]',
+        scenario_id="chain-back",
+    )
+    data = dict(form.scalars)
+    data["tools"] = ["get_order", "create_payment"]
+    data.update(
+        {f"choice:{key}": value for key, value in form.choices.items()}
+    )
+    data["submit"] = "back"
+    response = await ui.client.post("/scenarios/new", data=data)
+    assert response.status_code == 200
+    assert "你接手，继续处理 A1" in response.text

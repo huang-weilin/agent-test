@@ -42,6 +42,8 @@
 
 from __future__ import annotations
 
+import json
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -181,6 +183,7 @@ SHAPES: dict[str, str] = {
     "twice": "同一件事做两次：各调一次之后，第一个写工具再调一次",
     "cross": "分两段会话，第二段接着第一段（用它的记忆）",
     "relay": "分两段会话，第二段换成另一个 Agent 接手（串联）",
+    "chain": "一队 Agent 接力跑（A 跑第一段、B 跑第二段、C 跑第三段……人数自定）",
     "overnight": "分两段：第二段没人看着，而且中间隔了一夜",
 }
 
@@ -219,6 +222,10 @@ class Answers:
     #: 的名字。所以 relay 下它是必填（见 `to_answers`），别的时候存着不用。
     agent2_version: str = ""
     agent2_task: str = ""
+    #: 链路（`shape == "chain"`）时追加的 Agent：`(版本号, 这句交给它的话)`。
+    #: 0 号永远是 `agent_version` / `agent_task`，这里是第 1、2、… 号。
+    #: 只有 chain 那一趟用得上；别的时候存着不用。
+    chain_agents: tuple[tuple[str, str], ...] = ()
     expected_charges: int | None = None
     #: 用一句话说清「什么算通过」，跑完让 AI 按这句话判（AI 裁判）。
     #: 空 = 不请裁判，只用上面勾的症状判。
@@ -256,6 +263,8 @@ class FormData:
     agent_task: str = ""
     agent2_version: str = ""
     agent2_task: str = ""
+    #: 链路时追加的 Agent 名单，前端序列化成 JSON 放进这一个隐藏字段。
+    chain_agents_json: str = ""
     shape: str = "once"
     tools: tuple[str, ...] = ()
     #: 每一条毛病 → `skip` / `expect_fail` / `expect_pass`。**16 条全在**，
@@ -294,6 +303,7 @@ class FormData:
             agent_task=one("agent_task").strip(),
             agent2_version=one("agent2_version").strip(),
             agent2_task=one("agent2_task").strip(),
+            chain_agents_json=one("chain_agents_json").strip(),
             shape=shape if shape in SHAPES else "once",
             tools=tuple(tools),
             choices=choices,
@@ -314,6 +324,7 @@ class FormData:
             "agent_task": self.agent_task,
             "agent2_version": self.agent2_version,
             "agent2_task": self.agent2_task,
+            "chain_agents_json": self.chain_agents_json,
             "shape": self.shape,
             "expected_charges": self.expected_charges,
             "judge_criteria": self.judge_criteria,
@@ -363,6 +374,43 @@ class FormData:
                 "改成「分两段会话，第二段接着第一段（用它的记忆）」。"
             )
 
+        # 链路那一趟，追加的 Agent 名单在 JSON 里。解析不了就报错，不猜：
+        # 猜一个版本号进去，报告上会理直气壮地印出一个用户从没写过的名字。
+        chain: list[tuple[str, str]] = []
+        if self.shape == "chain":
+            if not self.chain_agents_json.strip():
+                raise WizardError(
+                    "选了「一队 Agent 接力」，但没加接手的人。\n"
+                    "回到第一步，点「再加一个 Agent」把接力的都写上——"
+                    "有几个写几个，这一队没有长度上限。"
+                )
+            try:
+                raw_list = json.loads(self.chain_agents_json)
+            except ValueError:
+                raise WizardError(
+                    "接力的 Agent 名单解析失败——这是向导自己的问题，不是你填错了。"
+                    "回到上一步重新提交一下。"
+                ) from None
+            if not isinstance(raw_list, list) or not raw_list:
+                raise WizardError(
+                    "接力的 Agent 名单是空的。回到第一步，"
+                    "点「再加一个 Agent」把接手的都写上。"
+                )
+            for i, item in enumerate(raw_list, 1):
+                if not isinstance(item, dict):
+                    raise WizardError(
+                        f"接力名单里第 {i} 个不是一条记录——这是向导自己的问题。"
+                    )
+                version = str(item.get("version") or "").strip()
+                task = str(item.get("task") or "").strip()
+                if not version:
+                    raise WizardError(
+                        f"接力名单里第 {i} 个没写版本号。\n"
+                        "每一段接手的人都要写清是谁——"
+                        "比如 react_demo@0.2，或你登记过的版本号。"
+                    )
+                chain.append((version, task))
+
         return Answers(
             scenario_id=self.scenario_id,
             agent_what=self.agent_what,
@@ -371,6 +419,7 @@ class FormData:
             agent_task=self.agent_task,
             agent2_version=self.agent2_version,
             agent2_task=self.agent2_task,
+            chain_agents=tuple(chain),
             tools=self.tools,
             shape=self.shape,
             choices=self.choices,
@@ -489,6 +538,14 @@ def session_scripts(
         return [twice]
     if answers.shape == "cross":
         return [script, _after(write, script, "又做了一遍。")]
+    if answers.shape == "chain":
+        # 与 `relay` 同一套脚本逻辑，只是段数跟着追加的 Agent 走：第 0 段
+        # 正常做一次，之后每一段"接手的人又做了一遍"。脚本全部逐字相同，
+        # 这样链路上归因的差别只可能来自「换人」，不会来自脚本。
+        out = [list(script)]
+        for _ in answers.chain_agents:
+            out.append(_after(write, script, "接手的人又做了一遍。"))
+        return out
     if answers.shape == "relay":
         # 脚本与 `cross` 那一趟**逐字相同**：串联要证明的是"换人"这一个变量
         # 造成了归因的翻转，脚本不一样的话，结论的差别就说不清是谁造成的。
@@ -519,6 +576,15 @@ def session_headers(answers: Answers) -> list[list[str]]:
             ["  - name: 第一次", "    snapshot_after: after-0"],
             ["  - name: 第二次，接着上一段的记忆", "    restore_from: after-0"],
         ]
+    if answers.shape == "chain":
+        # 与 `relay` 同一处理由：**刻意不写快照与回滚**。链路上每一份记忆
+        # 从头到尾就是分开的，没有人回滚过任何东西——写一个 `restore_from`
+        # 进去，报告会把它读成"记忆被回滚掉了"，于是归因从「接缝」滑到
+        # 「恢复机制」，而两者要修的地方不同。
+        out = [["  - name: 0 号跑第一段"]]
+        for i in range(1, len(answers.chain_agents) + 1):
+            out.append([f"  - name: {i} 号跑第 {i + 1} 段", f"    agent: {i}"])
+        return out
     if answers.shape == "relay":
         # **刻意不写快照与回滚。** 串联里那两份记忆从头到尾就是分开的，没有人
         # 回滚过任何东西——写一个 `restore_from` 进去，报告会把它读成"记忆被
@@ -703,7 +769,11 @@ def warnings(answers: Answers, facts: Sequence[ToolFact]) -> list[str]:
     # 会被报成"只有一段会话"——一句**假的真话**：它说的现象确实会让那条判据
     # 永远配不上，而这一趟根本不是那个形状。用户照着提示去改跑法，改完发现
     # 自己真正要测的东西没了。
-    if "loop.cross_session" in chosen and answers.shape not in ("cross", "relay"):
+    if "loop.cross_session" in chosen and answers.shape not in (
+        "cross",
+        "relay",
+        "chain",
+    ):
         out.append(
             "勾了「它会把上次做过的事又做一遍」，但这一趟只有一段会话。"
             "跨会话的重复要有两段才看得见——这条会显示成「判不了」，不是「没问题」。"
@@ -720,6 +790,25 @@ def warnings(answers: Answers, facts: Sequence[ToolFact]) -> list[str]:
             "「换人」这件事在报告里就名不副实了。要测真的接力，"
             "接手那一个换一个版本号（比如 react_demo@0.2）。"
         )
+
+    if answers.shape == "chain":
+        versions = [answers.agent_version.strip()]
+        versions += [v for v, _ in answers.chain_agents]
+        seen: set[str] = set()
+        dupes: list[str] = []
+        for v in versions:
+            if v in seen and v not in dupes:
+                dupes.append(v)
+            seen.add(v)
+        if dupes:
+            out.append(
+                "这一队里有几个 Agent 写的是同一个版本号（"
+                + "、".join(dupes)
+                + "）。引擎仍然会给每个 Agent 各开一份记忆目录，报告上也会"
+                "照实说「0 号与 1 号」——但那段跑的是同一份代码，"
+                "「换人」这件事在报告里就名不副实了。要测真的接力，"
+                "接手的换一个版本号（比如 react_demo@0.2）。"
+            )
 
     autonomy_keys = {"autonomy", "autonomy.unauthorized"}
     if autonomy_keys & set(chosen) and answers.shape != "overnight":
@@ -798,7 +887,19 @@ def build_yaml(answers: Answers, facts: Sequence[ToolFact]) -> str:
     add(f"  {answers.agent_what.strip()}")
     add(f"  本次要验证：{answers.agent_goal.strip()}")
     add("")
-    if answers.shape == "relay":
+    if answers.shape == "chain":
+        add("# 一队 Agent 按顺序接力：0 号跑第一段，1 号跑第二段，2 号跑第三段……")
+        add("# 引擎给每个 Agent 各开一份记忆目录，所以后面的段看不到前面的段做过什么")
+        add("# ——这正是接力测试要测的东西：重复真的发生了，但没有谁本可以知道。")
+        add("agents:")
+        add(f"  - version: {answers.agent_version.strip()}")
+        add(f"    task: {_yaml_scalar(answers.agent_task.strip())}")
+        add("    model: stub-model")
+        for version, task in answers.chain_agents:
+            add(f"  - version: {version.strip()}")
+            add(f"    task: {_yaml_scalar(task.strip())}")
+            add("    model: stub-model")
+    elif answers.shape == "relay":
         add("# 两个 Agent 接力：0 号跑第一段，1 号跑第二段（会话上的 `agent: 1`）。")
         add("# 引擎给每个 Agent 各开一份记忆目录，所以第二段看不到第一段做过什么")
         add("# ——这正是串联测试要测的东西：重复真的发生了，但没有谁本可以知道。")

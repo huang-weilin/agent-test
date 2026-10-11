@@ -686,7 +686,7 @@ class Scenario(BaseModel):
     #:
     #: `agent` 在经过校验之后**总是**等于 `agents[0]`（见 `_one_agent_list`）。
     #: 于是所有读 `scenario.agent.X` 的地方（引擎起进程、配置指纹、界面、
-    #: 体检菜单，19 处）在单 Agent 场景下一字不用改，也不会各自判断一次
+    #: 界面，19 处）在单 Agent 场景下一字不用改，也不会各自判断一次
     #: "这场景有几个 Agent"。**它是派生值，不是第二份真相**——唯一的写者
     #: 是那个校验器，`tests/test_multi_agent.py` 里有一条盯着它们不许分叉。
     #:
