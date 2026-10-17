@@ -6,9 +6,10 @@
 `.agent_sandbox_local.json`（仓库根，已 gitignore），让「配 key → 选 agent →
 一句话建测试」的第一步有个真实的落点。
 
-**生效优先级**：用户界面里配的连接（本文件）> 仓库 `.env` 的
-`SANDBOX_UPSTREAM_*`（开发环境内置）。两层都没有时，自然语言录入降级到
-本地关键词规则，并在页面上明说「这是草稿」。
+**没有内置默认**：不配置就没有连接，AI 解析功能用不了（自然语言录入会
+降级到本地关键词规则，并在页面上明说「这是草稿」）。不拿 `.env` 里的
+`SANDBOX_UPSTREAM_*` 当退路——那个 key 是给被测 Agent 的上游用的
+（gateway 的 Credential Vault），和界面里「翻译你说的话」的连接是两条路。
 
 **安全边界**：这个 key 只用于「把你想测的翻成场景」这一步，跑在界面进程里。
 它**绝不**被注入给被测 Agent 的进程——被测 Agent 在沙盒里拿到的永远是假凭据
@@ -22,7 +23,6 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from sandbox import config
 from sandbox.config import REPO_ROOT
 
 FILE = REPO_ROOT / ".agent_sandbox_local.json"
@@ -72,7 +72,7 @@ def save(base_url: str, api_key: str, model: str) -> None:
 
 
 def clear() -> None:
-    """删掉用户配置，回到 .env 的内置连接（如果有）。"""
+    """删掉用户配置。删完就是没有连接（没有内置默认可回）。"""
     with _LOCK:
         try:
             FILE.unlink()
@@ -81,23 +81,21 @@ def clear() -> None:
 
 
 def effective() -> dict[str, str] | None:
-    """真正会拿去调解析模型的连接。用户配置优先，退回 .env 内置。"""
+    """真正会拿去调解析模型的连接。只有用户自己配的那一份，没有内置默认。
+
+    不拿 `.env` 的 `SANDBOX_UPSTREAM_*` 当退路：那是对外发布时不存在的东西
+    （`.env` 已 gitignore，别人下载后没有），拿它当退路会让「没配 = 没有」
+    这句话变成假的——用户看到的「已连上」其实连的是我们自己机器上的 key。
+    """
     user = load()
-    if user:
-        return {
-            "base_url": user["base_url"],
-            "api_key": user["api_key"],
-            "model": user["model"],
-            "source": "user",
-        }
-    if config.settings.upstream_api_key:
-        return {
-            "base_url": config.settings.upstream_base_url,
-            "api_key": config.settings.upstream_api_key,
-            "model": _DEFAULT_MODEL,
-            "source": "builtin",
-        }
-    return None
+    if not user:
+        return None
+    return {
+        "base_url": user["base_url"],
+        "api_key": user["api_key"],
+        "model": user["model"],
+        "source": "user",
+    }
 
 
 def ready() -> bool:
@@ -108,7 +106,7 @@ def status_text() -> str:
     """给人看的连接状态（页面顶部那行小字）。"""
     conn = effective()
     if not conn:
-        return "还没连上解析用的模型。没连也能用，只是机器会用内置规则先猜一版草稿，你确认时看仔细点。"
+        return "还没配模型连接。配好才能用一句话建测试（没配也能跑，只是只能按规则猜草稿）。"
     model = conn.get("model") or _DEFAULT_MODEL
     base = conn.get("base_url") or ""
     host = base.split("//")[-1].split("/")[0] if "//" in base else base

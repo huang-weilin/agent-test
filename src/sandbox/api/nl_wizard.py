@@ -134,12 +134,13 @@ async def _llm_json(
 ) -> dict[str, Any]:
     """调上游，返回解析出的 JSON 对象。任何失败都抛异常（由调用方降级）。
 
-    连接的来源：用户界面里配的 key（`user_llm.effective()`）优先，其次才是
-    仓库 `.env` 的内置连接。两层都没有就走本地规则。
+    连接只有一份来源：用户界面里配的 key（`user_llm.effective()`）。
+    没有内置默认（`.env` 的 `SANDBOX_UPSTREAM_*` 是给被测 Agent 的上游，
+    不是解析用的连接）。没配就走本地规则。
     """
     conn = user_llm.effective()
     if not conn:
-        raise PlainTextError("没有可用的 LLM 连接（界面里没配 key，仓库也没内置），走本地规则。")
+        raise PlainTextError("没有可用的 LLM 连接（界面里没配 key），走本地规则。")
     payload = {
         "model": conn["model"],
         "messages": [

@@ -163,6 +163,7 @@ def test_answers_from_text_uses_llm_json(monkeypatch: pytest.MonkeyPatch) -> Non
         }
 
     monkeypatch.setattr(nl_wizard, "_llm_json", fake_llm)
+    monkeypatch.setattr(nl_wizard.user_llm, "ready", lambda: True)
     answers, warnings = asyncio.run(
         nl_wizard.answers_from_text("同一笔钱会不会付两次", FACTS, ["react_demo@0.1"])
     )
@@ -287,6 +288,7 @@ def test_two_selected_agents_force_relay(monkeypatch: pytest.MonkeyPatch) -> Non
         }
 
     monkeypatch.setattr(nl_wizard, "_llm_json", fake_llm)
+    monkeypatch.setattr(nl_wizard.user_llm, "ready", lambda: True)
     answers, _ = asyncio.run(
         nl_wizard.answers_from_text(
             "换一个人接手，上次做过的事会不会又做一遍",
@@ -318,6 +320,7 @@ def test_one_selected_agent_locks_version(monkeypatch: pytest.MonkeyPatch) -> No
         }
 
     monkeypatch.setattr(nl_wizard, "_llm_json", fake_llm)
+    monkeypatch.setattr(nl_wizard.user_llm, "ready", lambda: True)
     answers, _ = asyncio.run(
         nl_wizard.answers_from_text(
             "同一单会不会发两次",
@@ -343,9 +346,10 @@ async def test_settings_save_and_clear(client: httpx.AsyncClient, monkeypatch: p
     assert cfg and cfg["api_key"] == "sk-test-123"
     assert cfg["model"] == "my-model"
 
-    r2 = await client.get("/settings?ok=1")
+    r2 = await client.get("/settings?saved=1")
     assert r2.status_code == 200
-    assert "连接你的模型" in r2.text
+    assert "连接设置" in r2.text
+    assert "已保存" in r2.text
     assert "api.example.com" in r2.text
 
     r3 = await client.post("/settings", data={"submit": "clear"})

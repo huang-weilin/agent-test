@@ -1,5 +1,82 @@
 {% extends "base.html" %}
-{% block title %}连接设置<script>
+{% block title %}连接设置{% endblock %}
+{% block body %}
+
+<h1>连接设置</h1>
+<p class="plain">
+  这里配置一个模型，用来把你说的需求翻译成测试任务。
+  密钥只存在这台机器上，不随项目发出去，也不会发给被测的 Agent。
+</p>
+
+{% if saved == 1 %}
+<div class="panel ok">
+  <h2>已保存</h2>
+  <p>连接已生效，去<a href="/scenarios/plain">用一句话建测试</a>试试。</p>
+</div>
+{% endif %}
+
+{% if cleared == 1 %}
+<div class="panel ok">
+  <h2>已清除</h2>
+  <p>连接已删除，AI 解析功能不可用，请重新配置。</p>
+</div>
+{% endif %}
+
+{% if error %}
+<div class="panel bad">
+  <h2>没保存</h2>
+  <p>{{ error }}</p>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>当前连接</h2>
+  {% if current %}
+  <p>已配置：<code>{{ current.model }}</code>（{{ current.base_url }}）</p>
+  {% else %}
+  <p>还没有配置连接。配好才能用一句话建测试。</p>
+  {% endif %}
+</div>
+
+<form method="post" action="/settings">
+  <div class="panel">
+    <h2>配置模型连接</h2>
+    <p class="note">选择一个服务商，接口地址和模型名会自动填好；也可以选「自定义接口」自己填。</p>
+    <p>
+      <label for="provider">服务商</label><br>
+      <select id="provider" name="provider" style="width:100%">
+        <option value="">选择服务商</option>
+        <option value="deepseek"{{ " selected" if provider == "deepseek" }}>DeepSeek</option>
+        <option value="openai"{{ " selected" if provider == "openai" }}>OpenAI</option>
+        <option value="kimi"{{ " selected" if provider == "kimi" }}>Moonshot Kimi</option>
+        <option value="glm"{{ " selected" if provider == "glm" }}>智谱 GLM</option>
+        <option value="qwen"{{ " selected" if provider == "qwen" }}>通义千问</option>
+        <option value="custom"{{ " selected" if provider == "custom" }}>自定义接口</option>
+      </select>
+    </p>
+    <p>
+      <label for="base_url">接口地址</label><br>
+      <input id="base_url" name="base_url" value="{{ base_url }}" placeholder="https://…" style="width:100%">
+    </p>
+    <p>
+      <label for="api_key">密钥</label><br>
+      <input id="api_key" name="api_key" type="password" placeholder="sk-…" style="width:100%">
+      {% if has_key %}<span class="note">已保存，留空则保持不变。</span>{% endif %}
+    </p>
+    <p>
+      <label for="model">模型名</label><br>
+      <input id="model" name="model" value="{{ model }}" placeholder="模型名" style="width:100%">
+    </p>
+    <div class="row">
+      <button class="primary" type="submit">保存连接</button>
+      {% if current %}
+      <button class="btn" type="submit" name="submit" value="clear">清除连接</button>
+      {% endif %}
+    </div>
+  </div>
+</form>
+
+<script>
 const PROVIDERS = {
   deepseek: ['https://api.deepseek.com', 'deepseek-chat'],
   openai: ['https://api.openai.com/v1', 'gpt-4o-mini'],
@@ -18,7 +95,6 @@ function guessProvider() {
   }
   return '';
 }
-sel.value = guessProvider();
 sel.addEventListener('change', () => {
   const [u, m] = PROVIDERS[sel.value] || ['', ''];
   if (u) url.value = u;
@@ -27,78 +103,5 @@ sel.addEventListener('change', () => {
   model.placeholder = m || '模型名';
 });
 </script>
-{% endblock %}
-{% block body %}
-
-<h1>连接你的模型</h1>
-<p class="plain">
-  这一栏只做一件事：配置一个模型，用来理解你说的话。
-  密钥<strong>只存在这台机器上</strong>，不随项目发出去，也不会发给被测的 Agent。
-</p>
-
-{% if saved == 1 %}
-<div class="panel ok">
-  <h2>已保存</h2>
-  <p>连接已生效，去<a href="/scenarios/plain">用一句话建测试</a>试试。</p>
-</div>
-{% endif %}
-
-{% if error %}
-<div class="panel bad">
-  <h2>没保存</h2>
-  <p>{{ error }}</p>
-</div>
-{% endif %}
-
-<div class="panel">
-  <h2>当前连接</h2>
-  {% if current %}
-  <p>
-    {{ '你自己配的' if current.source == 'user' else '仓库内置的' }}：
-    <code>{{ current.model }}</code>（{{ current.base_url }}）
-  </p>
-  {% else %}
-  <p>还没连上。不连也能用——机器会用内置规则先猜一版草稿，确认页会提醒你检查。</p>
-  {% endif %}
-</div>
-
-<form method="post" action="/settings">
-  <div class="panel">
-    <h2>填你的模型连接</h2>
-    <p class="note">选一个服务商，接口地址和模型名会自动填好；也可以选「自定义接口」自己填。</p>
-    <p>
-      <label for="provider">服务商</label><br>
-      <select id="provider" name="provider" style="width:100%">
-        <option value="">选择服务商</option>
-        <option value="deepseek">DeepSeek</option>
-        <option value="openai">OpenAI</option>
-        <option value="kimi">Moonshot Kimi</option>
-        <option value="glm">智谱 GLM</option>
-        <option value="qwen">通义千问</option>
-        <option value="custom">自定义接口</option>
-      </select>
-    </p>
-    <p>
-      <label for="base_url">接口地址</label><br>
-      <input id="base_url" name="base_url" value="{{ base_url }}" placeholder="https://…" style="width:100%">
-    </p>
-    <p>
-      <label for="api_key">密钥</label><br>
-      <input id="api_key" name="api_key" type="password" placeholder="sk-…" style="width:100%">
-      <span class="note">填了会存进本机的 <code>.agent_sandbox_local.json</code>（已被 git 忽略，不会上传）。</span>
-    </p>
-    <p>
-      <label for="model">模型名</label><br>
-      <input id="model" name="model" value="{{ model }}" placeholder="模型名" style="width:100%">
-    </p>
-    <div class="row">
-      <button class="primary" type="submit">保存连接</button>
-      {% if current and current.source == 'user' %}
-      <button class="btn" type="submit" name="submit" value="clear">清除我配的，回到内置</button>
-      {% endif %}
-    </div>
-  </div>
-</form>
-
 
 {% endblock %}

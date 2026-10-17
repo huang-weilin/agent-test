@@ -550,8 +550,22 @@ def create_app(
             },
         )
 
+    def _guess_provider(base_url: str) -> str:
+        """从接口地址猜服务商（与 settings.html 的 JS 同逻辑，用于服务端回显选中项）。"""
+        table = (
+            ("https://api.deepseek.com", "deepseek"),
+            ("https://api.openai.com/v1", "openai"),
+            ("https://api.moonshot.cn/v1", "kimi"),
+            ("https://open.bigmodel.cn/api/paas/v4", "glm"),
+            ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen"),
+        )
+        for prefix, name in table:
+            if base_url.startswith(prefix):
+                return name
+        return "custom" if base_url else ""
+
     @app.get("/settings", response_class=HTMLResponse)
-    async def settings_page(request: Request, saved: int = 0) -> Response:
+    async def settings_page(request: Request, saved: int = 0, cleared: int = 0) -> Response:
         conn = user_llm.load()
         current = user_llm.effective()
         return templates.TemplateResponse(
@@ -560,8 +574,10 @@ def create_app(
             {
                 "base_url": conn["base_url"] if conn else "",
                 "model": conn["model"] if conn else "",
-                "has_key": bool(conn or config.settings.upstream_api_key),
+                "provider": _guess_provider(conn["base_url"] if conn else ""),
+                "has_key": bool(conn),
                 "saved": saved,
+                "cleared": cleared,
                 "current": current,
                 "active": app.state.jobs.active,
             },
@@ -584,15 +600,17 @@ def create_app(
                 {
                     "base_url": base_url or (conn["base_url"] if conn else ""),
                     "model": model or (conn["model"] if conn else ""),
-                    "has_key": bool(conn or config.settings.upstream_api_key),
+                    "provider": _guess_provider(base_url or (conn["base_url"] if conn else "")),
+                    "has_key": bool(conn),
                     "saved": 0,
+                    "cleared": 0,
                     "error": "接口地址和密钥都要填（密钥只存在这台机器上，不随项目发出去）。",
                     "current": user_llm.effective(),
                     "active": app.state.jobs.active,
                 },
             )
         user_llm.save(base_url, api_key, model)
-        return RedirectResponse(url="/settings?ok=1", status_code=303)
+        return RedirectResponse(url="/settings?saved=1", status_code=303)
 
     @app.get("/scenarios/plain", response_class=HTMLResponse)
     async def nl_start(request: Request) -> Response:
