@@ -343,6 +343,7 @@ def create_app(
                         "tools": len(scenario.tools),
                         "expects": len(scenario.expect),
                         "agents_text": _agents_text(scenario),
+                        "kind": scenario.kind,
                         "error": None,
                     }
                 except ScenarioError as exc:
@@ -362,12 +363,19 @@ def create_app(
             latest.setdefault(r.scenario_id, r.verdict_ok)
         for entry in entries:
             entry["latest_verdict"] = latest.get(entry["id"])
+            # 分组默认值：没加载成功或没写明 kind 的，归为"示例"（在用户视野内）。
+            entry.setdefault("kind", "example")
+
+        example_entries = [e for e in entries if e.get("kind") == "example"]
+        control_entries = [e for e in entries if e.get("kind") == "control"]
 
         return templates.TemplateResponse(
             request,
             "home.html",
             {
                 "scenarios": entries,
+                "example_scenarios": example_entries,
+                "control_scenarios": control_entries,
                 "runs": await queries.recent_runs(limit=8),
                 "budget": await cost.budget_status(),
                 "active": app.state.jobs.active,

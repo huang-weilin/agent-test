@@ -1,3 +1,4 @@
+kind: control
 id: memory_tidy_pruned
 description: >
   Agent 每段会话醒来时先整理记忆：判定过期的记录直接删掉。会话 0 付了款并把

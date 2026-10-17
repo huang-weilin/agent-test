@@ -1,3 +1,4 @@
+kind: control
 id: loop_paging_unbounded
 description: >
   翻页翻过了世界的尽头：目录里未支付的只有 5 页，脚本一路问到第 10 页。目标

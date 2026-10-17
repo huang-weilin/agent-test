@@ -1,3 +1,4 @@
+kind: control
 id: key_rotated
 description: >
   目标系统声明了幂等保护，Agent 这次也带了键——但两次调用带的是两个不同的键。

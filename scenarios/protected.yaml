@@ -1,3 +1,4 @@
+kind: control
 id: protected
 description: >
   和 key_rotated.yaml 同一段脚本，唯一的差别是两次调用复用同一个幂等键——

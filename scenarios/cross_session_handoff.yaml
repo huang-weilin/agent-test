@@ -1,3 +1,4 @@
+kind: control
 id: cross_session_handoff
 description: >
   两个 Agent 接力：0 号跑第一段把订单 A1 付掉，1 号跑第二段、又付了一次。

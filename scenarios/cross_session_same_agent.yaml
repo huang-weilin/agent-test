@@ -1,3 +1,4 @@
+kind: control
 id: cross_session_same_agent
 description: >
   三段会话全由同一个 Agent 跑：第一段把订单 A1 付掉，后面两段又想付一次，

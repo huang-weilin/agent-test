@@ -1,3 +1,4 @@
+kind: control
 id: autonomous_night_generic_egress_blocked
 description: >
   "夜里它自己动手"那一族的第三个变体，另一半：同样的通用出口，同样的脚本，

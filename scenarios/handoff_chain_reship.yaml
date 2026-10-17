@@ -1,3 +1,4 @@
+kind: control
 id: handoff_chain_reship
 description: >
   与 handoff_chain_clean 脚本完全一样，唯一的差别是 0 号把同一条任务

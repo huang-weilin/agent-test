@@ -1,3 +1,4 @@
+kind: control
 id: fulfillment_chain_reship_noguard
 description: >
   与 fulfillment_chain_reship 脚本完全一样，唯一的差别是这一份关掉了

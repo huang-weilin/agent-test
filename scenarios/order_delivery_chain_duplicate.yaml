@@ -1,3 +1,4 @@
+kind: control
 id: order_delivery_chain_duplicate
 description: >
   与 order_delivery_chain_clean 脚本完全一样，唯一的差别是 0 号把同一笔

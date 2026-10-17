@@ -1,3 +1,4 @@
+kind: control
 id: long_run_same_moment
 description: >
   `long_run_overnight` 的对比场景。世界、任务、工具、期望的扣款笔数完全一样，

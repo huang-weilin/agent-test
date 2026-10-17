@@ -1,3 +1,4 @@
+kind: control
 id: target_error
 description: >
   目标系统报错之后它做了什么。脚本让它问一个不存在的订单——目标系统回 404，

@@ -14,10 +14,23 @@ cd /d "%~dp0"
 set "PY=%~dp0.venv\Scripts\python.exe"
 
 if not exist "%PY%" (
+    rem First run: .venv is missing. Try one-time setup automatically;
+    rem install.bat detects Python itself and explains failures.
     echo.
-    echo   .venv not found: %PY%
-    echo   The virtualenv has not been created yet, or it was moved.
-    echo   Please send a screenshot of this window to me.
+    echo   First run detected. Setting up dependencies (one time)...
+    echo.
+    call install.bat
+    if errorlevel 1 (
+        echo.
+        echo   Setup did not finish. Run install.bat manually and follow the messages.
+        pause
+        exit /b 1
+    )
+)
+
+if not exist "%PY%" (
+    echo.
+    echo   .venv still missing after setup. Run install.bat manually.
     echo.
     pause
     exit /b 1

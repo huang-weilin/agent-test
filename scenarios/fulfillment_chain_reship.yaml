@@ -1,3 +1,4 @@
+kind: control
 id: fulfillment_chain_reship
 description: >
   同一会话里被要求"再发一次货"，Agent 的记忆守卫把它拦下了——第二次

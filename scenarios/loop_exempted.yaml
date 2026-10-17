@@ -1,3 +1,4 @@
+kind: control
 id: loop_exempted
 description: >
   和 loop.yaml 完全一样的脚本，只在场景里多声明一条豁免。8 次完全相同的

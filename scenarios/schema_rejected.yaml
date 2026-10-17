@@ -1,3 +1,4 @@
+kind: control
 id: schema_rejected
 description: >
   参数不合规的调用在边界上被拒。脚本让它用四种写错的方式调用：一个不在白名单

@@ -1,3 +1,4 @@
+kind: control
 id: cross_session_memory_loss
 description: >
   两次会话之间把记忆回滚到付款之前。Agent 照常查记忆、照常没查到，

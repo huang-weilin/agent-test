@@ -1,3 +1,4 @@
+kind: control
 id: schema_keys_undeclared
 description: >
   声明只说了「参数是个对象」，没说键是怎样的。边界于是只核对这一条，不替它发明

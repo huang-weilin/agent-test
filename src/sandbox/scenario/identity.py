@@ -81,7 +81,11 @@ SECTION_SOURCES: dict[str, tuple[str, ...]] = {
 #: `id` 是这份场景在报告里的名字，`description` 是写给人看的那段话。改掉它们，
 #: 被测对象拿到的东西一个字节都没变，这次运行也一模一样——所以报"配置变了"
 #: 是误报，而误报的代价是真正的行为差异被归到配置头上。
-PROSE_FIELDS: frozenset[str] = frozenset({"id", "description"})
+#:
+#: `kind`（example/control）是**展示分组**：它只决定"这页怎么摆"（首页展开还是
+#: 折叠），不是被测对象拿到的输入。改掉它，这次运行一字不差——报"配置变了"
+#: 同样是误报。
+PROSE_FIELDS: frozenset[str] = frozenset({"id", "description", "kind"})
 
 #: 会话这一节里不进取指纹的字段。
 #:

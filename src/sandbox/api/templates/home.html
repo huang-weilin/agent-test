@@ -64,12 +64,13 @@
 <h2 id="tests">测试任务</h2>
 <p class="lede">一个测试任务可以是单个 Agent，也可以是一队 Agent 接力（A 跑一段、B 跑下一段）。</p>
 
+{% macro task_table(rows) %}
 <table class="grid">
   <thead>
     <tr><th>测试任务</th><th>描述</th><th>最近结果</th><th></th></tr>
   </thead>
   <tbody>
-  {% for s in scenarios %}
+  {% for s in rows %}
     <tr>
       <td>
         {% if s.usable %}
@@ -100,11 +101,32 @@
         {% endif %}
       </td>
     </tr>
-  {% else %}
-    <tr><td colspan="4"><div class="empty" style="margin:0">还没有测试任务。先建一个：<a href="/scenarios/plain">用一句话建测试</a>，或走<a href="/scenarios/new">一步步的向导</a>。</div></td></tr>
   {% endfor %}
   </tbody>
 </table>
+{% endmacro %}
+
+{% if example_scenarios %}
+<h3 class="group-heading">示例</h3>
+{{ task_table(example_scenarios) }}
+{% elif scenarios %}
+<h3 class="group-heading">示例</h3>
+{{ task_table(scenarios) }}
+{% else %}
+<table class="grid">
+  <tbody>
+    <tr><td><div class="empty" style="margin:0">还没有测试任务。先建一个：<a href="/scenarios/plain">用一句话建测试</a>，或走<a href="/scenarios/new">一步步的向导</a>。</div></td></tr>
+  </tbody>
+</table>
+{% endif %}
+
+{% if control_scenarios %}
+<details class="control-group">
+  <summary>开发对照（{{ control_scenarios | length }}）</summary>
+  <p class="sub dim">这些是内部调试验证用的对照样本，一般不需要运行。</p>
+  {{ task_table(control_scenarios) }}
+</details>
+{% endif %}
 
 <h2>最近运行</h2>
 <table class="grid">

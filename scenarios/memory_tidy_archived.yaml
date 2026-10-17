@@ -1,3 +1,4 @@
+kind: control
 id: memory_tidy_archived
 description: >
   Agent 每段会话醒来时先整理记忆：把根目录下的记录挪进 archive/ 归档。

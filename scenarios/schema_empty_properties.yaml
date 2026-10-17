@@ -1,3 +1,4 @@
+kind: control
 id: schema_empty_properties
 description: >
   声明给的是一个空表：properties 写了，里面什么都没有。那是一句写下来的「一个键

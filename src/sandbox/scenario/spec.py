@@ -674,6 +674,12 @@ class Scenario(BaseModel):
     id: str
     description: str = ""
 
+    #: 展示分组：`example` = 给用户看的示例测试（首页默认展开），
+    #: `control` = 开发对照/缺陷样本（首页折叠，仅供内部调试）。
+    #: **不进指纹**（见 `identity.PROSE_FIELDS`）：它是"这页怎么摆"的标签，
+    #: 不是被测对象拿到的输入。
+    kind: Literal["example", "control"] = "example"
+
     #: 被测 Agent。**两种写法都认，但只能写一种**：
     #:
     #:   `agent:`   —— 单数，只有一个 Agent 时的糖（今天 29 份场景全是这一种）；
