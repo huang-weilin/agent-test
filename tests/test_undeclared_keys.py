@@ -24,13 +24,40 @@ import pytest
 from sqlalchemy import select
 
 from sandbox.db.models import ToolCall
-from sandbox.scenario.loader import load_scenario
+from sandbox.scenario.loader import parse_scenario
 from sandbox.trace.reader import BOUNDARY_DETECTORS
-from tests.control_pairs import assert_only_differs, entry_for
+from tests.control_pairs import assert_inline_only_differs
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-UNDECLARED = REPO_ROOT / "scenarios" / "schema_keys_undeclared.yaml"
-EMPTY_TABLE = REPO_ROOT / "scenarios" / "schema_empty_properties.yaml"
+
+_UNDECLARED_TEXT = """
+id: t
+agent: {version: v, task: 做点事}
+tools:
+  - name: get_order
+    description: 查询
+    is_write: false
+    parameters: {type: object}
+sessions:
+  - name: 一段
+    script: []
+"""
+
+_EMPTY_TABLE_TEXT = """
+id: t
+agent: {version: v, task: 做点事}
+tools:
+  - name: get_order
+    description: 查询
+    is_write: false
+    parameters: {type: object, properties: {}}
+sessions:
+  - name: 一段
+    script: []
+"""
+
+UNDECLARED = parse_scenario(_UNDECLARED_TEXT, source="<内存中的场景>")
+EMPTY_TABLE = parse_scenario(_EMPTY_TABLE_TEXT, source="<内存中的场景>")
 AGENT_PYTHON = REPO_ROOT / "agents" / "react_demo" / ".venv" / "Scripts" / "python.exe"
 
 
@@ -44,15 +71,17 @@ def test_the_controlled_pair_differs_in_exactly_one_bit() -> None:
     很正常，谁都发现不了。这里两面都钉：抹掉那一行之后必须完全相等，而那一行
     必须真的在一边有、一边没有（否则上一句相等是句空话）。
     """
-    undeclared = load_scenario(UNDECLARED)
-    empty = load_scenario(EMPTY_TABLE)
+    undeclared = UNDECLARED
+    empty = EMPTY_TABLE
 
-    # 文件级的比对在账本里（`tests/control_pairs.py`）。这一对的形状特别值得
-    # 记一笔：两支的差别是一个**空表**对**没有这个键**，而空字典在逐叶比对里
-    # 没有叶子——账本里有一条测试专门盯着这一点（`test_an_empty_container_is_
-    # not_the_same_as_a_missing_key`）。
-    assert_only_differs(
-        entry_for("schema_empty_properties", "schema_keys_undeclared")
+    # 比对的形状特别值得记一笔：两支的差别是一个**空表**对**没有这个键**，
+    # 而空字典在逐叶比对里没有叶子——`tests/control_pairs.py` 里有一条测试
+    # 专门盯着这一点（`test_an_empty_container_is_not_the_same_as_a_missing_key`）。
+    assert_inline_only_differs(
+        UNDECLARED,
+        EMPTY_TABLE,
+        claim="两支的差别是一个空表对一个没有这个键。",
+        differs_in=("tools[0].parameters.properties",),
     )
 
     assert "properties" not in undeclared.tools[0].parameters, "对照组不该有键的名单"
@@ -80,7 +109,7 @@ async def test_a_key_set_nobody_declared_does_not_become_a_ban(temp_db: str, db)
     这条是修好之后才绿的：改之前，两次调用都会在边界上被拒（每个键都算多出来的），
     报告里两条 `tool_schema/fail`——而脚本送的正是这个工具本来就该收的参数。
     """
-    result = await _runner().run(load_scenario(UNDECLARED))
+    result = await _runner().run(UNDECLARED)
 
     assert result.ok, result.error
     assert [f for f in result.findings if f.detector in BOUNDARY_DETECTORS] == [], (
@@ -99,7 +128,7 @@ async def test_an_empty_key_table_bans_every_key(temp_db: str, db) -> None:
     这一条在修之前就是绿的，留着是因为对照组的说服力全在它身上：同一个脚本、
     同一个工具，只把 `properties: {}` 去掉，结论就翻了。
     """
-    result = await _runner().run(load_scenario(EMPTY_TABLE))
+    result = await _runner().run(EMPTY_TABLE)
 
     assert result.ok, result.error
     boundary = [f for f in result.findings if f.detector in BOUNDARY_DETECTORS]

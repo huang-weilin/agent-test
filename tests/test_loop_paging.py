@@ -45,16 +45,14 @@ from sandbox.detectors.loop import LoopDetector, checked_field_weights
 from sandbox.gateway import app as gateway_app
 from sandbox.runtime import runs
 from sandbox.scenario import identity
-from sandbox.scenario.loader import load_scenario
+from sandbox.scenario.loader import parse_scenario
 from sandbox.scenario.runner import _run_detectors
 from sandbox.scenario.spec import Scenario
 from sandbox.trace.recorder import record_tool_call, start_run
 from sandbox.watchdog import detector_for, enforce, inspect_run
-from tests.control_pairs import assert_only_differs, entry_for
+from tests.control_pairs import assert_inline_only_differs, assert_only_differs, entry_for
 
 SCENARIOS = REPO_ROOT / "scenarios"
-BOUNDED = SCENARIOS / "loop_paging_bounded.yaml"
-UNBOUNDED = SCENARIOS / "loop_paging_unbounded.yaml"
 
 TOOL = "list_orders"
 STATUS = "unpaid"
@@ -66,6 +64,45 @@ WORLD_PAGES = 5
 #: 告警条数。与 `LoopDetector.monotonic_warn_after` 的默认值一致——这里写出来
 #: 是为了让下面"越过了几条"的断言有个可读的基准，**不是**另一处阈值定义。
 WARN_AFTER = 8
+
+_PAGING_WORLD_HEAD = """\
+id: loop_paging
+agent:
+  version: order_agent@0.1
+  directory: order_agent
+  task: 看看未支付订单有哪些。
+  model: stub-model
+tools:
+  - name: list_orders
+    description: 订单目录
+    is_write: false
+    parameters:
+      type: object
+      properties:
+        status: {type: string}
+        page: {type: integer}
+        page_size: {type: integer}
+      required: [status]
+    field_weights: {page: 0.1}
+sessions:
+  - name: 翻页
+    script:
+"""
+
+
+def _paging_text(pages: int) -> str:
+    """按页数生成一份翻页场景：`bounded` 5 页、`unbounded` 10 页。"""
+    calls = "".join(
+        "      - tool_calls:\n"
+        "          - name: list_orders\n"
+        f"            arguments: {{status: unpaid, page: {page}, page_size: 20}}\n"
+        for page in range(1, pages + 1)
+    )
+    return _PAGING_WORLD_HEAD + calls + f"      - content: 未支付订单共 {pages} 页\n"
+
+
+BOUNDED = parse_scenario(_paging_text(WORLD_PAGES), source="<内存中的场景>")
+UNBOUNDED = parse_scenario(_paging_text(10), source="<内存中的场景>")
 
 
 def _paging_calls(pages: int) -> list[CallView]:
@@ -85,13 +122,12 @@ def _paging_calls(pages: int) -> list[CallView]:
     ]
 
 
-def _without_weights(path: Path) -> Scenario:
+def _without_weights(scenario: Scenario) -> Scenario:
     """同一份场景，把声明的那张权重表拿掉。
 
     **对照组的构造必须只改这一处**：模型、脚本、判卷标准都照旧，否则下面
     "结论不同"就有了第二种解释（比如换了个场景，而不是少了那句声明）。
     """
-    scenario = load_scenario(path)
     return scenario.model_copy(
         update={
             "tools": [t.model_copy(update={"field_weights": {}}) for t in scenario.tools]
@@ -117,10 +153,21 @@ def test_the_pair_differs_by_exactly_the_page_count() -> None:
     `identity.sections`。`tools` 一节必须逐字相同——**权重表就在这一节里**，
     两支写的是同一张表。
     """
-    bounded = identity.sections(load_scenario(BOUNDED))
-    unbounded = identity.sections(load_scenario(UNBOUNDED))
+    bounded = identity.sections(BOUNDED)
+    unbounded = identity.sections(UNBOUNDED)
 
-    assert_only_differs(entry_for("loop_paging_bounded", "loop_paging_unbounded"))
+    assert_inline_only_differs(
+        BOUNDED,
+        UNBOUNDED,
+        claim="两支的差别只有脚本往后多翻几页（5 页对 10 页）。",
+        differs_in=(
+            "script[n].script[n].tool_calls[n].name",
+            "script[n].script[n].tool_calls[n].arguments.page",
+            "script[n].script[n].tool_calls[n].arguments.page_size",
+            "script[n].script[n].tool_calls[n].arguments.status",
+            "script[n].script[n].content",
+        ),
+    )
 
     assert bounded["script"] != unbounded["script"], "脚本必须不同，否则两支跑的是同一件事"
     assert len(bounded["script"]) == len(unbounded["script"]) == 1, "两支都是单会话"
@@ -128,8 +175,8 @@ def test_the_pair_differs_by_exactly_the_page_count() -> None:
 
 def test_that_one_variable_is_the_page_count() -> None:
     """把"只差页数"从一句断言变成两个数：5 页 vs 10 页，别的都相同。"""
-    bounded = load_scenario(BOUNDED)
-    unbounded = load_scenario(UNBOUNDED)
+    bounded = BOUNDED
+    unbounded = UNBOUNDED
 
     def pages(scenario: Scenario) -> list[int]:
         return [
@@ -153,9 +200,8 @@ def test_both_scenarios_declare_the_same_weights_and_say_why() -> None:
     判卷标准不同的话，比的就是两把尺子：一支报 pass、一支报 warning 这件事
     就说明不了任何东西。
     """
-    for path in (BOUNDED, UNBOUNDED):
-        scenario = load_scenario(path)
-        assert scenario.loop_field_weights() == {"page": 0.1}, f"{path.name} 没声明权重"
+    for scenario in (BOUNDED, UNBOUNDED):
+        assert scenario.loop_field_weights() == {"page": 0.1}, f"{scenario.id} 没声明权重"
         # 权重必须落在真的会出现的字段上（加载器也查，这里再钉一次：这条声明
         # 是这一族结论的全部依据，写错了下面每条测试都会安静地变成"另一回事"）。
         assert "page" in scenario.tools[0].parameters["properties"]
@@ -189,7 +235,7 @@ def test_the_declared_weights_are_what_turns_the_cluster_into_one() -> None:
     """
     calls = _paging_calls(10)
 
-    with_weights = _approximate(load_scenario(UNBOUNDED), 10)
+    with_weights = _approximate(UNBOUNDED, 10)
     assert [f.verdict for f in with_weights] == [DetectorVerdict.WARNING]
     assert with_weights[0].detail["reason_code"] == "monotonic_unbounded"
     assert with_weights[0].detail["count"] == 10, "整串必须在同一个簇里"
@@ -210,7 +256,7 @@ def test_the_declared_weights_are_what_turns_the_cluster_into_one() -> None:
         detector = LoopDetector(key_weights=scenario.loop_field_weights())
         return sorted((len(c) for c in detector._cluster(calls)), reverse=True)
 
-    assert cluster_sizes(load_scenario(UNBOUNDED)) == [10], "带着声明：整串一个簇"
+    assert cluster_sizes(UNBOUNDED) == [10], "带着声明：整串一个簇"
     scattered = cluster_sizes(_without_weights(UNBOUNDED))
     assert len(scattered) >= 2, "拿掉声明：被切成好几个簇"
     assert min(scattered) < 3, (
@@ -220,7 +266,7 @@ def test_the_declared_weights_are_what_turns_the_cluster_into_one() -> None:
     )
 
     # 与上面那串**同一段构造**，只把页数换成世界里的真实页数。
-    bounded = _approximate(load_scenario(BOUNDED), WORLD_PAGES)
+    bounded = _approximate(BOUNDED, WORLD_PAGES)
     assert [f.verdict for f in bounded] == [DetectorVerdict.PASS]
     assert bounded[0].detail["count"] == WORLD_PAGES
     assert bounded[0].detail.get("reason_code") is None, "通过的那一支没有码可报"
@@ -235,7 +281,7 @@ def test_the_two_branches_are_separated_by_the_page_count_alone() -> None:
     少了它，把阈值改成 1 也能让上面那条全绿——而那样每一个翻两页的场景都会
     报警。
     """
-    scenario = load_scenario(UNBOUNDED)
+    scenario = UNBOUNDED
 
     at_threshold = _approximate(scenario, WARN_AFTER - 1)
     assert [f.verdict for f in at_threshold] == [DetectorVerdict.PASS]
@@ -390,7 +436,7 @@ async def test_the_watchdog_judges_the_trace_by_the_declared_weights(temp_db: st
     plain = await _run_with_pages(10)
 
     # 事后报告那一侧：场景对象 → 检测器。
-    expected = _approximate(load_scenario(UNBOUNDED), 10)
+    expected = _approximate(UNBOUNDED, 10)
 
     for run_id, note in ((declared, "带声明"), (plain, "没带声明")):
         seen = [
@@ -451,7 +497,7 @@ async def test_the_declaration_survives_the_trip_over_the_wire(temp_db: str) -> 
     """
     from sandbox.scenario.runner import registration_payload
 
-    payload = registration_payload(load_scenario(UNBOUNDED))
+    payload = registration_payload(UNBOUNDED)
     assert payload["loop_field_weights"] == {"page": 0.1}, "载荷本身就不对"
 
     gateway = AsyncClient(
@@ -481,7 +527,7 @@ async def test_the_pair_really_runs_and_lands_on_opposite_verdicts(temp_db: str)
 
     runner = ScenarioRunner(session_timeout_s=120.0)
 
-    fine = await runner.run(load_scenario(BOUNDED))
+    fine = await runner.run(BOUNDED)
     assert fine.error is None, fine.error
     assert fine.ok, fine.expectation and fine.expectation.to_dict()
     assert fine.egress_charges == 0, "这一对都只读，一笔款都不该动"
@@ -491,7 +537,7 @@ async def test_the_pair_really_runs_and_lands_on_opposite_verdicts(temp_db: str)
     assert ok_finding.detail["count"] == WORLD_PAGES
     assert ok_finding.detail.get("reason_code") is None
 
-    runaway = await runner.run(load_scenario(UNBOUNDED))
+    runaway = await runner.run(UNBOUNDED)
     assert runaway.error is None, runaway.error
     assert runaway.ok, runaway.expectation and runaway.expectation.to_dict()
     assert runaway.egress_charges == 0

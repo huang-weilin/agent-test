@@ -14,7 +14,7 @@ import re
 import pytest
 
 from sandbox.scenario import identity
-from sandbox.scenario.loader import load_scenario
+from sandbox.scenario.loader import load_scenario, parse_scenario
 from sandbox.scenario.spec import Scenario
 from tests.control_pairs import (
     NOT_A_PAIR,
@@ -142,24 +142,24 @@ def test_no_scenario_pair_looks_like_a_copy_without_a_declaration() -> None:
 def test_the_ledger_catches_the_claim_that_used_to_be_written_here() -> None:
     """把过去那句话照原样写进账本，它必须红。
 
-    `long_run_overnight` 那一对的说法曾经是「一字不差，只把间隔改成 0」——写在
-    两份场景的散文里、写在测试的 docstring 里，而没有任何东西核对过它。真去量
-    一次：被测侧差六处，其中四处是第二段脚本里那一步付款（对照组不能写它，
-    写了就会真的扣钱）。这条测试把那个旧说法钉在墙上：**它必须失败**，
-    而且要说清楚差在哪几处。
+    `order_delivery_chain` 那一对的说法如果只交代「0 号那边多了一个环境变量开关」
+    ——写在测试的 docstring 里，而没有任何东西核对过它——真去量一次：被测侧
+    还差十来处，包括 0 号脚本里那一步多出来的 `create_payment`（参数里带着金额）
+    与转交语句。这条测试把那种旧说法钉在墙上：**它必须失败**，而且要说清楚
+    差在哪几处。
     """
     stale = Controlled(
-        scenarios=("long_run_overnight", "long_run_same_moment"),
-        claim="一字不差，只把间隔改成 0。",
-        differs_in=("script[n].after_gap_s",),
+        scenarios=("order_delivery_chain_clean", "order_delivery_chain_duplicate"),
+        claim="两支只差下单侧那个环境变量开关。",
+        differs_in=("agent.env",),
     )
     with pytest.raises(AssertionError) as caught:
         assert_only_differs(stale)
 
     message = str(caught.value)
-    assert "after_gap_s" in message
+    assert "agent.env" in message
     assert "arguments.amount" in message, (
-        "那段脚本里多出来的那一步付款必须被指出来——它正是旧说法漏掉的东西"
+        "0 号脚本里多出来的那一步付款必须被指出来——它正是旧说法漏掉的东西"
     )
 
 
@@ -170,9 +170,19 @@ def test_a_declared_difference_that_is_not_there_is_refused() -> None:
     正常：清单看着挺长，读者以为差别都交代过了，其实其中一条纯属虚构。
     """
     padded = Controlled(
-        scenarios=("memory_poisoned", "memory_note_clean"),
-        claim="唯一的差别是世界里的那句话。",
-        differs_in=("world.order_notes.A1", "agent.env.DEMO_AGENT_MEMORY_TIDY"),
+        scenarios=("order_delivery_chain_clean", "order_delivery_chain_duplicate"),
+        claim="唯一的差别是下单侧多了一步付款与一个环境变量开关。",
+        differs_in=(
+            "agent.env",
+            "agent.env.DEMO_AGENT_MEMORY_GUARD",
+            "script[n].script[n].tool_calls[n].arguments.amount",
+            "script[n].script[n].tool_calls[n].arguments.order_id",
+            "script[n].script[n].tool_calls[n].arguments.target_role",
+            "script[n].script[n].tool_calls[n].arguments.task",
+            "script[n].script[n].tool_calls[n].name",
+            "script[n].script[n].content",
+            "world.order_notes.A1",
+        ),
     )
     with pytest.raises(AssertionError, match="一条都没命中"):
         assert_only_differs(padded)
@@ -185,7 +195,9 @@ def test_a_pair_of_identical_files_is_refused() -> None:
     空的对照，而它看起来和真的一样。
     """
     self_pair = Controlled(
-        scenarios=("clean", "clean"), claim="它自己跟自己。", differs_in=()
+        scenarios=("order_delivery_chain_clean", "order_delivery_chain_clean"),
+        claim="它自己跟自己。",
+        differs_in=(),
     )
     with pytest.raises(AssertionError, match="一模一样"):
         assert_only_differs(self_pair)
@@ -194,13 +206,41 @@ def test_a_pair_of_identical_files_is_refused() -> None:
 def test_an_empty_container_is_not_the_same_as_a_missing_key() -> None:
     """摊平器必须看得见空表。
 
-    `schema_empty_properties` 与 `schema_keys_undeclared` 之间唯一的差别就是
-    `properties: {}` 与「没有 `properties`」——而空字典在逐叶比对里没有叶子。
-    一个只认"有子节点才算有内容"的摊平器会把这一对判成**一处都不差**，也就是
-    把这组场景的全部内容判没了。这一条直接盯着那一行。
+    同一份工具声明，只把 `parameters: {type: object, properties: {}}` 换成
+    `parameters: {type: object}`——差别就是空表与「没有 `properties`」，而空
+    字典在逐叶比对里没有叶子。一个只认"有子节点才算有内容"的摊平器会把这一对
+    判成**一处都不差**。这一条直接盯着那一行。
     """
-    empty = load_of("schema_empty_properties")
-    undeclared = load_of("schema_keys_undeclared")
+    empty = parse_scenario(
+        """
+id: t
+agent: {version: v, task: 做点事}
+tools:
+  - name: get_order
+    description: 查询
+    is_write: false
+    parameters: {type: object, properties: {}}
+sessions:
+  - name: 一段
+    script: []
+""",
+        source="<内存中的场景>",
+    )
+    undeclared = parse_scenario(
+        """
+id: t
+agent: {version: v, task: 做点事}
+tools:
+  - name: get_order
+    description: 查询
+    is_write: false
+    parameters: {type: object}
+sessions:
+  - name: 一段
+    script: []
+""",
+        source="<内存中的场景>",
+    )
 
     assert measured(empty, undeclared) == ["tools[0].parameters.properties"], (
         "空表和没给必须在这一层的比对里看得见"

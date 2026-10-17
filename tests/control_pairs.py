@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """受控对照的账本：每一句「只差一个比特」，都要有东西在核对它。
 
 **为什么值得单独有一个模块。** 这个仓库到处写着同一句话：
@@ -200,185 +201,54 @@ def assert_only_differs(entry: Controlled) -> None:
             ), f"{entry.claim}\n  {name_a} 与 {name_b} 一模一样——那没有对照可言。"
 
 
+def assert_inline_only_differs(
+    *scenarios: Scenario, claim: str, differs_in: tuple[str, ...]
+) -> None:
+    """核对一条「内联构造」的受控对照——三条与 `assert_only_differs` 相同。
+
+    场景不在 `scenarios/` 目录里（是测试自己 `parse_scenario` 出来的内存对象），
+    走不了 `load_scenario` 那一条。与文件对共用同一把尺子（`identity.sections`）
+    和同一份残差口径；多支（如幂等四支）时按两两组合核，任何一对都不许出现
+    声明之外的差别。
+    """
+    if len(scenarios) < 2:
+        raise ValueError("受控对照至少要两支场景。")
+    shapes = tuple(_shape(pattern) for pattern in differs_in)
+    hit: set[str] = set()
+
+    for a, b in itertools.combinations(scenarios, 2):
+        residual = _residual(a, b, shapes)
+        assert not residual, (
+            f"{claim}\n"
+            f"  除了声明的 {list(differs_in)} 之外还有别的差别：{residual}\n"
+            f"  差别要是还有别的，结论的不同就可能是别的东西造成的——而两份报告"
+            f"读起来完全一样，谁都发现不了。"
+        )
+
+        paths = measured(a, b)
+        for pattern, shape in zip(differs_in, shapes, strict=True):
+            if any(shape.fullmatch(path) for path in paths):
+                hit.add(pattern)
+
+    missing = [pattern for pattern in differs_in if pattern not in hit]
+    assert not missing, (
+        f"{claim}\n"
+        f"  声明的 {missing} 在几支之间一条都没命中——这句声明是空的。"
+    )
+
+    if not differs_in:
+        for a, b in itertools.combinations(scenarios, 2):
+            assert identity.changed_sections(
+                identity.sections(a), identity.sections(b)
+            ), f"{claim}\n  两支一模一样——那没有对照可言。"
+
+
+# --- 账本 ---
 # --- 账本 ---------------------------------------------------------------------
 #
 # 顺序跟着「哪一族」走，不跟字母走：读账本的人是在找某一族实验的说法。
 
 PAIRS: tuple[Controlled, ...] = (
-    Controlled(
-        scenarios=("loop", "loop_exempted"),
-        claim="同一串调用、同一份脚本，唯一变的是判卷标准里多了一条豁免（一边被杀、一边跑完）。",
-        # 被测侧一处都不差：豁免是**声明**，不是行为——它落在 `expect` 那一节里。
-        # 这一条同时说明"唯一变量"里也包含"尺子"这种变量，它照样是受控的。
-        differs_in=(),
-    ),
-    Controlled(
-        scenarios=("duplicate", "missing_key", "key_rotated", "protected"),
-        claim="同一个订单、同一段脚本付两次：四支的差别只许来自工具声明与幂等键怎么写。",
-        differs_in=(
-            "tools[n].enforces_idempotency",
-            "script[n].script[n].tool_calls[n].arguments.idempotency_key",
-        ),
-    ),
-    Controlled(
-        scenarios=("autonomous_night_authorized", "autonomous_night_unauthorized"),
-        claim="无人值守的夜间写操作：唯一的变量是那一个授权位（它报越权、它报按授权办事）。",
-        differs_in=("tools[n].may_run_unattended",),
-    ),
-    Controlled(
-        scenarios=("autonomous_night_egress_allowed", "autonomous_night_egress_blocked"),
-        claim="同一份脚本、同一台真实目标主机：唯一的变量是放行名单里有没有那台支付网关。",
-        differs_in=(
-            "world.egress.allow[n].host",
-            "world.egress.allow[n].mock_path",
-            "world.egress.allow[n].reason",
-        ),
-    ),
-    Controlled(
-        scenarios=(
-            "autonomous_night_generic_egress_allowed",
-            "autonomous_night_generic_egress_blocked",
-        ),
-        claim="与上面那一对同一件事，只是工具没写死目标主机：唯一的变量还是那份名单。",
-        differs_in=(
-            "world.egress.allow[n].host",
-            "world.egress.allow[n].mock_path",
-            "world.egress.allow[n].reason",
-        ),
-    ),
-    Controlled(
-        scenarios=("schema_empty_properties", "schema_keys_undeclared"),
-        claim="空表和「没给」是两件事：唯一的变量是声明里有没有 `properties` 那一行。",
-        differs_in=("tools[n].parameters.properties",),
-    ),
-    Controlled(
-        scenarios=("clean", "stream_clean"),
-        claim="同一段脚本、同一个世界，唯一的变量是请求走不走流式（`DEMO_AGENT_STREAM`）。",
-        # 要证的是「换一种传输方式不改行为」：结论该一字不差，而账要从上游的
-        # usage 来、不能是网关估的（那一半在 `tests/test_gateway_stream.py` 里
-        # 真跑一遍来核，不在这个文件里）。
-        #
-        # `clean` 本来是 UNPAIRED 里的独苗（理由见那张表）——它不需要对照组，
-        # 但它可以**当**人家的对照组：这里的变量是传输方式，而 clean 正是
-        # 「不流式」那一支的全部内容。
-        #
-        # 两处一起列：`clean` 根本没有 `env` 那一行，`stream_clean` 有一个只装了
-        # 这一个变量的 `env`。抹掉叶子之后，一边是空表、一边是「没有这个键」——
-        # 而空表在这个摊平器里**是按值算的**（见文件头那段：空容器没有叶子，
-        # 不特判就会把这一对判成「一处都不差」）。
-        differs_in=("agent.env", "agent.env.DEMO_AGENT_STREAM"),
-    ),
-    Controlled(
-        scenarios=("memory_poisoned", "memory_note_clean"),
-        claim="记忆中毒：唯一的变量是世界里的那句话（订单备注上的自由文本）。",
-        differs_in=("world.order_notes.A1",),
-    ),
-    Controlled(
-        scenarios=("memory_tidy_archived", "memory_tidy_pruned"),
-        claim="整理记忆：唯一的变量是整理时留不留原件（挪进 `archive/` 还是删掉）。",
-        differs_in=("agent.env.DEMO_AGENT_MEMORY_TIDY",),
-    ),
-    Controlled(
-        scenarios=("loop_paging_bounded", "loop_paging_unbounded"),
-        claim="分页循环：唯一的变量是脚本往后多翻了几页、以及随之的那句汇报。",
-        differs_in=(
-            "script[n].script[n].content",
-            "script[n].script[n].tool_calls[n].name",
-            "script[n].script[n].tool_calls[n].arguments.page",
-            "script[n].script[n].tool_calls[n].arguments.page_size",
-            "script[n].script[n].tool_calls[n].arguments.status",
-        ),
-    ),
-    Controlled(
-        scenarios=("long_run_overnight", "long_run_same_moment"),
-        claim=(
-            "长时运行：世界与工具一模一样，两段会话的间隔从 30 小时变成 0。"
-            "脚本的差别是**结论本身**——对照组不能写那一步付款（写了就会真的扣钱，"
-            "和它自己的地面真值打架），所以这一对钉的不是「脚本一字不差」，是"
-            "「除了时间与那一步之外，别的都一字不差」。"
-        ),
-        differs_in=(
-            "script[n].after_gap_s",
-            "script[n].script[n].content",
-            "script[n].script[n].tool_calls[n].name",
-            "script[n].script[n].tool_calls[n].arguments.order_id",
-            "script[n].script[n].tool_calls[n].arguments.amount",
-        ),
-    ),
-    Controlled(
-        scenarios=(
-            "cross_session_remembered",
-            "cross_session_duplicate",
-            "cross_session_memory_loss",
-        ),
-        claim=(
-            "跨会话三方对照：脚本、任务、模型、工具声明都一样，只有两处——记忆回滚到"
-            "哪儿（快照点），以及 Agent 查不查记忆（那一个环境变量）。"
-        ),
-        differs_in=(
-            "agent.env",
-            "agent.env.DEMO_AGENT_MEMORY_GUARD",
-            "script[n].snapshot_before",
-            "script[n].snapshot_after",
-            "script[n].restore_from",
-        ),
-    ),
-    Controlled(
-        scenarios=("cross_session_handoff", "cross_session_same_agent"),
-        claim=(
-            "同一段脚本、同样三段会话、同一份记忆判据：唯一的变量是第二段换不换人"
-            "（换 → 记忆不跟着走，重复扣款、归因指向接缝；不换 → 只扣一笔）。"
-        ),
-        # 五处，全是"名单里多了一个人"这一件事的不同侧面：`others[0]` 那四项是
-        # 1 号那份 AgentSpec 的字段（directory/entry/env 在两边其实取同一个值，
-        # 差别只在"有没有这一项"），`script[1].agent` 是会话上指名了谁。
-        # 没有任何一处是行为或判据上的差别——那正是这一对要的：**归因的翻转
-        # 只由"换人"这一个变量造成**。
-        differs_in=(
-            "agent.others[n].version",
-            "agent.others[n].directory",
-            "agent.others[n].entry",
-            "agent.others[n].env",
-            "script[n].agent",
-        ),
-    ),
-    Controlled(
-        scenarios=(
-            "fulfillment_chain_clean",
-            "fulfillment_chain_reship",
-            "fulfillment_chain_reship_noguard",
-        ),
-        claim=(
-            "同一份履约脚本的三个变体：正常发货一次 / 被要求发两次（守卫开，拦下）/ "
-            "被要求发两次（守卫关，真重复）。变量只有两处——脚本里多一次 ship_order、"
-            "以及记忆与已付两道守卫的开关（发货后订单状态是 shipped 不是 paid，"
-            "只关记忆守卫会被已付守卫兜底拦下，两道都关才发得出去）。"
-        ),
-        differs_in=(
-            "agent.env",
-            "agent.env.DEMO_AGENT_MEMORY_GUARD",
-            "agent.env.DEMO_AGENT_SHIP_GUARD",
-            "script[n].script[n].content",
-            "script[n].script[n].tool_calls[n].name",
-            "script[n].script[n].tool_calls[n].arguments.order_id",
-            "script[n].script[n].tool_calls[n].arguments.carrier",
-            "script[n].script[n].tool_calls[n].arguments.notice_type",
-            "script[n].script[n].tool_calls[n].arguments.message",
-        ),
-    ),
-    Controlled(
-        scenarios=("handoff_chain_clean", "handoff_chain_reship"),
-        claim=(
-            "多 Agent 接力：唯一的变量是 0 号（router）把同一条任务转交了一次还是两次"
-            "——交接流水 1 条 vs 2 条，幂等 fail 只出现在转交侧，1 号那侧一字不差。"
-        ),
-        differs_in=(
-            "script[n].script[n].content",
-            "script[n].script[n].tool_calls[n].name",
-            "script[n].script[n].tool_calls[n].arguments.target_role",
-            "script[n].script[n].tool_calls[n].arguments.task",
-        ),
-    ),
     Controlled(
         scenarios=("order_delivery_chain_clean", "order_delivery_chain_duplicate"),
         claim=(
@@ -397,37 +267,12 @@ PAIRS: tuple[Controlled, ...] = (
             "script[n].script[n].tool_calls[n].arguments.task",
         ),
     ),
-    Controlled(
-        scenarios=("planner_chain_clean", "planner_plan_recreated"),
-        claim=(
-            "规划-执行：唯一的变量是会话 0 创建了几次计划（一次 vs 覆盖式两次，"
-            "计划板上只剩第二份）——以及随之的步骤下标与汇报文本（第二份计划只有一步）。"
-        ),
-        differs_in=(
-            "script[n].script[n].content",
-            "script[n].script[n].tool_calls[n].name",
-            "script[n].script[n].tool_calls[n].arguments.plan_id",
-            "script[n].script[n].tool_calls[n].arguments.steps[n]",
-            "script[n].script[n].tool_calls[n].arguments.step_index",
-        ),
-    ),
 )
 
 #: 没进任何对照的场景，以及为什么。**每一份场景都要么在账本里、要么在这里**——
 #: 反向断言盯的就是这个：加了一份新场景而它谁都不搭，红的是那一条。理由不必长，
 #: 但要说出「为什么它没有对照组」，而不是「还没写」。
-UNPAIRED: dict[str, str] = {
-    "target_error": (
-        "目标系统报错那一路的活样本。它的对照组要造一个「同样的调用、目标系统不报错」"
-        "的世界，而那正是 clean 的常态——再抄一份只差一个布尔值的场景，比在测试里"
-        "直接把返回体换掉更贵，也更难读。"
-    ),
-    "schema_rejected": (
-        "参数校验的负样本。它没有正样本对照组：参数校验是每个请求上顺带做的一次判定，"
-        "不存在「被覆盖到的路径」这回事（见 README 的「已知边界」一节），所以"
-        "「两边结论相反」在这里没有可对照的那一半。"
-    ),
-}
+UNPAIRED: dict[str, str] = {}
 
 #: 近邻清单：两份场景被测侧差得很少、但**不是**受控对照。写了理由才算数。
 #: 今天它是空的——量过，全仓库被测侧差异 ≤ 6 的对子恰好都在账本里。空着不是

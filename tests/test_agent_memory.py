@@ -1,6 +1,6 @@
 """被测 Agent 的记忆模块。
 
-**这里的加载方式和别的测试不一样，是刻意的。** `agents/react_demo/memory.py`
+**这里的加载方式和别的测试不一样，是刻意的。** `agents/order_agent/memory.py`
 不属于 `sandbox` 包——它属于被测 Agent，跑在另一个 venv 里，物理上看不到沙箱。
 测试直接按文件路径把它拉进来加载，就是为了不为了测试的方便去动它的这一性质。
 一旦哪天有人把它挪进 `src/sandbox/`，这些测试会一起红。
@@ -16,7 +16,7 @@ from types import ModuleType
 
 import pytest
 
-MEMORY_PY = Path(__file__).resolve().parents[1] / "agents" / "react_demo" / "memory.py"
+MEMORY_PY = Path(__file__).resolve().parents[1] / "agents" / "order_agent" / "memory.py"
 
 
 def _load_memory_module() -> ModuleType:

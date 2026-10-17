@@ -268,8 +268,8 @@ error message"，return 是"返回一个值"，不是"退货"）。甲在这四�
    （`../_probes/measure_cursor_axis.py`，左列跑产品代码、右列是探针照判据自己算的）。
    七条负样本（字符串游标、递减、两字段同变、金额来回…）改动前后一字不差。
 
-   **分簇仍然形状依赖，`field_weights` 仍然值钱**（`scenarios/loop_paging_unbounded.yaml`
-   是活样本），只是它不再决定那句 `warning`。**语料刻意不声明权重**：这份语料量的
+   **分簇仍然形状依赖，`field_weights` 仍然值钱**（`tests/test_loop_paging.py`
+   内联构造的翻页对照是活样本），只是它不再决定那句 `warning`。**语料刻意不声明权重**：这份语料量的
    是**没声明时**的检测器——大多数用户不会去写这张表。
 
    聚类方式本身仍是首成员。原来这里和 README 都写着"链式聚类能让形状的依赖小很多"，

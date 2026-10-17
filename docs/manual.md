@@ -65,7 +65,7 @@
 | `SANDBOX_TOOL_BASE_URL` | 工具网关地址（调用被测工具用） |
 | `SANDBOX_AGENT_MEMORY_DIR` | 记忆目录 |
 
-可以参考仓库 `agents/react_demo/` 目录里的示例写法：用 OpenAI 兼容客户端连 `SANDBOX_GATEWAY_BASE_URL` 调模型，读完 `SANDBOX_AGENT_TASK` 就开工。
+可以参考仓库 `agents/order_agent/` 目录里的示例写法：用 OpenAI 兼容客户端连 `SANDBOX_GATEWAY_BASE_URL` 调模型，读完 `SANDBOX_AGENT_TASK` 就开工。
 
 ### 4.3 两个提醒
 

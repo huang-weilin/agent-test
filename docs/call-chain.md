@@ -6,10 +6,10 @@
 一半在讲它**不写什么**。
 
 ```bash
-.venv/Scripts/python.exe scripts/run_scenario.py scenarios/target_error.yaml
+.venv/Scripts/python.exe scripts/run_scenario.py scenarios/order_delivery_chain_clean.yaml
 ```
 
-`scenarios/target_error.yaml` 是给这一节准备的素材：目标系统对 `get_order(NOPE)`
+`tests/test_call_chain.py` 内联构造的素材：目标系统对 `get_order(NOPE)`
 回 404，Agent 原样又问了一次，然后换成存在的订单问，最后正常付款。
 
 ## 一句话

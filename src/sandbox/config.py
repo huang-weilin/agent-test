@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE = REPO_ROOT / ".env"
 
 #: `SANDBOX_` 开头、但**不由本沙箱读**的环境变量：它们由沙箱注入给被测 Agent，
-#: 读它们的是 Agent 自己（见 `agents/react_demo/README.md`）。
+#: 读它们的是 Agent 自己（见 `agents/order_agent/README.md`）。
 #: 这份名单是白名单，不是"认识的变量表"——沙箱自己的字段名由 `Settings` 现算。
 AGENT_ENV_NAMES: frozenset[str] = frozenset(
     {

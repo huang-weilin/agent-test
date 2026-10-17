@@ -80,7 +80,7 @@ def test_rule_keeps_task_text() -> None:
 def test_answers_from_json_cleans_bad_keys_and_values() -> None:
     obj = {
         "scenario_id": "My Test!!",
-        "agent_version": "react_demo@0.1",
+        "agent_version": "order_agent@0.1",
         "shape": "twice",
         "tools": ["get_order", "not_a_tool", "get_order"],
         "choices": {
@@ -141,7 +141,7 @@ def test_answers_from_text_falls_back_when_no_key(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(nl_wizard.user_llm, "effective", lambda: None)
     monkeypatch.setattr(nl_wizard.user_llm, "ready", lambda: False)
     answers, warnings = asyncio.run(
-        nl_wizard.answers_from_text("同一笔钱会被付两次", FACTS, ["react_demo@0.1"])
+        nl_wizard.answers_from_text("同一笔钱会被付两次", FACTS, ["order_agent@0.1"])
     )
     assert answers.choices == {"charge_twice": "expect_fail"}
     assert any("内置关键词规则" in w for w in warnings)
@@ -165,7 +165,7 @@ def test_answers_from_text_uses_llm_json(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(nl_wizard, "_llm_json", fake_llm)
     monkeypatch.setattr(nl_wizard.user_llm, "ready", lambda: True)
     answers, warnings = asyncio.run(
-        nl_wizard.answers_from_text("同一笔钱会不会付两次", FACTS, ["react_demo@0.1"])
+        nl_wizard.answers_from_text("同一笔钱会不会付两次", FACTS, ["order_agent@0.1"])
     )
     assert answers.scenario_id == "pay-check"
     assert answers.choices == {"charge_twice": "expect_fail"}
@@ -188,7 +188,7 @@ async def client(
             scenario_id="pay-check",
             agent_what="付款助手",
             agent_goal="同一笔钱只付一次",
-            agent_version="react_demo@0.1",
+            agent_version="order_agent@0.1",
             agent_task="帮我把订单 A1 处理掉",
             tools=("get_order", "create_payment"),
             shape="twice",
@@ -266,8 +266,8 @@ async def test_nl_page_shows_agent_picker(client: httpx.AsyncClient) -> None:
     r = await client.get("/scenarios/plain")
     assert r.status_code == 200
     assert "agent-pick" in r.text
-    assert "fulfillment_agent@0.1" in r.text
-    assert "router_agent@0.1" in r.text
+    assert "order_agent@0.1" in r.text
+    assert "delivery_agent@0.1" in r.text
     assert "第 2 步" in r.text
 
 
@@ -293,13 +293,13 @@ def test_two_selected_agents_force_relay(monkeypatch: pytest.MonkeyPatch) -> Non
         nl_wizard.answers_from_text(
             "换一个人接手，上次做过的事会不会又做一遍",
             FACTS,
-            ["react_demo@0.1", "router_agent@0.1"],
-            selected_agents=["react_demo@0.1", "router_agent@0.1"],
+            ["order_agent@0.1", "delivery_agent@0.1"],
+            selected_agents=["order_agent@0.1", "delivery_agent@0.1"],
         )
     )
     assert answers.shape == "relay"
-    assert answers.agent_version == "react_demo@0.1"
-    assert answers.agent2_version == "router_agent@0.1"
+    assert answers.agent_version == "order_agent@0.1"
+    assert answers.agent2_version == "delivery_agent@0.1"
     assert answers.agent2_task == "第二段"
 
 
@@ -315,7 +315,7 @@ def test_one_selected_agent_locks_version(monkeypatch: pytest.MonkeyPatch) -> No
             "agent_task": "处理订单",
             "tools": ["get_order", "create_payment"],
             "shape": "twice",
-            "agent_version": "react_demo@0.1",  # 模型不听话，想换
+            "agent_version": "delivery_agent@0.1",  # 模型不听话，想换
             "choices": {"charge_twice": "expect_fail"},
         }
 
@@ -325,11 +325,11 @@ def test_one_selected_agent_locks_version(monkeypatch: pytest.MonkeyPatch) -> No
         nl_wizard.answers_from_text(
             "同一单会不会发两次",
             FACTS,
-            ["react_demo@0.1"],
-            selected_agents=["fulfillment_agent@0.1"],
+            ["order_agent@0.1"],
+            selected_agents=["order_agent@0.1"],
         )
     )
-    assert answers.agent_version == "fulfillment_agent@0.1"
+    assert answers.agent_version == "order_agent@0.1"
 
 
 async def test_settings_save_and_clear(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

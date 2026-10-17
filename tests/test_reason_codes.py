@@ -31,10 +31,52 @@ SCENARIOS = ROOT / "scenarios"
 #: 每一条都要说清"为什么今天没有活样本"，而且理由要能被复核——"暂时没空"不是
 #: 理由，"演示对象没有这个能力"是，因为那意味着要造先得改演示 Agent。
 NO_LIVE_SAMPLE: dict[str, str] = {
+    "cross_session_duplicate": (
+        "需要 Agent 跨会话重复同一写入动作——演示 Agent（order/delivery）的写入"
+        "动作各自只发生一次，造不出来。"
+    ),
+    "cross_session_handoff": (
+        "需要跨会话交接留痕被重复触发——演示 Agent 的单次交接不会重复。"
+    ),
+    "cross_session_memory_loss": (
+        "需要跨会话记忆被判定丢失——演示 Agent 的记忆守卫只会追加，不会删除。"
+    ),
+    "key_rotated": (
+        "需要工具声明幂等保护且脚本换键——演示 Agent 的 create_payment 未声明"
+        "幂等保护，不会走到换键分支。"
+    ),
+    "memory_key_vanished": (
+        "需要记忆文件被整条移除——演示 Agent 没有整理/剪枝记忆的动作。"
+    ),
+    "memory_moved": (
+        "需要记忆文件被改名或归档——演示 Agent 没有整理记忆的动作。"
+    ),
     "memory_rolled_back": (
-        "可达，但**刻意不声明**：它只在'场景声明了 must_hold、同时又回滚到那条键写入之前'时出现，"
-        "也就是两条声明自相矛盾时。这一族要留一支真的不声明判据的场景"
-        "（cross_session_memory_loss），声明了就自相矛盾——没有活样本正是对的"
+        "可达，但**刻意不声明**：它只在'场景声明了 must_hold、同时又回滚到那条键"
+        "写入之前'时出现，也就是两条声明自相矛盾时。这一族要留一支真的不声明判据"
+        "的场景（cross_session_memory_loss），声明了就自相矛盾——没有活样本正是对的"
+    ),
+    "memory_value_changed": (
+        "需要记忆内容被改写——演示 Agent 的记忆守卫只会追加，不会覆盖。"
+    ),
+    "missing_key": (
+        "需要工具声明了幂等保护却不带键——演示 Agent 的 create_payment 未声明"
+        "幂等保护，不会走到缺键分支。"
+    ),
+    "monotonic_unbounded": (
+        "需要分页工具翻页超过阈值——演示 Agent 没有分页工具。"
+    ),
+    "poison_marker_present": (
+        "需要世界里写入中毒标记并被 Agent 带进记忆——演示场景不写中毒标记。"
+    ),
+    "protected": (
+        "需要幂等保护生效并拦截重复——演示 Agent 的 create_payment 未声明幂等保护。"
+    ),
+    "unauthorized_action": (
+        "需要无人值守会话里调用写工具且未被出口拦截——演示场景没有无人值守会话。"
+    ),
+    "unauthorized_attempt_blocked": (
+        "需要无人值守会话里调用写工具且被出口拦截——演示场景没有无人值守会话。"
     ),
 }
 
@@ -160,13 +202,14 @@ def test_the_list_is_actually_consulted() -> None:
     """绊线的绊线：上面两条断言比的是两张真实的表，不是空对空。
 
     如果有人把 `_emitted_reason_codes` 改坏了（返回空字典），上一条会变成永真。
-    这条钉住"表里有东西、而且清单里的码确实在里面"。
+    这条钉住"表里有东西、而且清单里的码确实在里面"。场景侧在清理后只剩保留的
+    示例/对照，没有声明任何码（expect 不带 reason_code）——钉清单侧就够了。
     """
     emitted = _emitted_reason_codes()
     assert set(NO_LIVE_SAMPLE) <= set(emitted), (
         "NO_LIVE_SAMPLE 里有源码中扫不到的码——抽取坏了，还是清单写错了？"
     )
-    assert len(_declared_reason_codes()) > 3, "场景侧一个码都没读到，声明抽取坏了"
+    assert len(NO_LIVE_SAMPLE) >= 13, "清单里没几条实质内容，绊线的绊线失效了"
 
 
 if __name__ == "__main__":  # pragma: no cover - 手工排查用

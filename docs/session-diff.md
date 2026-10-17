@@ -7,7 +7,7 @@
 
 > **它这一段做的事，和那一段做的事，一样吗？**
 
-`scenarios/long_run_overnight.yaml`、三个 `cross_session_*.yaml` 都是现成的素材。
+`tests/test_long_run.py` 与 `tests/test_memory_drift.py` 内联构造的对照都是现成的素材。
 
 ## 一句话
 
@@ -118,7 +118,7 @@
 命令行在记忆观测之后、检测结论之前：
 
 ```bash
-.venv/Scripts/python.exe scripts/run_scenario.py scenarios/long_run_overnight.yaml
+.venv/Scripts/python.exe scripts/run_scenario.py scenarios/order_delivery_chain_clean.yaml
 ```
 
 Web 界面在运行页「会话」表之后，标题是**跨会话差异**。只有一段会话的场景**整节都不

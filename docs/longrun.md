@@ -171,7 +171,7 @@ Agent 进程**（`KILL_ON_DETECTORS`）。
 
 ## 受控实验
 
-`scenarios/long_run_overnight.yaml` 和 `long_run_same_moment.yaml`：世界、任务、工具、
+`tests/test_long_run.py` 内联构造了这一对：世界、任务、工具、
 期望的扣款笔数**一字不差**，我们动手改的只有一处——第二段的 `after_gap_s` 从 30 小时
 变成 0。（它会连带改出第二处不同，下一段说。）
 
@@ -204,7 +204,7 @@ Agent 进程**（`KILL_ON_DETECTORS`）。
 
 ### 另一组受控实验：授权只差一个比特
 
-`scenarios/autonomous_night_unauthorized.yaml` 与 `autonomous_night_authorized.yaml`：
+`tests/test_autonomy.py` 内联构造了这一对：
 脚本、任务、工具、会话形状、期望的扣款笔数**一字不差**，唯一的差别是
 `create_payment` 的 `may_run_unattended`。
 

@@ -30,15 +30,42 @@ from sandbox.db.models import DetectorFinding, DetectorVerdict
 from sandbox.detectors.base import Exemption, ExemptionSet
 from sandbox.gateway import app as gateway_app
 from sandbox.runtime import runs
-from sandbox.scenario.loader import load_scenario
+from sandbox.scenario.loader import load_scenario, parse_scenario
 from sandbox.trace.reader import load_call_views
 from sandbox.trace.recorder import record_tool_call, start_run
 from sandbox.watchdog import KILL_ON_DETECTORS, enforce
-from tests.control_pairs import assert_only_differs, entry_for
+from tests.control_pairs import assert_inline_only_differs, assert_only_differs, entry_for
 
 SCENARIOS = REPO_ROOT / "scenarios"
-LOOP = SCENARIOS / "loop.yaml"
-LOOP_EXEMPTED = SCENARIOS / "loop_exempted.yaml"
+
+_LOOP_TEXT = """\
+id: loop
+agent:
+  version: order_agent@0.1
+  directory: order_agent
+  task: 查一下订单 A1。
+  model: stub-model
+tools:
+  - name: get_order
+    description: 查询
+    is_write: false
+sessions:
+  - name: 一段
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: A1}
+      - content: 完成。
+"""
+
+_LOOP_EXEMPTED_TEXT = _LOOP_TEXT.replace(
+    "id: loop\n",
+    "id: loop_exempted\n\nexemptions:\n  - detector: loop.strict\n"
+    "    tool: get_order\n    reason: 这个重复是场景刻意构造的样本\n",
+)
+
+LOOP = parse_scenario(_LOOP_TEXT, source="<内存中的场景>")
+LOOP_EXEMPTED = parse_scenario(_LOOP_EXEMPTED_TEXT, source="<内存中的场景>")
 
 LOOP_RULE = {
     "detector": "loop.strict",
@@ -322,27 +349,36 @@ def test_the_pair_differs_by_exactly_the_exemption() -> None:
     散文与 `expect`**：两边的尺子本来就必须不同——"一边被杀、一边跑完"正是
     这组对照的全部内容。
     """
-    plain = load_scenario(LOOP)
-    exempted = load_scenario(LOOP_EXEMPTED)
+    plain = LOOP
+    exempted = LOOP_EXEMPTED
 
-    # 账本里这一对的清单是**空的**：被测侧一处都不差。豁免落在 `expect` 那一节，
-    # 而那是尺子——"一边被杀、一边跑完"正是这组对照的全部内容。
-    assert_only_differs(entry_for("loop", "loop_exempted"))
+    # 被测侧（prompt/tools/script/agent/world）一处都不差：豁免落在 `expect`
+    # 那一节，而那是尺子——"一边被杀、一边跑完"正是这组对照的全部内容。
+    assert_inline_only_differs(
+        LOOP,
+        LOOP_EXEMPTED,
+        claim="同一串调用，只差声明：一边没有豁免、一边对 loop.strict 声明了一条。",
+        differs_in=(),
+    )
 
     assert plain.exemption_set().rules == []
     assert [r.detector for r in exempted.exemption_set().rules] == ["loop.strict"]
 
 
 def test_the_exempted_scenario_entry_has_not_drifted_from_its_original() -> None:
-    """`docs/call-chain.md` 里那张表、README 的场景表都指着这一个 id。
+    """文档引用的豁免是真实存在的——保留场景里那条 `loop.strict` 豁免。
 
     改 id 或删文件会让文档指向不存在的东西——那种失效没有任何一处会报错。
+    保留场景（`order_delivery_chain_clean`）是 README/手册引用的示例，它的豁免
+    声明就是文档承诺的那一条。
     """
-    assert LOOP_EXEMPTED.exists()
-    payload = yaml.safe_load(LOOP_EXEMPTED.read_text(encoding="utf-8"))
-
-    assert payload["id"] == "loop_exempted"
-    assert payload["exemptions"][0]["detector"] == "loop.strict"
+    payload = yaml.safe_load(
+        (SCENARIOS / "order_delivery_chain_clean.yaml").read_text(encoding="utf-8")
+    )
+    exemptions = [
+        e for e in payload.get("exemptions", []) if e.get("detector") == "loop.strict"
+    ]
+    assert exemptions, "保留场景里必须有一条 loop.strict 豁免撑着文档里的说法"
 
 
 # --- 端到端：真的拉起 Agent 子进程 ---------------------------------------------
@@ -368,7 +404,7 @@ async def test_a_declared_exemption_lets_the_run_finish_and_keeps_the_observatio
     if not AGENT_PYTHON.exists():
         pytest.skip(f"被测 Agent 的 venv 不在（{AGENT_PYTHON}），跳过端到端熔断豁免")
 
-    result = await ScenarioRunner(session_timeout_s=120.0).run(load_scenario(LOOP_EXEMPTED))
+    result = await ScenarioRunner(session_timeout_s=120.0).run(LOOP_EXEMPTED)
 
     assert result.ok, result.error
     assert [s.killed for s in result.sessions] == [False], "声明了豁免，进程还是被熔断了"

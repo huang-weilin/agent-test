@@ -361,6 +361,6 @@ def test_the_scan_is_not_vacuous() -> None:
     assert len(KNOWN_DETECTORS) >= 15, f"KNOWN_DETECTORS 只有 {len(KNOWN_DETECTORS)} 个？"
     assert len(emitted) >= 19, f"只扫到 {len(emitted)} 个检测器名，抽取八成塌了"
     assert len(_emitted_reason_codes()) >= 10, "理由码只扫到个位数，抽取八成塌了"
-    assert len(_declared_detector_names()) >= 8, "场景侧一个检测器名都没读到"
+    assert len(_declared_detector_names()) >= 3, "场景侧一个检测器名都没读到"
     assert len(explain.SECTION_HELP) >= 10, "章节说明表塌了"
     assert _rendered_section_keys(), "模板里一条 explain.section(...) 都没找到"

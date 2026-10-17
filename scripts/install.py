@@ -9,7 +9,7 @@
 3. 打印下一步：怎么启动界面、怎么跑第一个测试。
 
 **这个脚本只装框架，不装内置示例 Agent 的依赖**——示例 Agent 有自己独立的
-venv（`agents/*/.venv`，刻意和框架隔离，见 `agents/react_demo/README.md`）。
+venv（`agents/*/.venv`，刻意和框架隔离，见 `agents/order_agent/README.md`）。
 想跑示例 Agent 时，按那份 README 装它自己的依赖即可。
 """
 

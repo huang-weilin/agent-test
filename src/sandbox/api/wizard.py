@@ -549,7 +549,7 @@ def session_scripts(
     if answers.shape == "relay":
         # 脚本与 `cross` 那一趟**逐字相同**：串联要证明的是"换人"这一个变量
         # 造成了归因的翻转，脚本不一样的话，结论的差别就说不清是谁造成的。
-        # 见 `scenarios/cross_session_handoff.yaml` 与它的对照支。
+        # 见 `tests/test_memory_drift.py` 内联构造的对照支。
         return [script, _after(write, script, "接手的人又做了一遍。")]
     if answers.shape == "overnight":
         return [script, _after(write, script, "夜里它自己又动了一次。")]

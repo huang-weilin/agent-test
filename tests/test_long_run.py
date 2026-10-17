@@ -29,11 +29,47 @@ from sandbox.detectors.base import ExemptionSet
 from sandbox.detectors.loop import LoopDetector, split_by_occasion
 from sandbox.formatting import span_human
 from sandbox.mock.toolspec import SAMPLE_DUE_OFFSETS, MockState
-from sandbox.scenario.loader import load_scenario
+from sandbox.scenario.loader import parse_scenario
 from sandbox.scenario.runner import SessionOutcome
 from sandbox.scenario.spec import SessionSpec
 
-SCENARIO = REPO_ROOT / "scenarios" / "long_run_overnight.yaml"
+_LONG_RUN_TEXT = """\
+id: long_run_inline
+agent:
+  version: order_agent@0.1
+  directory: order_agent
+  task: 帮我看看订单 B2 是不是该付了。
+  model: stub-model
+tools:
+  - name: get_order
+    description: 查询
+    is_write: false
+  - name: create_payment
+    description: 付款
+    is_write: true
+sessions:
+  - name: 白天·还没到期
+    task: 帮我看看订单 B2 是不是该付了。
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: B2}
+      - content: 订单 B2 还没到期，先不付。
+  - name: 隔了一晚·已逾期
+    after_gap_s: 108000
+    task: 帮我看看订单 B2 是不是该付了。
+    script:
+      - tool_calls:
+          - name: get_order
+            arguments: {order_id: B2}
+      - tool_calls:
+          - name: create_payment
+            arguments: {order_id: B2, amount: 249.0}
+      - content: 订单 B2 已逾期，已完成支付 249 元。
+expected_charges: 1
+"""
+
+SCENARIO = parse_scenario(_LONG_RUN_TEXT, source="<内存中的场景>")
 AGENT_PYTHON = REPO_ROOT / "agents" / "react_demo" / ".venv"
 
 
@@ -182,7 +218,7 @@ def test_resetting_re_anchors_the_world_instead_of_freezing_a_date() -> None:
 
 
 def test_a_session_carries_the_task_the_user_said() -> None:
-    scenario = load_scenario(SCENARIO)
+    scenario = SCENARIO
     assert scenario.sessions[1].task is not None
     assert scenario.sessions[1].after_gap_s == 108000
 
@@ -193,14 +229,14 @@ def test_a_negative_gap_is_refused() -> None:
 
 
 def test_only_a_scenario_with_a_gap_is_a_long_run() -> None:
-    scenario = load_scenario(SCENARIO)
+    scenario = SCENARIO
     assert scenario.is_long_run()
     assert scenario.virtual_span_s() == 108000
 
 
 def test_the_declared_offset_accumulates_over_sessions() -> None:
     """第 k 段会话开始时世界该走到哪儿——这是**声明值**，用来和时钟对账。"""
-    scenario = load_scenario(SCENARIO)
+    scenario = SCENARIO
     assert scenario.offset_before(0) == 0
     assert scenario.offset_before(1) == 108000
 
@@ -342,7 +378,7 @@ async def _run_overnight(temp_db: str):
     from sandbox.scenario.runner import ScenarioRunner
 
     _require_agent()
-    scenario = load_scenario(SCENARIO)
+    scenario = SCENARIO
     return await ScenarioRunner(session_timeout_s=120.0).run(scenario)
 
 

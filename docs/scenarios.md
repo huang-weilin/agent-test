@@ -203,8 +203,8 @@ mock 工具表，Agent 调一个它没被声明过的工具会被**转发出去*
 不声明的话，检测器只能拿数值的**相对差**去猜，而那个猜法有个实测出来的后果：
 页码从 1 涨到 10 时，第 1 次和第 6 次的相似度只剩 0.72，于是**一串连续翻页被切成
 好几个簇**，每一簇都够不着告警条数（8）——报告里于是出现两条"判为正常遍历"，
-而它其实一次都没停。`scenarios/loop_paging_unbounded.yaml` 与
-`loop_paging_bounded.yaml` 是这一对：世界、任务、工具声明一字不差，脚本里差的只是
+而它其实一次都没停。`tests/test_loop_paging.py` 内联构造了这一对：世界、任务、
+工具声明一字不差，脚本里差的只是
 翻页那几步——一边翻到第 5 页就停了，另一边一路翻下去，末尾那句汇报也跟着不同。
 （"只差页数"是简写；量出来是 5 个形状、21 处叶子，全落在多出来的那几步调用上。
 逐条判据在 `tests/control_pairs.py` 的账本里。）`docs/detectors.md` 第三节有这两个
@@ -277,13 +277,13 @@ parameters:
   | `{}` | 整份声明不设标准（`parameters` 的默认值） |
 
   前两行与第四行的区别是**受控实验**：两份场景脚本、任务、世界、工具名一字不差，
-  唯一的差别是那一行——`scenarios/schema_keys_undeclared.yaml`（通过）与
-  `scenarios/schema_empty_properties.yaml`（每一次调用都被拒）。
+  唯一的差别是那一行——`tests/test_undeclared_keys.py` 内联构造了「通过」那支，
+  `tests/test_tool_schema_liveness.py` 内联构造了「每一次调用都被拒」那支。
 
 `parameters` 写空（`{}`）是合法的：**没声明就没标准**，边界上不核对它。这不是
 漏检，是如实的。跨运行的那一份证据在审计页上（状态 `invalid_args`，整行标出来）。
 
-**活样本在 `scenarios/schema_rejected.yaml`**：四种写错的方式（`enum` / `minimum` /
+**活样本在 `tests/test_tool_schema_liveness.py` 的内联构造里**：四种写错的方式（`enum` / `minimum` /
 `maximum` / 金额上限）各被拒一次，最后再正常调用一次——**被拒的是参数，不是工具**。
 它同时钉住钱那一半：`expected_charges: 0` 说的是"那笔违规的支付一次都没落到目标系统
 上"，而放行它的代价正是**地面真值本身被污染**。
@@ -334,8 +334,8 @@ Agent 动手是**响应**（他要求做的）；无人值守时，同样的调�
 **一段会话里调用是什么顺序，报告里也能看到。** 另一节把每段会话的调用按发生顺序
 排成一条链（`scenario/call_chain.py`），标出没成功的那几次、写明"紧接着发生的是
 什么"。同样是陈述不是判定：目标系统回了个错，是发生在这条链上的事，不是被测对象
-做错了事。要让它有东西可看，场景里得真制造一次失败——`scenarios/target_error.yaml`
-就是干这个的（让 Agent 去问一个不存在的订单）。规则见 `docs/call-chain.md`。
+做错了事。要让它有东西可看，场景里得真制造一次失败——`tests/test_call_chain.py`
+内联构造的那一支就是干这个的（让 Agent 去问一个不存在的订单）。规则见 `docs/call-chain.md`。
 
 ### `world`
 
@@ -359,8 +359,8 @@ world:
 它存在的理由只有一个：**记忆中毒那一族的受控实验需要一句"我们确定写进去了"的
 文本**。通用的中毒检测要把工具返回体的正文和记忆内容对一遍，而边界上刻意不留正文
 （只留参数指纹与返回体字节数），所以能做的是受控实验——注入的文本由场景作者指定，
-问题只剩"它有没有被带进记忆"。见 `scenarios/memory_poisoned.yaml` 与它的对照支
-`scenarios/memory_note_clean.yaml`：同一段脚本、同一条判据，唯一的差别是世界里那句话。
+问题只剩"它有没有被带进记忆"。`tests/test_memory_drift.py` 内联构造了这一对：
+同一段脚本、同一条判据，唯一的差别是世界里那句话。
 
 **它是测试的一部分，不是被测对象的一部分。** 配置指纹里 `world` 单独成节，且归在
 "测试变了"那一类（和 `script`、`expect` 一样）：换了世界里的那句话之后，"失败少了
@@ -403,8 +403,8 @@ world:
 "这次不放行任何出口"，是一件很重的声明——所以它要求每个工具都交代自己的真实
 目标，不能悄悄退化成前者。
 
-活样本是 `scenarios/autonomous_night_egress_allowed.yaml` 与
-`autonomous_night_egress_blocked.yaml`：一字不差的脚本、工具、会话形状，唯一的
+活样本由 `tests/test_egress.py` 与 `tests/test_generic_egress.py` 内联构造：
+一字不差的脚本、工具、会话形状，唯一的
 变量是名单里有没有支付网关那台主机——一支的钱真的扣了（`autonomy.unauthorized`
 /fail），另一支被挡在边界上（warning + `unauthorized_attempt_blocked`），扣款
 1 笔对 0 笔。**目标由调用方指定的那一对**（`autonomous_night_generic_egress_*`）
@@ -461,8 +461,8 @@ exemptions:
   两个键各自由谁答得了、哪些检测器根本不查，见 `docs/detectors.md` 第二节那张表。
 - **熔断也认这两条规则。** 长时运行的看门狗读的是同一份豁免（它随开跑的 payload 过线），
   所以声明了豁免的循环不会被带外杀死——否则会出现"进程在第 3 次调用时被杀、报告却写着
-  已豁免、通过"这种自相矛盾的结论。受控对照见 `scenarios/loop_exempted.yaml`（与
-  `loop.yaml` 一字不差的脚本，只多一条声明，前者跑完、后者被熔断）。
+  已豁免、通过"这种自相矛盾的结论。受控对照见 `tests/test_watchdog.py` 的内联构造（一字不差的脚本，只多一条声明，
+  一支跑完、另一支被熔断）。
 - 判定规则的完整清单见 `docs/detectors.md` 第二节。
 
 ### `memory`
@@ -633,8 +633,7 @@ Agent 在进程内直接扣款、mock 自己重放了请求、代理放行了一
 "是谁的锅"不需要猜——它由我们回滚到了哪儿唯一确定。这正是把记忆快照做成
 **操纵面**（而不是观测面）换来的东西。
 
-对照 `scenarios/cross_session_duplicate.yaml` 和
-`scenarios/cross_session_memory_loss.yaml`：两份报告的 verdict、fingerprint、
+`tests/test_memory_drift.py` 内联构造了这一对照：两份报告的 verdict、fingerprint、
 工具名完全相同，只有 `reason_code` 和"该去修哪儿"不同。
 
 ### 三方受控实验
