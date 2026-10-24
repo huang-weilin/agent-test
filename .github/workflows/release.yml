@@ -1,0 +1,66 @@
+name: build-release
+
+# 打 tag（例如 v0.1.0）时自动打包源码 zip 并发布到 GitHub Release。
+# 发布后，用户从 Release 页面下载 zip，解压后双击 install.bat / start_ui.bat 即可使用。
+# 打包规则与 .gitignore 保持一致：排除虚拟环境、运行数据、密钥和缓存。
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assemble source zip
+        run: |
+          set -e
+          mkdir -p dist/agent-test
+          rsync -a \
+            --exclude='.git' \
+            --exclude='.venv' \
+            --exclude='venv' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='*.egg-info' \
+            --exclude='build' \
+            --exclude='dist' \
+            --exclude='.pytest_cache' \
+            --exclude='.mypy_cache' \
+            --exclude='.ruff_cache' \
+            --exclude='.coverage' \
+            --exclude='htmlcov' \
+            --exclude='data' \
+            --exclude='*.db' \
+            --exclude='*.sqlite' \
+            --exclude='*.sqlite3' \
+            --exclude='.env' \
+            --exclude='.env.*'
+            --exclude='!.env.example' \
+            --exclude='.agent_sandbox_local.json' \
+            --exclude='.agent_sandbox_prefs.json' \
+            --exclude='.claude' \
+            --exclude='node_modules' \
+            --exclude='web/dist' \
+            --exclude='*.log' \
+            --exclude='.tmp' \
+            ./ dist/agent-test/
+          cd dist
+          zip -r "agent-test-${GITHUB_REF_NAME}.zip" agent-test
+          sha256sum "agent-test-${GITHUB_REF_NAME}.zip" > "agent-test-${GITHUB_REF_NAME}.zip.sha256"
+          ls -lh
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/agent-test-*.zip
+            dist/agent-test-*.zip.sha256
+          generate_release_notes: true
