@@ -15,6 +15,8 @@ venv（`agents/*/.venv`，刻意和框架隔离，见 `agents/order_agent/README
 
 from __future__ import annotations
 
+import glob
+import os
 import shutil
 import subprocess
 import sys
@@ -41,6 +43,14 @@ def _find_python() -> str | None:
         candidates.append((py_launcher, ["-3"]))
     if shutil.which("python"):
         candidates.append(("python", []))
+    # 常见安装目录探测：自动安装刚结束时 PATH 可能还没刷新，按路径找更可靠。
+    for pattern in (
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python", "Python3*", "python.exe"),
+        "C:\\Python3*\\python.exe",
+        os.path.join(os.environ.get("ProgramFiles", ""), "Python3*", "python.exe"),
+    ):
+        for found in sorted(glob.glob(pattern), reverse=True):
+            candidates.append((found, []))
     for exe, args in candidates:
         try:
             proc = subprocess.run(

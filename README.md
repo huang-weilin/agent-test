@@ -13,7 +13,7 @@
 
 ### 1. 准备 Python
 
-需要 **Python 3.12 或更新版本**（安装时勾选"Add python.exe to PATH"）。没有的话去 [python.org](https://www.python.org/downloads/) 下载安装。
+需要 **Python 3.12 或更新版本**。没装也没关系：首次双击 `install.bat` 时脚本会自动检测，**检测不到会帮你自动安装**（优先用 Windows 自带的 winget，不行就从官网或国内镜像下载静默安装）。只有自动安装失败时，才需要手动去 [python.org](https://www.python.org/downloads/) 下载安装（安装时勾选"Add python.exe to PATH"）。
 
 ### 2. 安装并启动
 
