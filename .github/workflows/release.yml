@@ -22,7 +22,8 @@ jobs:
       - name: Assemble source zip
         run: |
           set -e
-          mkdir -p dist/agent-test
+          mkdir -p dist
+          mkdir -p /tmp/pkg/agent-test
           rsync -a \
             --exclude='.git' \
             --exclude='.venv' \
@@ -42,7 +43,7 @@ jobs:
             --exclude='*.sqlite' \
             --exclude='*.sqlite3' \
             --exclude='.env' \
-            --exclude='.env.*'
+            --exclude='.env.*' \
             --exclude='!.env.example' \
             --exclude='.agent_sandbox_local.json' \
             --exclude='.agent_sandbox_prefs.json' \
@@ -51,10 +52,10 @@ jobs:
             --exclude='web/dist' \
             --exclude='*.log' \
             --exclude='.tmp' \
-            ./ dist/agent-test/
-          cd dist
-          zip -r "agent-test-${GITHUB_REF_NAME}.zip" agent-test
-          sha256sum "agent-test-${GITHUB_REF_NAME}.zip" > "agent-test-${GITHUB_REF_NAME}.zip.sha256"
+            ./ /tmp/pkg/agent-test/
+          cd /tmp/pkg
+          zip -r "${GITHUB_WORKSPACE}/dist/agent-test-${GITHUB_REF_NAME}.zip" agent-test
+          sha256sum "${GITHUB_WORKSPACE}/dist/agent-test-${GITHUB_REF_NAME}.zip" > "${GITHUB_WORKSPACE}/dist/agent-test-${GITHUB_REF_NAME}.zip.sha256"
           ls -lh
 
       - name: Publish release
